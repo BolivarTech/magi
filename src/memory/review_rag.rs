@@ -590,7 +590,10 @@ impl RagSource for StoreRag<'_> {
         if !self.declared.swap(true, Ordering::SeqCst) {
             declare_index(&mut a, &self.doc_index);
             declare_lexical(&mut a, self.index);
-            if memory && self.docs_unavailable {
+            // MAGI FIX (MS3 §6 loop7): a store that was not opened, with an embedder to search
+            // it, left documentation out undeclared unless the caller also set the flag.
+            let not_opened = self.docs.is_none() && self.embedder.is_some();
+            if memory && (self.docs_unavailable || not_opened) {
                 a.trimmed
                     .push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
             }
@@ -680,7 +683,9 @@ pub fn outbound_prep_reserve_secs(batches: usize, calls_embedder: bool) -> u64 {
 /// documentation preparation, bound to each review's own content by
 /// [`RagSource::for_review`] (the pipeline builds the index and the content source).
 pub struct ReviewRag<'a> {
-    /// The documentation index, when it could be opened for this review.
+    /// The documentation index, when it could be opened for this review. `None` with the
+    /// history and an embedder present is declared `index unavailable` by the first batch, flag
+    /// or not (`a_documentation_store_that_was_not_opened_is_declared_unavailable`).
     pub docs: Option<&'a ReviewDocStore>,
     /// The review history; `None` without a database.
     pub history: Option<&'a ReviewHistoryStore>,
