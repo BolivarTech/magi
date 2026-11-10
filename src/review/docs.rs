@@ -847,24 +847,12 @@ fn py_doc_chunks(path: &str, lines: &[&str]) -> Vec<DocChunk> {
 /// `x = """..."""` is data. Another language with an extractor gives no chunk. O(n) in the text.
 ///
 /// # Arguments
-///
 /// * `path` - Path recorded in each chunk; its extension picks the language.
 /// * `text` - The file's content.
 /// * `registry` - Languages the review has extractors for; a file outside it gives nothing.
 ///
 /// # Returns
-///
 /// The chunks in file order.
-///
-/// # Examples
-///
-/// ```
-/// use magi_rs::review::docs::netted_chunks;
-/// use magi_rs::review::languages::LanguageRegistry;
-///
-/// let c = netted_chunks("a.rs", "/// Adds.\nfn add() {}\n", &LanguageRegistry::new()).0;
-/// assert_eq!(c[0].section, "add");
-/// ```
 pub(crate) fn chunk_doc_comments(
     path: &str,
     text: &str,
@@ -1162,13 +1150,11 @@ pub fn revision_doc_sources(
 
 /// The sources every local ref still reaches: `HEAD` and each branch and tag tip.
 ///
-/// "Reaches" is the tree at each ref's tip, not its history: a version that lives only in a
-/// branch's history is deleted and indexed again if a later review needs it (a cost, never a
-/// loss: the index is derived). An annotated tag's id is its tag object, which `ls-tree` peels
-/// to its tree, so it lists like a branch. An unborn HEAD is told apart from a broken git:
-/// `rev-parse` fails and no ref exists gives `Some(empty)`; `rev-parse` failing while refs
-/// exist, or `for-each-ref` failing, gives `Ok(None)`, because a git that does not answer never
-/// deletes anything. O(refs x tree entries) local git calls.
+/// "Reaches" is the tree at each ref's tip, not its history: a version only in a branch's
+/// history is deleted and indexed again if needed (a cost, never a loss). An annotated tag
+/// peels to its tree. An unborn HEAD with no ref gives `Some(empty)`; `rev-parse` failing while
+/// refs exist, or `for-each-ref` failing, gives `Ok(None)`: a git that does not answer deletes
+/// nothing. O(refs x tree entries) local git calls.
 ///
 /// # Returns
 ///
