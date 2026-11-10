@@ -109,7 +109,9 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False):
         texts: The scenario's assertion texts.
         index: Position of the assertion in *texts*.
         run_id: The run it came from.
-        run: Its ``RunResult``, neither missing nor hung.
+        run: Its ``RunResult``, neither missing nor hung; every body it
+            carries is ``bytes`` (``ProductOutput``, ``RunResult``'s fields),
+            so a needle is never compared with text.
         needles: Byte strings that must appear in no output.
         what: Short name of what the needles are, for the failure detail.
         relayed: Whether the run's forwarded requests are read too.
