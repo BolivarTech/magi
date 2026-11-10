@@ -1283,8 +1283,9 @@ fn prompt_of(batch: &ReviewBatch) -> String {
 }
 
 /// Writes a batch's retrieved context after its code: [`CONTEXT_HEADING`], then each item in
-/// its frame ([`context_frame`]), its text escaped with [`escape_fence`] (a fixed point, so a
-/// source that already escaped is unchanged). Nothing is written without items. O(bytes).
+/// its frame ([`context_frame`]), its text masked, then escaped with [`escape_fence`] (a fixed
+/// point, so a source that already did both is unchanged), so a body never holds `<<<`
+/// (`backstop_masks_then_escapes`). Nothing is written without items. O(bytes).
 fn write_context(prompt: &mut String, items: &[ContextItem]) {
     if items.is_empty() {
         return;
@@ -1301,7 +1302,8 @@ fn write_context(prompt: &mut String, items: &[ContextItem]) {
         prompt.push('\n');
         // MAGI FIX (T3.7): a containing unit is numbered like the code under review.
         let text = item.rendered();
-        prompt.push_str(&escape_fence(&text));
+        // MAGI FIX (MS3 §6 loop9): masked after the escaping, `<<` + a mask wrote `<<<`.
+        prompt.push_str(&escape_fence(&mask_secrets(&text)));
         if !text.ends_with('\n') {
             prompt.push('\n');
         }
