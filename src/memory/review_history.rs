@@ -44,6 +44,11 @@ const FILES_PER_QUERY: usize = 400;
 /// trimmed. Past it the newest are kept and the cut is declared.
 pub const MAX_HISTORY_PER_BATCH: usize = 32;
 
+/// Rows the `due` count reads at most: its `total` (the review's backlog) saturates here, so the
+/// count costs O(this) index entries, not O(history). Fifty times the per-review reclassification
+/// cap, a starting point: a backlog beyond it only says "at least this many".
+pub const MAX_COUNTED_HISTORY: usize = 10_000;
+
 /// The columns every read selects, in the order [`RawRow`] reads them.
 const COLUMNS: &str = "id, file, line, reviewed_commit, finding_blob, status, created_at";
 
@@ -276,7 +281,8 @@ impl ReviewHistoryStore {
     }
 
     /// At most `limit` entries, of any status, least recently checked first (`checked_at`,
-    /// then `created_at`, then `id`), and how many entries exist in total.
+    /// then `created_at`, then `id`), and how many entries exist in total, counted up to
+    /// [`MAX_COUNTED_HISTORY`] (past it, `total` is that bound).
     ///
     /// Every status is due: a weak reject can become attended, and an attended entry whose
     /// change was reverted goes back to a weak reject. An entry that never resolves is checked
@@ -288,22 +294,25 @@ impl ReviewHistoryStore {
     /// `total` matches the rows returned even while another process writes.
     ///
     /// Complexity: the rows come off the `code_review_history_due` index in order, stopping at
-    /// `limit` (no sort); the count reads the narrowest index, O(n) entries with no row read or
-    /// decrypted; O(limit) to decrypt. Pinned by
+    /// `limit` (no sort); the count reads at most [`MAX_COUNTED_HISTORY`] entries of the
+    /// narrowest index, with no row read or decrypted; O(limit) to decrypt. Pinned by
     /// `the_bounded_history_reads_are_served_by_their_indexes_not_by_a_full_sort`.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
     pub fn due(&self, limit: usize) -> Result<(Vec<HistoryEntry>, usize), MemoryError> {
-        self.due_bounded(limit, usize::MAX)
+        self.due_bounded(limit, MAX_COUNTED_HISTORY)
     }
 
-    /// [`Self::due`] with the count stopped at `count_cap`.
+    /// [`Self::due`] with the count stopped at `count_cap`: `total` is at most `count_cap`
+    /// (`the_due_count_stops_at_its_bound_instead_of_reading_the_whole_history`).
+    // MAGI FIX (MS3 §6 loop7): the count read every row on every review, O(history).
     fn due_bounded(
         &self,
         limit: usize,
-        _count_cap: usize,
+        count_cap: usize,
     ) -> Result<(Vec<HistoryEntry>, usize), MemoryError> {
+        let cap = i64::try_from(count_cap).unwrap_or(i64::MAX);
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         // MAGI FIX (MS3 §6 loop4): the count and the rows took two locks, so a write between
         // them made `total` disagree with the rows.
@@ -313,7 +322,11 @@ impl ReviewHistoryStore {
             let c = self.locked_conn();
             let snapshot = c.unchecked_transaction().map_err(db_err)?;
             let total: i64 = snapshot
-                .query_row("SELECT COUNT(*) FROM code_review_history", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM (SELECT 1 FROM code_review_history LIMIT ?1)",
+                    [cap],
+                    |r| r.get(0),
+                )
                 .map_err(db_err)?;
             let rows = raw_rows_in(&snapshot, &due_sql(), [limit])?;
             snapshot.commit().map_err(db_err)?;

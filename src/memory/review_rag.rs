@@ -199,7 +199,8 @@ pub struct RecordStats {
     pub reclassified: usize,
     /// New entries recorded.
     pub recorded: usize,
-    /// Due entries left for a later review (the total minus those checked now).
+    /// Due entries left for a later review (the total minus those checked now; the total is
+    /// counted up to `MAX_COUNTED_HISTORY`, so a larger history reads as at least that).
     pub backlog: usize,
 }
 
