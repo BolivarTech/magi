@@ -604,22 +604,13 @@ impl RagSource for StoreRag<'_> {
     /// The batch's context: containing units, definitions and callers from the review's own
     /// content, then documentation and history when there is a database and an embedder.
     ///
-    /// The query is embedded only when something could still enter the budget, and before any
-    /// store is touched. A missing embedder is declared as `without_embedder`, a run without a
-    /// database as `without_memory`; a failing embedder or store degrades, never fails. A
-    /// configured embedder that fails also declares, once per review, "the embedder did not
-    /// answer" for documentation and history, so the report tells it from a missing one.
-    ///
-    /// "Something could still enter" is checked against [`CONTEXT_ITEM_FRAME_TOKENS`], the floor
-    /// of any item's cost: a real item also costs its text, so with little room left the query
-    /// may be embedded for items that then do not fit (declared as trimmed). The check only
-    /// saves the call when nothing at all can enter.
-    ///
-    /// The query is embedded even when the documentation cannot be searched (no store, or an
-    /// index unavailable for the revision): the history goes with the embedder (RV07, CP2 MS3
-    /// loop 14), so the call is also the review's check that the embedder answers
-    /// (`a_down_embedder_is_seen_even_when_the_index_is_unavailable`). The query is masked
-    /// ([`doc_search_query`]) like every other byte that leaves the process.
+    /// The query is embedded, masked ([`doc_search_query`]), before any store is touched and only
+    /// when an item could still enter (room of at least [`CONTEXT_ITEM_FRAME_TOKENS`], every
+    /// item's floor; one that then does not fit is declared trimmed). A missing embedder is
+    /// `without_embedder`, no database `without_memory`; a failing embedder or store degrades,
+    /// declared once ("the embedder did not answer"), never fails. An unreadable definition or
+    /// caller file leaves out its own items, declared. It is embedded even when the index cannot
+    /// be searched: the history goes with the embedder (RV07), so it is also the embedder check.
     async fn context_for(&self, batch: &ReviewBatch) -> Result<Assembled, ReviewError> {
         let text = batch_text(batch);
         let mut units = Vec::new();
@@ -746,16 +737,12 @@ fn query_reserve_secs(batches: usize) -> u64 {
 /// the documentation indexing ([`REINDEX_TIMEOUT_SECS`]) and one query embedding per batch.
 /// A review with no store or no embedder calls no one and reserves nothing.
 ///
-/// It counts each bound whole, not a typical latency (a query embedding answers in about a
-/// second against its 30 s bound), so a many-batch review under a tight `--timeout` can be
-/// refused though it would have fit: the fail-closed direction of RV06 (a refused review sends
-/// no byte out), declared, not a defect.
+/// Each bound counts whole, not a typical latency, so a many-batch review under a tight
+/// `--timeout` can be refused though it would fit: RV06's fail-closed direction, declared.
 ///
-/// This is the reserve of the runner's check, made before the probe and the indexing. The
-/// pipeline checks again after them with [`ReviewRag`]'s `outbound_reserve_secs`, which keeps
-/// only the query embeddings still to come; both count those with the same `query_reserve_secs`,
-/// so the two bounds never drift apart
-/// (`the_two_stage_four_reserves_differ_only_by_what_runs_between_the_checks`).
+/// The runner's check uses this before the probe and the indexing; the pipeline's later check
+/// uses [`ReviewRag`]'s `outbound_reserve_secs` (the queries still to come); both count those
+/// with `query_reserve_secs`, so they never drift apart.
 ///
 /// # Arguments
 ///
@@ -1030,16 +1017,10 @@ type Listed = (DocSource, Option<Vec<u8>>);
 /// through `sources` and keyed by [`worktree_key`]; a path that quotes a secret is never read,
 /// and a path given twice is one source.
 ///
-/// A file that cannot be read (a hard link, a link that escapes the workspace or names a
-/// directory, a file another process holds open) is left out with one WARN naming it and
-/// declared (`unreadable`, `an_unreadable_working_tree_source_is_declared_not_only_logged`), as MS2
-/// leaves a listed file out of a review: one such file never costs the rest their documentation.
-/// The size cap cuts the source (declared as `size_capped`).
-///
-/// Memory: the bytes of every listed file are held until the missing ones are chunked. They are
-/// bounded: `sources` is the review's `CachedSource`, whose total cap (`MAX_REVIEW_TOTAL_BYTES`)
-/// refuses a read past it (then the source is `size_capped`), so the listing holds at most that
-/// much, and the peak is at most twice it with the cache's own copy.
+/// A file that cannot be read (a hard or escaping link, one another process holds open) is left
+/// out with one WARN and declared (`unreadable`), never costing the rest; the size cap cuts the
+/// source (`size_capped`). Memory: the listed bytes are held until chunked, bounded by the
+/// `CachedSource`'s `MAX_REVIEW_TOTAL_BYTES` (twice it at peak with the cache's copy).
 ///
 /// # Errors
 ///
@@ -1409,11 +1390,9 @@ pub async fn reindex_or_degrade(
 ///
 /// [`MemoryError`] of the store, never swallowed.
 ///
-/// Not one transaction, on purpose: each step is correct on its own. A reclassified entry's new
-/// status is git's evidence about that entry whether or not this review's findings are then
-/// recorded, and `touch` only moves it back in the due queue. If `record` fails, the error is
-/// returned (and logged by the caller), the review's own findings are not in the history, and
-/// nothing stored is wrong; the next review records its own findings again.
+/// Not one transaction, on purpose: a reclassified status is git's evidence whether or not the
+/// findings are then recorded, and `touch` only moves an entry in the due queue; a failed
+/// `record` is returned and leaves nothing stored wrong.
 pub fn record_review(
     history: &ReviewHistoryStore,
     findings: &[HistoryEntry],
@@ -1446,9 +1425,8 @@ pub fn record_review(
 
 /// Deletes the documentation sources nothing reaches any more (RV-S39): with `git`, the live
 /// set is every local ref's sources plus `worktree` when the review listed the working tree;
-/// without git, `worktree` alone. A review that did not list the working tree keeps its
-/// working-tree sources for the next one that does. Without git and without a listed working
-/// tree nothing is known to be live, so nothing is deleted. O(refs x tree entries) git calls.
+/// without git, `worktree` alone; with neither, nothing is deleted. A review that did not list
+/// the working tree keeps those sources. O(refs x tree entries) git calls.
 ///
 /// # Arguments
 ///
