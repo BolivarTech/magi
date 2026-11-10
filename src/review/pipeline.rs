@@ -1409,7 +1409,8 @@ fn context_egress(item: ContextItem) -> ContextEgress {
 /// most `charged`, the cost the source charged against the batch budget (RV04). Only optional
 /// items (definitions, callers, documentation, history) are trimmed, each declared in
 /// `summary.trimmed`; a containing unit is mandatory (RV07(1)) and stays, so a growth that only
-/// the units could pay is sent within the margin of the batch fraction. O(items).
+/// the units could pay is sent within the margin of the batch fraction, and returned: the tokens
+/// still over `charged`, which the caller logs (`unit_growth_overflow_is_reported`). O(items).
 fn pay_for_growth(
     kept: &mut Vec<(ContextItem, Option<&'static str>)>,
     charged: usize,
@@ -1431,7 +1432,7 @@ fn pay_for_growth(
             });
         }
     }
-    0
+    sent.saturating_sub(charged)
 }
 
 /// The pattern a documentation or history item was sent masked for, if any: these two kinds
@@ -1501,7 +1502,17 @@ async fn prepare_contexts(
         }
         kept.sort_by_key(|(item, _)| kind_rank(&item.kind));
         // MAGI FIX (MS3 §6 loop6): what is sent is charged, masks included (R4 Caspar).
-        let _ = pay_for_growth(&mut kept, charged, summary);
+        // MAGI FIX (MS3 §6 loop8): an overshoot only the units could pay was sent unsaid.
+        let over = pay_for_growth(&mut kept, charged, summary);
+        if over > 0 {
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::WARN,
+                batch = batch.index,
+                tokens = over,
+                "masking grew a containing unit past its charge; it is sent whole"
+            );
+        }
         for (item, pattern) in &kept {
             // MAGI FIX (MS3 §6 loop1): RV22 amended declares a file sent masked, the
             // documentation and history included.
