@@ -559,20 +559,30 @@ impl ReviewDocStore {
     }
 
     /// The `k` chunks of `vectors` most similar to `query`, best first; only their section and
-    /// text are read and decrypted. A `query` of another dimension than `vectors` matches nothing,
-    /// and a hit whose row was deleted since `vectors` was loaded is skipped.
+    /// text are read and decrypted. A `query` of another dimension than `vectors` is an error
+    /// (`dimension_mismatch_is_an_error`), and a hit whose row was deleted since `vectors` was
+    /// loaded is skipped.
     ///
     /// Complexity: O(r * d) to score plus O(r log r) to order the `r` loaded rows.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if a query fails; [`MemoryError::Crypto`] if decryption fails.
+    /// [`MemoryError::Storage`] for the dimension mismatch or a failing query;
+    /// [`MemoryError::Crypto`] if decryption fails.
     pub fn search_loaded(
         &self,
         vectors: &DocVectors,
         query: &[f32],
         k: usize,
     ) -> Result<Vec<(DocChunk, f32)>, MemoryError> {
-        if k == 0 || query.len() != vectors.dim {
+        // MAGI FIX (MS3 §6 loop8): a mismatch matched nothing in silence.
+        if query.len() != vectors.dim {
+            return Err(MemoryError::Storage(format!(
+                "a query of dimension {} against vectors of dimension {}",
+                query.len(),
+                vectors.dim
+            )));
+        }
+        if k == 0 {
             return Ok(Vec::new());
         }
         let mut scored: Vec<(f32, &str, &str)> = vectors
