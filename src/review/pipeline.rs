@@ -455,6 +455,8 @@ struct Faces {
     old: Vec<(u32, u32)>,
     /// Old-side ranges of the lines its hunks deleted (`-` lines), a subset of `old`.
     deleted: Vec<(u32, u32)>,
+    /// Old-side ranges of its containing units read from the old side, a subset of `old`.
+    old_units: Vec<(u32, u32)>,
 }
 
 /// Runs a review, in the order of the spec's §5.0.
@@ -1603,6 +1605,7 @@ fn add_unit_faces<'b>(
             let face = faces.entry(item.file.as_str()).or_default();
             if item.old_side {
                 face.old.push(range);
+                face.old_units.push(range);
             } else {
                 face.new.push(range);
             }
@@ -1941,7 +1944,9 @@ impl GateCode {
 /// as that side; the old side of a renamed file is read under its old path (`old_paths`). A
 /// line number that falls in a new range and is also a line a hunk deleted names two different
 /// lines, and a finding does not say which side it meant: it is read on the new side and marked
-/// [`GateCode::ambiguous`], so the gate never filters it ([`Gate::judge_ambiguous_side`]). A
+/// [`GateCode::ambiguous`], so the gate never filters it ([`Gate::judge_ambiguous_side`]); so is
+/// one in a new range and in an old-side containing unit, which also names two shown lines
+/// (`a_number_both_in_an_old_side_unit_and_a_new_range_is_ambiguous`). A
 /// number in a new range that is a context line on the old side is not ambiguous: the code it
 /// names is still live. A finding that named the old path of a rename is validated under its new
 /// path (RV09) and reaches this function with no side either; its old-side lines are found
@@ -1972,7 +1977,10 @@ fn gate_code(
     let (file, line) = (file?, line?);
     let face = faces.get(file)?;
     let holds = |ranges: &[(u32, u32)]| ranges.iter().any(|&(a, b)| a <= line && line <= b);
-    let ambiguous = !face.whole && holds(&face.new) && holds(&face.deleted);
+    // MAGI FIX (MS3 §6 loop7): an old-side unit's line sharing a new-range number names two
+    // shown lines as a deleted one does; it was read on the new side and could be filtered.
+    let ambiguous =
+        !face.whole && holds(&face.new) && (holds(&face.deleted) || holds(&face.old_units));
     let old_side = !(face.whole || holds(&face.new));
     let read = if !old_side {
         source.read(file)
@@ -2086,6 +2094,26 @@ mod tests {
             vec![("a.rs", 3)]
         );
         assert!(index.contains("gone"), "the validator sees both sides");
+    }
+
+    #[test]
+    fn a_number_both_in_an_old_side_unit_and_a_new_range_is_ambiguous() {
+        // [MAGI S6 MS3 loop7, R4 Melchior] An old-side unit's line and a new-side hunk line can
+        // share a number once a hunk shifts the numbering; the gate read the new side and could
+        // filter a finding meant for the unit. It is ambiguous (RV10), never filtered.
+        use crate::review::test_support::MapSource;
+        let source = MapSource::new(&[("a.rs", "x\n")], &[("a.rs", "y\n")]);
+        let face = Faces {
+            new: vec![(5, 8)],
+            old: vec![(1, 10)],
+            old_units: vec![(1, 10)],
+            ..Faces::default()
+        };
+        let faces = HashMap::from([("a.rs", face)]);
+        let code = |line| gate_code(Some("a.rs"), Some(line), &faces, &HashMap::new(), &source);
+        assert!(code(6).expect("read").ambiguous);
+        let old_only = code(2).expect("read");
+        assert!(old_only.old_side && !old_only.ambiguous);
     }
 
     #[test]
