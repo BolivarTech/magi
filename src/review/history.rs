@@ -98,8 +98,8 @@ pub struct HistoryEntry {
 
 /// The most existing entries [`reclassify_then_record`] looks at per review.
 ///
-/// Each costs at most three bounded git calls (`merge-base`, `diff` and, only before a weak
-/// reject, `rev-parse`), so one review pays at most `3 * MAX_RECLASSIFY_PER_REVIEW` of them.
+/// Each costs at most five bounded local git calls ([`classify`]), so one review pays at most
+/// `5 * MAX_RECLASSIFY_PER_REVIEW` of them.
 pub const MAX_RECLASSIFY_PER_REVIEW: usize = 200;
 
 /// Lines `a..a+b-1` of the old side that a hunk header `-a[,b]` covers; `b = 0` covers none.
@@ -167,7 +167,8 @@ fn diff_covers(text: &str, line: u32) -> Option<bool> {
 /// not an ancestor of `head` (another branch, or gone), a git
 /// failure, a hunk header that cannot be read, or `head` still at the reviewed commit.
 ///
-/// Complexity: three git calls at most, O(size of the diff of one file).
+/// Complexity: four git calls at most (`merge-base`, `diff`, `rev-parse` of `head`, and `ls-tree`
+/// on an empty diff's weak reject), five for an abbreviated stored commit; O(diff of one file).
 ///
 /// # Arguments
 /// * `entry` - the remembered finding.
