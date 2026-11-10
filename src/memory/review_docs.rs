@@ -1431,6 +1431,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dim_column_is_checked() {
+        // [MAGI S6 MS3 loop10, R1 Caspar] The `dim` column was written and never read back.
+        let (store, _dir) = store_for_test();
+        let s = (src("d.md", "k"), vec![chunk("d.md", "A", "x")]);
+        store
+            .reindex(&[s], &FakeEmbedder::new(3))
+            .await
+            .expect("dim 3");
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute("UPDATE code_review_docs SET dim = 5", [])
+            .expect("tamper");
+        let allowed = BTreeSet::from([src("d.md", "k")]);
+        assert!(matches!(
+            store.load_vectors(3, &allowed),
+            Err(MemoryError::Storage(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn vanished_source_is_an_error() {
         // [MAGI S6 MS3 loop10, R1 Melchior] A source deleted after the reindex (a wipe, another
         // process's clean-up) loaded as "no documentation"; it is now the index unavailable.
