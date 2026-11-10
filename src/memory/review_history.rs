@@ -288,7 +288,8 @@ impl ReviewHistoryStore {
     /// change was reverted goes back to a weak reject. An entry that never resolves is checked
     /// again only after all the others, so it never starves them: that rotation needs the caller
     /// to [`Self::touch`] every entry it checked, changed or not, and `record_review` does
-    /// (`record_review_touches_an_entry_whose_status_did_not_change`). Decrypts at most `limit`
+    /// (`record_review_touches_an_entry_whose_status_did_not_change`, and here, through that
+    /// caller, `the_review_caller_touches_every_checked_entry_so_the_tail_is_never_starved`). Decrypts at most `limit`
     /// rows, so the cost of a review does not depend on the size of the history. The count and
     /// the rows are read under one lock and in one read transaction, one SQLite snapshot, so
     /// `total` matches the rows returned even while another process writes.
@@ -828,6 +829,34 @@ mod tests {
             .validated_on_files(&["src/b.rs".to_string()])
             .expect("read");
         assert!(few.is_empty() && !cut);
+    }
+
+    #[test]
+    fn the_review_caller_touches_every_checked_entry_so_the_tail_is_never_starved() {
+        // [MAGI S6 MS3 loop7, R3 Melchior] `due` is starvation-free only if its caller touches
+        // every entry it checked, changed or not. Pinned here, through the production caller
+        // (`record_review`), with a git that answers nothing: no status changes, yet the entry
+        // past the per-review cap comes first in the next review.
+        struct Silent;
+        impl magi_rs::review::source::GitCommand for Silent {
+            fn run_bytes(
+                &self,
+                a: &[&str],
+            ) -> Result<Vec<u8>, magi_rs::review::error::ReviewError> {
+                Err(magi_rs::review::error::ReviewError::Git(a.join(" ")))
+            }
+        }
+        use magi_rs::review::history::MAX_RECLASSIFY_PER_REVIEW as CAP;
+        let (store, _tmp) = store_for_test();
+        let entries: Vec<HistoryEntry> = (0..=CAP)
+            .map(|i| stored(&format!("e{i:04}"), Some(1), "c1"))
+            .collect();
+        store.record(&entries).expect("record");
+        let budget = std::time::Duration::from_secs(60);
+        let review = crate::memory::review_rag::record_review;
+        review(&store, &[], "HEAD", &Silent, 10, budget).expect("first review");
+        let (next, _) = store.due(1).expect("due");
+        assert_eq!(next[0].id, format!("e{CAP:04}"), "the tail starved");
     }
 
     #[test]
