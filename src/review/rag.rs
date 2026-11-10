@@ -1399,6 +1399,20 @@ mod tests {
     }
 
     #[test]
+    fn unit_cache_keys_by_file_too() {
+        // [MAGI S6 MS3 loop8, R2 Melchior] Two reviewed files read under one old path (two
+        // `copy from` hunks) shared the first file's units, labeled with its name.
+        let reg = LanguageRegistry::new();
+        let extractor = reg.get("a.rs").expect("rust");
+        let cache = UnitCache::default();
+        let text = "fn f() {\n    x();\n}\n";
+        let a = cache.units(true, "old.rs", "a.rs", text, extractor);
+        let b = cache.units(true, "old.rs", "b.rs", text, extractor);
+        assert_eq!(cache.loads(), 2, "another reviewed file is extracted again");
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
     fn a_changed_line_inside_a_unit_already_found_is_covered_by_that_unit() {
         // [MAGI S6 MS3 loop4, R2 Balthasar] A change on an impl's header line takes the whole
         // impl (no method holds that line); a later change inside one of its methods is then
