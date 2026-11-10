@@ -526,7 +526,8 @@ impl ReviewDocStore {
     ///
     /// With rows of another identity stored, a non-empty `allowed` is an error, never an empty
     /// answer (another identity's rebuild may have wiped this review's rows); the review declares
-    /// its documentation unavailable. One snapshot. O(r) decryptions for `r` allowed rows.
+    /// its documentation unavailable; so is an allowed source no longer indexed
+    /// (`vanished_source_is_an_error`). One snapshot. O(stored sources) plus O(r) decryptions.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if another identity holds the index, a row is not of `dim` or a
@@ -543,6 +544,13 @@ impl ReviewDocStore {
             let snapshot = c.transaction().map_err(db_err)?;
             if !allowed.is_empty() && self.has_foreign_rows(&snapshot)? {
                 return Err(identity_conflict());
+            }
+            // MAGI FIX (MS3 §6 loop10): a source deleted after its reindex loaded as none.
+            let indexed = self.indexed_sources(&snapshot)?;
+            if !allowed.iter().all(|s| indexed.contains(s)) {
+                return Err(MemoryError::Storage(
+                    "a documentation source of this review is no longer indexed".to_string(),
+                ));
             }
             self.allowed_vectors(&snapshot, allowed)?
         };
