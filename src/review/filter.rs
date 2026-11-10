@@ -355,7 +355,8 @@ fn release_unkept(
 }
 
 /// The sides [`classify`] reads for `file`, each with the path it is read under: the new side
-/// under its path and, for a diff, the old side under its `rename from` path or its own. O(1).
+/// under its path and, for a diff, the old side under its `rename from` path or its own, so a
+/// renamed file's old side is released under the key it was cached by, never the new path. O(1).
 fn sides_of(file: &ReviewFile) -> Vec<(Face, String)> {
     let mut sides = vec![(Face::New, file.path.clone())];
     if let Some(diff) = file.diff.as_deref() {
@@ -468,7 +469,9 @@ struct SidesRead<'a> {
 /// rebuilt from the masked sides ([`rebuilt_diff`]) and the file declared with the first
 /// pattern found; it is left out as `secret` instead when the diff cannot be rebuilt or the
 /// rebuilt one still holds a secret (RV22's cause either way, `unrebuilt_diff_skips_as_secret`),
-/// with a WARN naming which.
+/// with a WARN naming which. Declared limit: a rebuild whose body lines differ beyond masking
+/// (sides changed after the diff was read; RV21 reads both through one git access) keeps the
+/// diff's hunk ranges with the sides' text, said by a run-log WARN only.
 ///
 /// That fallback omits rather than masking the diff alone on purpose: a hunk shows only some
 /// lines, and a pattern may need one it leaves out (a YAML value under its key), so RV22's
