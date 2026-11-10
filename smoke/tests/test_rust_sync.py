@@ -2050,6 +2050,22 @@ class ReviewMaskingSyncTests(unittest.TestCase):
     def test_the_openings_parse_includes_every_github_token_prefix(self) -> None:
         self.assertTrue({"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "://"} <= set(_secret_openings()))
 
+    def test_the_s53_masked_entry_is_the_products_shape(self) -> None:
+        # [MAGI S6 MS3 loop8, R7b Melchior] S53's expected entry was a hand copy pinned against the
+        # README only: a reshaped `Masked` or a renamed pattern kept the harness green until SMOKE #1.
+        from smoke.scenarios import review_masking
+        expected, = review_masking.S53_EXPECTED_MASKED
+        filter_rs = without_comments(_source("src/review/filter.rs"))
+        body = one_definition(filter_rs, r"pub struct Masked \{([^}]*)\}", "src/review/filter.rs").group(1)
+        self.assertEqual(sorted(expected), sorted(re.findall(r"pub (\w+):", body)))
+        one_definition(filter_rs, r'Self::Secret => "%s"' % re.escape(expected["cause"]),
+                       "src/review/filter.rs")
+        secrets_rs = without_comments(_source("src/review/secrets.rs"))
+        found = re.findall(r'name: "%s",\s*matcher: Matcher::Token \{\s*prefixes: &\["([^"]+)"\]'
+                           % re.escape(expected["pattern"]), secrets_rs)
+        self.assertEqual(1, len(found), found)
+        self.assertTrue(runs._TOY_MASKED_PREFIX.startswith(found[0]), found)
+
     def test_the_readme_purge_tables_are_the_schemas_review_tables(self) -> None:
         schema = without_comments(_source("src/system/database.rs"))
         created = set(re.findall(r"CREATE TABLE IF NOT EXISTS (code_review_\w+)", schema))
