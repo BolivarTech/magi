@@ -443,12 +443,14 @@ fn docs_time_left(since: Instant) -> Duration {
 // between it and its function had taken.
 pub(crate) fn render_outcome(o: ReviewOutcome, structured: bool) -> Rendered {
     let json = summary_json(&o.summary);
+    // MAGI FIX (MS3 §6 loop8): a consolidated report is rendered whenever there is one, so no
+    // outcome (the pipeline never sets both) can drop the paid report for the batch reports.
     let rendered = match (o.consolidated, o.consolidation_error) {
-        (Some(c), None) => Rendered {
+        (Some(c), error) => Rendered {
             text: render_text(&c, &o.summary),
             json,
             consult: consult_object(&c, structured),
-            failure: None,
+            failure: error.map(|e| redact_foreign_text(&e).as_str().to_string()),
         },
         // MAGI FIX (S6 loop 7, D-b2): the batch causes reach the text and the failure line, not
         // only the JSON summary.
