@@ -1014,7 +1014,8 @@ pub fn without_secrets(chunks: Vec<DocChunk>) -> (Vec<DocChunk>, Vec<String>) {
     (kept, dropped)
 }
 
-/// Whole sources in path order while their chunks fit in [`MAX_DOC_CHUNKS`].
+/// Whole sources in path order while their chunks fit in [`MAX_DOC_CHUNKS`] and their bytes
+/// (text and section) in [`MAX_DOC_INDEX_BYTES`] (`bytes_bound_the_index_too`).
 ///
 /// A source that does not fit is skipped and the next ones still enter (one big source never
 /// starves the rest); a source with more chunks than the bound is never indexed. A source left
@@ -1027,14 +1028,22 @@ pub fn bounded(
     mut sources: Vec<(DocSource, Vec<DocChunk>)>,
 ) -> (Vec<(DocSource, Vec<DocChunk>)>, bool) {
     sources.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut total = 0usize;
+    let (mut total, mut bytes) = (0usize, 0usize);
     let mut truncated = false;
     let mut kept = Vec::with_capacity(sources.len());
     for (source, chunks) in sources {
-        if total.saturating_add(chunks.len()) > MAX_DOC_CHUNKS {
+        // MAGI FIX (MS3 §6 loop8): only the chunk count was bounded, not the bytes held.
+        let size = chunks.iter().fold(0usize, |n, c| {
+            n.saturating_add(c.text.len())
+                .saturating_add(c.section.len())
+        });
+        if total.saturating_add(chunks.len()) > MAX_DOC_CHUNKS
+            || bytes.saturating_add(size) > MAX_DOC_INDEX_BYTES
+        {
             truncated = true;
         } else {
             total += chunks.len();
+            bytes += size;
             kept.push((source, chunks));
         }
     }

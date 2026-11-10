@@ -26,7 +26,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::batching::{number_lines, BatchItem};
-use super::docs::MAX_DOC_CHUNKS;
+use super::docs::{MAX_DOC_CHUNKS, MAX_DOC_INDEX_BYTES};
 use super::error::ReviewError;
 use super::index::{identifier_runs, LexicalIndex, MAX_INDEX_OCCURRENCES};
 use super::input::renamed_from;
@@ -317,8 +317,17 @@ pub fn assemble(
     })
 }
 
+/// The `trimmed` label of a documentation index cut at its bounds: it names both, since either
+/// can cut ([`crate::review::docs::bounded`]).
+fn truncated_label() -> String {
+    format!(
+        "document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS}) or \
+         MAX_DOC_INDEX_BYTES ({MAX_DOC_INDEX_BYTES})"
+    )
+}
+
 /// Adds what indexing left out to `a`: `withheld` is summed, a truncation becomes a
-/// `Documentation` entry in `trimmed` that names [`MAX_DOC_CHUNKS`], and a source left out for
+/// `Documentation` entry in `trimmed` that names both index bounds, and a source left out for
 /// the size cap an entry of its own (the report names the cap that cut), as does one left out
 /// for not being UTF-8 text.
 ///
@@ -329,10 +338,8 @@ pub fn assemble(
 pub fn declare_index(a: &mut Assembled, d: &IndexDeclarations) {
     a.withheld = a.withheld.saturating_add(d.withheld);
     if d.truncated {
-        a.trimmed.push((
-            ContextKind::Documentation,
-            format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})"),
-        ));
+        a.trimmed
+            .push((ContextKind::Documentation, truncated_label()));
     }
     // MAGI FIX (MS3 §6 loop4): a source over the size cap was declared as the chunk cap.
     if d.size_capped {
@@ -1664,7 +1671,10 @@ mod tests {
             }),
             vec![(
                 ContextKind::Documentation,
-                format!("document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})")
+                format!(
+                    "document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS}) or \
+                     MAX_DOC_INDEX_BYTES ({MAX_DOC_INDEX_BYTES})"
+                )
             )]
         );
     }
