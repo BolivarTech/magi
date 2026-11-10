@@ -275,9 +275,10 @@ impl ReviewDocStore {
     /// nothing. A chunk stored under any source reuses its vector, so it is never embedded twice;
     /// rows of another identity are wiped in that transaction (`rebuilt`), nothing else.
     ///
-    /// O(chunks) lookups plus the embedder. Memory: one call's sealed rows, a few times its
-    /// chunks' bytes; `prepare_docs` calls per batch of at most [`EMBED_BATCH_ITEMS`] chunks or
-    /// one source, and bounds a review's plaintext by `MAX_DOC_INDEX_BYTES`.
+    /// O(chunks) lookups plus the embedder. Memory: one call's sealed rows, the sealed vectors
+    /// dominating (about 12 KB each at 768 dimensions); `prepare_docs` calls per batch of at most
+    /// [`EMBED_BATCH_ITEMS`] chunks or one source, and bounds a review's plaintext by
+    /// `MAX_DOC_INDEX_BYTES`, so only one source of many chunks costs more (declared).
     ///
     /// # Errors
     /// [`MemoryError::Storage`] for another identity, a chunk whose hash or path does not match
@@ -408,7 +409,9 @@ impl ReviewDocStore {
     /// without documentation and says so. A `rebuilt` wipe is not re-checked: a racing
     /// identity's next [`Self::load_vectors`] then fails on this store's rows and its review
     /// declares the index unavailable. This store's own rows are never deleted here; inserts
-    /// are `OR IGNORE`, so one identity indexing a source twice writes the same thing.
+    /// are `OR IGNORE`, so one identity indexing a source twice writes the same thing; a source
+    /// another process's clean-up deleted after the plan is written back, stale until the next
+    /// clean-up (declared, `reinserted_rows_are_gc_again`).
     ///
     /// # Errors
     /// [`MemoryError::Storage`] for the conflict or a failing statement.
@@ -1664,6 +1667,21 @@ mod tests {
             vec![src("README.md", "k1"), wt]
         );
         assert_eq!(dims(&store).len(), 1, "only k2's row is left");
+    }
+
+    #[tokio::test]
+    async fn reinserted_rows_are_gc_again() {
+        // [MAGI S6 MS3 loop9, R1 Caspar] Declared race: a reindex planned before another
+        // process's clean-up writes its rows back (`OR IGNORE`); the next clean-up deletes them.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let doomed = [(src("d.md", "k"), vec![chunk("d.md", "A", "x")])];
+        store.reindex(&doomed, &e).await.expect("index");
+        assert_eq!(store.gc(&BTreeSet::new(), false).expect("gc"), 1);
+        store.reindex(&doomed, &e).await.expect("written back");
+        assert_eq!(dims(&store).len(), 1, "stale until the next clean-up");
+        assert_eq!(store.gc(&BTreeSet::new(), false).expect("gc"), 1);
+        assert!(dims(&store).is_empty());
     }
 
     #[tokio::test]

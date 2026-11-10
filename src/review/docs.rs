@@ -4,7 +4,8 @@
 
 //! Project documentation as chunks for the `code-review` context.
 //!
-//! Three kinds of source feed the documentation index: Markdown files (one chunk per ATX heading),
+//! Three kinds of source feed the documentation index: Markdown files (one chunk per ATX heading;
+//! a setext heading is text, `setext_headings_stay_one_chunk`),
 //! Rust and Python doc comments (one chunk per documented item) and nothing else: code is never
 //! documentation. Every chunk carries a SHA-256 over its path, section and text, so the index can
 //! store a chunk once however many revisions contain it.
@@ -1215,6 +1216,15 @@ mod tests {
             vec!["A", "A > B", "A > C"]
         );
         assert!(c[1].text.contains("body b"));
+    }
+
+    #[test]
+    fn setext_headings_stay_one_chunk() {
+        // [MAGI S6 MS3 loop9, R1 Melchior] Declared limitation: only ATX headings split, so an
+        // underlined (setext) heading is text of one unnamed section, never a lost line.
+        let c = chunk_markdown("README.md", "Title\n=====\nintro\nSub\n---\nbody\n");
+        assert_eq!(c.len(), 1);
+        assert!(c[0].section.is_empty() && c[0].text.contains("Sub\n---\nbody"));
     }
 
     #[test]
