@@ -6597,6 +6597,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bound_skips_are_declared() {
+        // [MAGI S6 MS3 loop10, R2 Melchior] A file the bound source withheld while assembling (a
+        // key-block history entry) never reached the summary's `secret` omissions.
+        struct Unbound;
+        struct Bound;
+        #[async_trait::async_trait]
+        impl RagSource for Unbound {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Err(ReviewError::Io("unbound".into()))
+            }
+            fn for_review<'r>(&'r self, _m: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
+                Some(Box::new(Bound))
+            }
+        }
+        #[async_trait::async_trait]
+        impl RagSource for Bound {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Ok(Assembled {
+                    items: vec![],
+                    trimmed: vec![],
+                    without_embedder: false,
+                    without_memory: false,
+                    withheld: 1,
+                })
+            }
+            fn skipped(&self) -> Vec<String> {
+                vec!["h.rs".into()]
+            }
+        }
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = review_with_rag(dir.path(), &Unbound, &consult, &gate_always("real_defect"))
+            .await
+            .expect("runs");
+        let s = &out.summary.skipped;
+        assert!(
+            s.iter()
+                .any(|s| s.cause == SkipCause::Secret && s.path == "h.rs"),
+            "{s:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn masked_documentation_and_history_are_declared_as_masked() {
         // [MAGI S6 MS3 loop1] RV22 amended: a file sent with its secrets masked is declared with
         // the cause `secret` and its pattern, the documentation sources included: those the source
