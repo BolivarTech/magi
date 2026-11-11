@@ -567,14 +567,19 @@ fn quotes_a_split_key_block(titles: &[String], details: &[String]) -> bool {
         .any(|t| holds_key_block(t) || holds_key_block_end(t))
 }
 
-/// Whether `text` holds the END line of a private-key block ([`KEY_BLOCK_END_MARKERS`]). O(n).
+/// Whether `text` holds the END line of a private-key block ([`KEY_BLOCK_END_MARKERS`]), the
+/// line and the markers compared with every ASCII space removed, so a footer joined at a token
+/// boundary without its space (`…PRIVATE` + `KEY-----`) or an SSH2 one written without spaces is
+/// still one (`split_footers_are_recognized`); END closes only at the line's start. O(n).
+// MAGI FIX (MS3 §6 loop11): the exact spacing let a split footer through.
 fn holds_key_block_end(text: &str) -> bool {
+    let spaceless = |s: &str| s.replace(' ', "");
     text.lines().any(|line| {
-        let line = line.trim().to_ascii_uppercase();
+        let line = spaceless(line.trim()).to_ascii_uppercase();
         KEY_BLOCK_END_MARKERS.iter().any(|(dashes, word, holds)| {
             line.strip_prefix(dashes)
-                .is_some_and(|rest| rest.starts_with(word))
-                && line.contains(holds)
+                .is_some_and(|rest| rest.starts_with(&spaceless(word)))
+                && line.contains(&spaceless(holds))
         })
     })
 }
