@@ -155,6 +155,8 @@ pub struct ReviewSummary {
     /// it. The review history does not record these (RV08). Internal: never serialized. Each key
     /// is the consolidated finding's own `file`, inserted from that finding by the pipeline, so
     /// the spellings agree by construction; the match is exact (`off_revision_matches_exact_file`).
+    /// A spelling that ever differed would keep the finding among the candidates (it is never
+    /// dropped): the git check of RV08 then judges it, the safe direction (declared).
     #[serde(skip)]
     pub off_revision: BTreeSet<(String, u32)>,
 }
