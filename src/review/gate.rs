@@ -279,16 +279,16 @@ const SSH2_DASHES: &str = "----";
 /// tool showed the joined literal mangled; pinned by `armor_end_lines_close_a_block`.
 const KEY_BLOCK_END_OPENERS: [(&str, &str); 2] = [(ARMOR_DASHES, "END "), (SSH2_DASHES, " END ")];
 
-/// Whether `text` holds an armor `END` opener ([`KEY_BLOCK_END_OPENERS`]) anywhere. A real key
-/// body cannot close a block early: its lines are base64 or radix-64, whose alphabet has no
-/// space and no run of dashes. O(bytes of `text`).
+/// Whether `text` is an armor `END` line: after leading whitespace it opens with an END opener
+/// ([`KEY_BLOCK_END_OPENERS`]), its dash run exactly that long. An END quoted inside a line (an
+/// OpenPGP `Comment:` header, a glued `x-----END`) or a five-dash ` END` never closes a block, so
+/// a block stays open over its body: the safe direction (`armor_end_must_open_its_line`). O(1).
+// MAGI FIX (MS3 §6 loop10): any occurrence closed a block, `----- END` as an SSH2 footer.
 fn holds_armor_end(text: &str) -> bool {
-    text.char_indices().any(|(i, _)| {
-        let rest = text.get(i..).unwrap_or_default();
-        KEY_BLOCK_END_OPENERS.iter().any(|(dashes, word)| {
-            rest.strip_prefix(dashes)
-                .is_some_and(|r| r.starts_with(word))
-        })
+    let line = text.trim_start();
+    KEY_BLOCK_END_OPENERS.iter().any(|(dashes, word)| {
+        line.strip_prefix(dashes)
+            .is_some_and(|r| r.starts_with(word))
     })
 }
 
