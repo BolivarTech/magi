@@ -1475,7 +1475,8 @@ fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
 /// The source's declarations reach `summary` here, so a batch the clock cuts still declares them;
 /// a kept store item carrying a mask, and each source indexed masked, declare their file once.
 /// Kept items are sorted stably by priority. O(items + bytes). `rag` assembles (the bound source);
-/// [`RagSource::skipped`]/[`RagSource::masked`] are read from `given`, the source handed in.
+/// [`RagSource::skipped`]/[`RagSource::masked`] are read from `given`, the source handed in, and
+/// `skipped` also from `rag` after its batches (`bound_skips_are_declared`).
 ///
 /// `limit` is the batch limit (RV04): what the code and the heading leave is the most the kept
 /// context may cost, whatever the source charged (`over_limit_context_is_trimmed`).
@@ -1559,7 +1560,8 @@ async fn prepare_contexts(
     }
     // MAGI FIX (MS3 §6 loop5): from the source given, never the bound one, which the trait
     // does not oblige to forward them.
-    for path in given.skipped() {
+    // MAGI FIX (MS3 §6 loop10): plus what the bound source withheld while assembling.
+    for path in given.skipped().into_iter().chain(rag.skipped()) {
         skip_for_secret(summary, &path);
     }
     // MAGI FIX (MS3 §6 loop4): the masked paths were trusted as the source shaped them; they
