@@ -3109,6 +3109,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worktree_doc_read_once() {
+        // [MAGI S6 MS3 loop11, R5 Caspar] Verified: a working-tree source is read once; the
+        // bytes its key hashes are the bytes chunked and embedded, never a second read.
+        struct Counted(std::sync::atomic::AtomicUsize);
+        impl ContentSource for Counted {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                let n = self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(format!("# Setup\nread {n}\n").into_bytes()))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let (source, embedder) = (Counted(0.into()), Recording(Default::default()));
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &source,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &embedder,
+            BOUND,
+        )
+        .await;
+        assert_eq!(source.0.load(Ordering::SeqCst), 1, "{prep:?}");
+        let sent = embedder.0.lock().expect("lock").clone();
+        assert!(sent.iter().all(|t| !t.contains("read 1")), "{sent:?}");
+        assert!(sent.iter().any(|t| t.contains("read 0")), "{sent:?}");
+    }
+
+    #[tokio::test]
     async fn vanished_doc_is_unreadable() {
         // MAGI FIX (MS3 §6 loop11): a source gone between listing and read left in silence.
         struct Gone;
