@@ -1725,6 +1725,20 @@ mod tests {
     static ON_HEADS_LINE: OnHeadsLine = OnHeadsLine;
 
     #[tokio::test]
+    async fn memo_shares_no_verdict() {
+        // MAGI FIX (MS3 §6 loop11): the memo keyed by commit cached the whole verdict, so a
+        // pending entry sharing a validated one's commit decided for it.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let rag = f.rag(false);
+        let pending = HistoryEntry {
+            status: HistoryStatus::Pending,
+            ..attended("p", "d")
+        };
+        assert!(!rag.served_on_heads_line(&pending));
+        assert!(rag.served_on_heads_line(&attended("a", "d")));
+    }
+
+    #[tokio::test]
     async fn a_validated_entry_off_heads_line_is_never_served() {
         // [MAGI S6 MS3 loop7, R3 Caspar] An entry validated on another branch reached the context
         // of a review on this one; each served entry is now checked against HEAD.
