@@ -335,7 +335,7 @@ R18_HEALTHY_REQUESTS = tuple(
     ("/v1/embeddings", json.dumps({"input": [text]}).encode())
     for text in ("search_document: " + runs.REVIEW_MASKED_DOC.decode(),
                  "search_query: " + runs.REVIEW_MASKED_DOC.decode() + "\npub fn token() <redacted: anthropic-key>")
-) + (("/api/chat", b'{"messages": []}'),)
+) + (("/api/chat", json.dumps({"messages": [{"content": "pub fn token() -> &'static str {\n    \"<redacted: anthropic-key>\"\n}"}]}).encode()),)
 
 
 def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"",

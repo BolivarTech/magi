@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import unittest.mock
 import urllib.request
 
 from smoke import runs
@@ -54,6 +55,58 @@ class RelayTests(unittest.TestCase):
             upstream.shutdown()
             upstream.server_close()
         self.assertEqual(((("/v1/embeddings", b"x"),), True), (rec.recorded, rec.complete))
+
+    def test_the_relay_keeps_the_query_and_flags_a_bad_body(self) -> None:
+        # [MAGI S6 MS3 loop10, R7a Melchior, Caspar] The query was dropped from the record, and
+        # a body shorter or longer than its Content-Length left the record "complete".
+        import socket
+        upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Echo)
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        try:
+            for path, declared, body, complete in (("/v1/embeddings?k=v", 1, b"x", True),
+                                                   ("/v1/embeddings", 10, b"abc", False),
+                                                   ("/v1/embeddings", 1, b"xyz", False)):
+                with self.subTest(declared=declared, body=body), \
+                        runs.recording_relay("http://127.0.0.1:%d/v1" % upstream.server_address[1]) as (url, rec):
+                    port = int(url.split(":")[2].split("/")[0])
+                    with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+                        s.sendall(b"POST %s HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n%s"
+                                  % (path.encode(), declared, body))
+                        s.shutdown(socket.SHUT_WR)
+                        while s.recv(4096):
+                            pass
+                    self.assertEqual(complete, rec.complete)
+                    if complete:
+                        self.assertEqual(path, rec.recorded[0][0])
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+
+    def test_a_failed_restore_is_retried_then_named(self) -> None:
+        # [MAGI S6 MS3 loop10, R7a Caspar] A restore that raised left the workspace pointed at a
+        # closed backend, unsaid.
+        real = runs._replace_bytes
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "magi.toml"
+            original = b'base_url = "http://a/v1"\n[embedding]\nbase_url = "http://a/v1"\n'
+            path.write_bytes(original)
+            for failures, raises in ((1, False), (2, True)):
+                left = [failures]
+
+                def flaky(p, data, what, left=left):
+                    if what.startswith("restore") and left[0]:
+                        left[0] -= 1
+                        raise HarnessError("disk full")
+                    real(p, data, what)
+                with self.subTest(failures=failures), unittest.mock.patch.object(runs, "_replace_bytes", flaky):
+                    if raises:
+                        with self.assertRaisesRegex(HarnessError, "reset-env"):
+                            with runs.embedder_pointed_away(path):
+                                pass
+                    else:
+                        with runs.embedder_pointed_away(path):
+                            pass
+                        self.assertEqual(original, path.read_bytes())
 
     def test_the_upstream_is_the_one_endpoint_the_config_declares(self) -> None:
         with self.assertRaises(HarnessError), runs.recording_relay("http://u:p@127.0.0.1:1/v1"):
@@ -107,6 +160,14 @@ class RelayScenarioTests(unittest.TestCase):
         r = _with(_result("R18", 0, doc), request_bodies=(("/api/chat", b'"' + part + b'"'),))
         self.assertEqual([F], _judged("S53", r, rm.S53_ASSERTIONS[3:]))
         self.assertEqual([C], _judged("S53", _with(r, request_bodies=None), rm.S53_ASSERTIONS[3:]))
+        # [MAGI S6 MS3 loop10, R7a Melchior] A file declared masked but never sent, or a key in a
+        # request's query, passed.
+        embeds = R18_HEALTHY_REQUESTS[:-1]
+        unsent = embeds + (("/api/chat", b'{"messages": []}'),)
+        queried = R18_HEALTHY_REQUESTS + (("/v1/embeddings?k=" + runs.REVIEW_MASKED_KEY.decode(), b""),)
+        for bodies, want in ((R18_HEALTHY_REQUESTS, P), (unsent, F), (queried, F)):
+            r = _with(_result("R18", 0, doc), request_bodies=bodies)
+            self.assertEqual([want], _judged("S53", r, rm.S53_ASSERTIONS[3:]), bodies)
 
     def test_s55_needs_the_chunk_and_the_query(self) -> None:
         doc = {"code_review": {"without_embedder": False, "trimmed": []}}
@@ -124,15 +185,27 @@ class RelayScenarioTests(unittest.TestCase):
             self.assertEqual(want, _judged("S56", r, rc.S56_ASSERTIONS), bodies)
 
     def test_s57_serves_validated_history(self) -> None:
-        found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3}]}}
+        found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3,
+                                               "title": "off by one"}]}}
         first = ProductOutput(stdout=json.dumps(found).encode(), stderr=b"", exit_code=0, command=["m"])
         empty = _with(first, stdout=b'{"code_review": {"findings": []}}')
-        served = (("/api/chat", b"<<<context kind=history file=%s>>>" % runs.REVIEW_HISTORY_FILE.encode()),)
+        frame = b"<<<context kind=history file=%s>>>" % runs.REVIEW_HISTORY_FILE.encode()
+        served = (("/api/chat", frame + b"\\noff by one (attended)\\n"),)
+        # [MAGI S6 MS3 loop10, R7a Melchior] A frame to another endpoint, an empty or
+        # unvalidated item, or another finding's text passed.
+        elsewhere = (("/v1/embeddings", served[0][1]),)
+        bare = (("/api/chat", frame),)
+        pending = (("/api/chat", frame + b"\\noff by one (pending)\\n"),)
+        other = (("/api/chat", frame + b"\\nanother (attended)\\n"),)
         for setup, bodies, want in (((first, first), served, [P, P]), ((first, first), (), [P, F]),
                                     ((empty, first), served, [P, C]),
-                                    ((first, _with(first, exit_code=1)), served, [F, P])):
+                                    ((first, _with(first, exit_code=1)), served, [F, P]),
+                                    ((first, first), elsewhere, [P, F]), ((first, first), bare, [P, F]),
+                                    ((first, first), pending, [P, F]), ((first, first), other, [P, F])):
             r = _with(_result("R21", 0, {}), request_bodies=bodies, setup_outputs=setup)
-            self.assertEqual(want, _judged("S57", r, rc.S57_ASSERTIONS))
+            self.assertEqual(want, _judged("S57", r, rc.S57_ASSERTIONS), bodies)
+        r = _with(_result("R21", 0, {}), request_bodies=served, setup_outputs=(first, first), output=None)
+        self.assertEqual([C, C], _judged("S57", r, rc.S57_ASSERTIONS))
 
 
 if __name__ == "__main__":
