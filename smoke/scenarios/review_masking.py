@@ -30,8 +30,9 @@ embedder, each gate question, as well as stdout, stderr and the run log. The
 unit suite pins the same with recording doubles
 (``no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio``).
 
-Declared limits: the leak check looks for the secret's bytes (whole, and every
-:data:`LEAK_SLICE_BYTES` window), not for a transformed encoding of them
+Declared limits: the relay sees requests, not the on-disk `.magi-rs-memory.db*` (encrypted,
+never sent); the leak check looks for the secret's bytes (whole, and every
+:data:`LEAK_SLICE_BYTES` window), not for pieces shorter than a window sent apart nor for a transformed encoding of them
 (base64, percent-encoding, another case); and S53 reviews a directory, so the
 amended clause that a file NAMED explicitly with a one-line key is reviewed
 masked, not refused, is pinned in the unit suite only.
@@ -49,8 +50,12 @@ S53_ASSERTIONS = (
     "code_review.masked lists exactly the keyed file with cause secret and pattern "
     "anthropic-key, and masked_unlisted is 0",
     "code_review.skipped is empty and skipped_unlisted is 0: the keyed file was reviewed",
-    "the toy key reaches neither stdout, stderr, the run log nor any request the relay forwarded",
+    "the toy key reaches neither stdout, stderr, the run log nor any request the relay forwarded, "
+    "and a trio prompt carries the file's code with the key masked",
 )
+
+#: What a trio prompt must carry for S53: the masked file's code and the mask in the key's place.
+S53_TRIO_NEEDLES = (b"pub fn token()", b"<redacted: " + runs.REVIEW_MASKED_PATTERN.encode() + b">")
 S54_ASSERTIONS = (
     "exit 2",
     "stderr says nothing to review, leaving out the private-key file as secret and nothing else",
@@ -75,10 +80,10 @@ S53_EXPECTED_MASKED = [{"path": runs.REVIEW_MASKED_FILE, "cause": "secret",
 #: What S54's omission list must read: the key-block file, as ``secret``.
 S54_EXPECTED_OMISSIONS = [(runs.REVIEW_KEYBLOCK_FILE, "secret")]
 
-#: The leak probe S49 shares (:func:`smoke.scenarios.code_review._with_slices`).
+#: The leak probe S49 shares (:func:`smoke.scenarios.code_review.with_slices`).
 #: MAGI FIX (MS3 §6 loop9): one definition for S49, S53 and S54; the floor is 8 bytes.
 LEAK_SLICE_BYTES = code_review.LEAK_SLICE_BYTES
-_with_slices = code_review._with_slices
+_with_slices = code_review.with_slices
 
 
 def _no_capture(texts, run_id):
@@ -91,7 +96,7 @@ def _no_capture(texts, run_id):
     Yields:
         Finding: One per entry of *texts*.
     """
-    yield from code_review._all_cannot_test(
+    yield from code_review.all_cannot_test(
         texts, run_id, "run %s produced no capture to inspect" % run_id)
 
 
@@ -125,20 +130,26 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False):
     outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
                ("the run log", run.review_log or ()))
     if relayed:
-        outputs += (("a forwarded request", tuple(b for _, b in run.request_bodies or ())),)
+        # MAGI FIX (MS3 §6 loop10): the target (its query) is read too, not the body alone.
+        outputs += (("a forwarded request", tuple(t.encode("utf-8", "surrogateescape") + b"\n" + b
+                                                  for t, b in run.request_bodies or ())),)
     leaked = [name for name, bodies in outputs
               if any(needle in body for needle in needles for body in bodies)]
     if leaked:
-        return code_review._finding(texts, index, Outcome.FAIL, run_id,
+        return code_review.finding(texts, index, Outcome.FAIL, run_id,
                                     "%s appears in %s" % (what, ", ".join(leaked)))
     if relayed and run.request_bodies is None:
-        return code_review._finding(texts, index, Outcome.CANNOT_TEST, run_id,
+        return code_review.finding(texts, index, Outcome.CANNOT_TEST, run_id,
                                     "the relay's record of the run is missing or incomplete")
+    if relayed and not any(all(n in b for n in S53_TRIO_NEEDLES) for b in runs.trio_bodies(run.request_bodies)):
+        # MAGI FIX (MS3 §6 loop10): a file declared masked but never sent passed (R7a Melchior).
+        return code_review.finding(texts, index, Outcome.FAIL, run_id,
+                                    "no trio prompt carries the file's code with the key masked")
     if run.review_log_unreadable:
-        return code_review._finding(
+        return code_review.finding(
             texts, index, Outcome.CANNOT_TEST, run_id,
             "the run log could not be read whole: %s" % ", ".join(run.review_log_unreadable))
-    return code_review._finding(texts, index, Outcome.PASS, run_id)
+    return code_review.finding(texts, index, Outcome.PASS, run_id)
 
 
 def _section_list(section, key, unlisted_key):
@@ -153,11 +164,11 @@ def _section_list(section, key, unlisted_key):
         tuple: ``(items, unlisted, failure)``; ``failure`` is empty when both
         are present and well typed. A missing key is a failure, never ``[]``.
     """
-    items, failure = code_review._list_under(section, key)
+    items, failure = code_review.list_under(section, key)
     if items is None:
         return None, None, failure
     unlisted = section.get(unlisted_key)
-    if not code_review._is_count(unlisted):
+    if not code_review.is_count(unlisted):
         return None, None, "code_review.%s is missing or not an integer" % unlisted_key
     return items, unlisted, ""
 
@@ -176,7 +187,7 @@ def _normalized_masked(items):
         strings"): an extra field or another cause fails loudly
         (``test_a_masked_entry_with_an_extra_field_fails``).
     """
-    return [dict(item, path=code_review._slashed(item["path"]))
+    return [dict(item, path=code_review.slashed(item["path"]))
             if isinstance(item, dict) and isinstance(item.get("path"), str) else item
             for item in items]
 
@@ -196,7 +207,7 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
         yield from _no_capture(texts, "R18")
         return
     code = run.output.exit_code
-    yield code_review._verdict(texts, 0, "R18", code == EXIT_OK, "exited %d" % code)
+    yield code_review.verdict(texts, 0, "R18", code == EXIT_OK, "exited %d" % code)
     # `ProductOutput.json` raises ProductOutputError for a root that is not an object, so `.get`
     # is always on a dict (`test_valid_json_that_is_not_an_object_fails_both_json_assertions`).
     try:
@@ -207,8 +218,8 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
     else:
         detail = "code_review is missing or not an object"
     if not isinstance(section, dict):
-        yield code_review._finding(texts, 1, Outcome.FAIL, "R18", detail)
-        yield code_review._finding(texts, 2, Outcome.FAIL, "R18", detail)
+        yield code_review.finding(texts, 1, Outcome.FAIL, "R18", detail)
+        yield code_review.finding(texts, 2, Outcome.FAIL, "R18", detail)
     else:
         yield _masked_finding(section)
         yield _skipped_finding(section)
@@ -227,9 +238,9 @@ def _masked_finding(section):
     """
     items, unlisted, failure = _section_list(section, MASKED_KEY, MASKED_UNLISTED_KEY)
     if items is None:
-        return code_review._finding(S53_ASSERTIONS, 1, Outcome.FAIL, "R18", failure)
+        return code_review.finding(S53_ASSERTIONS, 1, Outcome.FAIL, "R18", failure)
     held = _normalized_masked(items) == S53_EXPECTED_MASKED and unlisted == 0
-    return code_review._verdict(
+    return code_review.verdict(
         S53_ASSERTIONS, 1, "R18", held,
         "code_review.masked has %d entries and masked_unlisted is %r; expected exactly the "
         "keyed file and 0" % (len(items), unlisted))
@@ -246,8 +257,8 @@ def _skipped_finding(section):
     """
     items, unlisted, failure = _section_list(section, SKIPPED_KEY, SKIPPED_UNLISTED_KEY)
     if items is None:
-        return code_review._finding(S53_ASSERTIONS, 2, Outcome.FAIL, "R18", failure)
-    return code_review._verdict(
+        return code_review.finding(S53_ASSERTIONS, 2, Outcome.FAIL, "R18", failure)
+    return code_review.verdict(
         S53_ASSERTIONS, 2, "R18", not items and unlisted == 0,
         "code_review.skipped has %d entries and skipped_unlisted is %r; expected none"
         % (len(items), unlisted))
@@ -263,10 +274,10 @@ def _keyblock_listed_as_secret(stderr):
         bool: ``True`` when the omission list parses and, with ``\\`` read as
         ``/``, equals :data:`S54_EXPECTED_OMISSIONS`.
     """
-    entries, _ = code_review._omissions(stderr)
+    entries, _ = code_review.omissions(stderr)
     if entries is None:
         return False
-    return [(code_review._slashed(path), cause) for path, cause in entries] == S54_EXPECTED_OMISSIONS
+    return [(code_review.slashed(path), cause) for path, cause in entries] == S54_EXPECTED_OMISSIONS
 
 
 @scenario("S54", assertions=S54_ASSERTIONS, run="R19", inspects_timeouts=True)
@@ -279,7 +290,7 @@ def a_private_key_block_is_left_out_and_never_leaked(run):
     Yields:
         Finding: One per entry of :data:`S54_ASSERTIONS`, in that order.
     """
-    yield from code_review._refusal(
+    yield from code_review.refusal(
         S54_ASSERTIONS, "R19", run,
         lambda text: code_review.NOTHING_TO_REVIEW_TEXT in text and _keyblock_listed_as_secret(text),
         "stderr does not say there is nothing to review with %s (secret) left out"

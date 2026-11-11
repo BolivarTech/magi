@@ -37,8 +37,10 @@ declare ``inspects_timeouts``, so the runner reports it as ``CANNOT_TEST``.
 * **S57** (R21, RV08): a buggy commit is reviewed, every line of it fixed in
   the next, reviewed again (the reclassification marks the first entries
   attended, after its report), and reviewed a third time, whose trio request
-  must carry a ``kind=history`` frame on the file. With no located finding in
-  the first review (the trio's answer) the second assertion is ``CANNOT_TEST``.
+  must carry a ``kind=history`` item on the file, with a first-review finding's
+  title and ``(attended)``. Only that third review is relayed: the claim is
+  about what it sends. With no located finding in the first review (the trio's
+  answer) the second assertion is ``CANNOT_TEST``.
 
 MAGI FIX (MS3 §6 loop9): every review here was of a working tree and read its
 own flags; R18, R20 and R21 send every request through the recording relay, so
@@ -391,7 +393,8 @@ def validated_history_reaches_the_trio(run):
         Finding: One per entry of :data:`S57_ASSERTIONS`, in that order.
     """
     texts = S57_ASSERTIONS
-    if run is None or len(run.setup_outputs) != 2:
+    # MAGI FIX (MS3 §6 loop10): a measured review that left no output crashed the scenario.
+    if run is None or run.output is None or len(run.setup_outputs) != 2:
         yield from _all(texts, "R21", Outcome.CANNOT_TEST, "run R21 did not run its three reviews")
         return
     codes = [o.exit_code for o in run.setup_outputs + (run.output,)]
@@ -411,6 +414,34 @@ def validated_history_reaches_the_trio(run):
         yield Finding(assertion=texts[1], outcome=Outcome.CANNOT_TEST, run_id="R21",
                       detail="the relay's record is missing or incomplete")
     else:
-        frame = b"<<<context kind=history file=" + runs.REVIEW_HISTORY_FILE.encode() + b">>>"
-        yield _judged(texts, 1, "R21", any(frame in b for _, b in run.request_bodies),
-                      "no forwarded request carries a history item on %s" % runs.REVIEW_HISTORY_FILE)
+        yield _judged(texts, 1, "R21", _history_served(run.request_bodies, located),
+                      "no trio prompt carries an attended history item of the first review's "
+                      "findings on %s" % runs.REVIEW_HISTORY_FILE)
+
+
+def _history_served(request_bodies, located) -> bool:
+    """Whether a trio prompt carries a validated history item of *located* (MAGI FIX, MS3 §6 loop10).
+
+    Only the measured (third) review goes through the relay; the two setup
+    reviews that record and reclassify the history run before it, so this reads
+    their effect on that review, never their own requests (R7a Caspar). The item
+    must sit in a trio request, after its frame, with the title of a finding
+    the first review located there and the ``(attended)`` status the second
+    review's reclassification gave it (``history_item`` in
+    ``src/memory/review_rag.rs``); titles are compared JSON-escaped, as sent.
+
+    Args:
+        request_bodies: The relay's ``(target, body)`` record.
+        located: The first review's findings on :data:`runs.REVIEW_HISTORY_FILE`.
+
+    Returns:
+        bool: Whether one such item reached the trio.
+    """
+    frame = b"<<<context kind=history file=" + runs.REVIEW_HISTORY_FILE.encode() + b">>>"
+    titles = [json.dumps(f["title"])[1:-1].encode() for f in located if isinstance(f.get("title"), str)]
+    for body in runs.trio_bodies(request_bodies):
+        _, _, after = body.partition(frame)
+        item = after.split(b"<<<", 1)[0]
+        if any(title and title + b" (attended)" in item for title in titles):
+            return True
+    return False
