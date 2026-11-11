@@ -6828,6 +6828,13 @@ mod tests {
         assert_eq!(consult.calls(), 0);
     }
 
+    #[test]
+    fn ratio_is_exact_past_u32() {
+        // [MAGI S6 MS3 loop10, R4 Balthasar] Counts were narrowed through u32 and saturated.
+        let big = usize::try_from(1u64 << 33).expect("64-bit");
+        assert_eq!(ratio(big, big * 2), 0.5);
+    }
+
     #[tokio::test]
     async fn oversized_units_fail_first() {
         // [MAGI S6 MS3 loop10, R4 Caspar] A unit past the limit failed only after `context_for`
