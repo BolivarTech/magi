@@ -595,6 +595,8 @@ impl<'a> Gate<'a> {
 
     /// The [`KeyBlockScan`] of `code`, from [`Self::last_scan`] when `code` is the code scanned
     /// last. O(bytes of `code`): a comparison, or the scans and one copy when the file changed.
+    /// Correct in any order (`scan_memo_any_order`); O(files) scans only for findings grouped
+    /// by file, as the pipeline hands them.
     // MAGI FIX (MS3 §6 loop7): the whole-code scan ran once per finding (R6b Melchior).
     fn key_block_scan(&mut self, code: &str) -> KeyBlockScan {
         if let Some((last, scan)) = &self.last_scan {
@@ -1718,6 +1720,19 @@ mod tests {
             );
         }
         assert!(!holds_armor_end("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC+/="));
+    }
+
+    #[test]
+    fn scan_memo_any_order() {
+        // [MAGI S6 MS3 loop10, R6b Melchior] The memo is keyed by the code itself, so findings
+        // alternating between files rescan (never reuse another file's scan).
+        let c = MockDecisionClient::new();
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let key = format!("{}\nQQQQ\n", concat!("-----", "BEGIN ", "PRIVATE KEY-----"));
+        for _ in 0..2 {
+            assert!(g.key_block_scan(&key).holds);
+            assert!(!g.key_block_scan("fn a() {}\n").holds);
+        }
     }
 
     #[test]
