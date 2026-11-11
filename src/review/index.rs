@@ -43,6 +43,10 @@ const KNOWN_FILE_EXTENSIONS: [&str; 14] = [
 /// is one of them is a member, never a file name, even when its last segment is an extension.
 const FIELD_ACCESS_RECEIVERS: [&str; 5] = ["self", "Self", "this", "super", "cls"];
 
+/// Levels of nested blocks `record_definitions` splits: the depth the containing-unit lookup
+/// splits (`MAX_BLOCK_SPLIT_DEPTH` in `rag`), so both find the same methods.
+const MAX_DEFINITION_DEPTH: usize = 8;
+
 /// Separator of a qualified citation (`Baz::qux`).
 pub(crate) const PATH_SEPARATOR: &str = "::";
 
@@ -284,9 +288,10 @@ impl LexicalIndex {
     }
 
     /// Records the named units of `text` as definitions: a function, a method, a type (class,
-    /// struct, enum, trait) or a module, at the top level and one level down a block (an `impl`,
+    /// struct, enum, trait) or a module, at the top level and down nested blocks (an `impl`,
     /// class, trait or module, cut by [`LanguageExtractor::split_block`] as the containing-unit
-    /// lookup does), so a method is a definition (`methods_are_retrieved_as_defs`). An impl
+    /// lookup does) to [`MAX_DEFINITION_DEPTH`] levels, so a method is a definition
+    /// (`methods_are_retrieved_as_defs`, `nested_methods_are_defs`). An impl
     /// block is not a definition of its type; a block's own header pieces, and the gap and
     /// declaration-group units, carry no new name. O(bytes of `text`) for the extraction.
     // MAGI FIX (Loop1 r1, M5): the limitation is declared where it lives.
@@ -295,14 +300,26 @@ impl LexicalIndex {
         // MAGI FIX (MS3 §6 loop5): the duplicate check scanned each name's list, O(n^2) for a
         // name defined many times in one file (generated code); spans seen are now a set.
         let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
-        let units = extractor.extract_units(text, file, ChangedLines::All);
-        let members = units.iter().flat_map(|block| {
-            extractor
-                .split_block(block)
-                .into_iter()
-                .filter(move |p| p.kind != block.kind || p.name != block.name)
-        });
-        for unit in units.iter().cloned().chain(members) {
+        // MAGI FIX (MS3 §6 loop10): blocks are split down to MAX_DEFINITION_DEPTH levels.
+        let mut level = extractor.extract_units(text, file, ChangedLines::All);
+        let mut all = Vec::new();
+        for _ in 0..MAX_DEFINITION_DEPTH {
+            let next: Vec<_> = level
+                .iter()
+                .flat_map(|block| {
+                    extractor
+                        .split_block(block)
+                        .into_iter()
+                        .filter(move |p| p.kind != block.kind || p.name != block.name)
+                })
+                .collect();
+            all.append(&mut level);
+            if next.is_empty() {
+                break;
+            }
+            level = next;
+        }
+        for unit in all {
             if !matches!(
                 unit.kind,
                 UnitKind::Function
@@ -332,8 +349,8 @@ impl LexicalIndex {
     }
 
     /// Where `name` is defined, as `(file, first_line, last_line)`, in the order the files were
-    /// given. Only named top-level units of files with an extractor are definitions (a method
-    /// inside an `impl` or `class` block is not one; see `record_definitions`); a name that is
+    /// given. Only named units of files with an extractor are definitions, nested ones down to
+    /// [`MAX_DEFINITION_DEPTH`] levels included (see `record_definitions`); a name that is
     /// defined more than once (homonyms) lists every place. O(1) expected.
     ///
     /// # Arguments
