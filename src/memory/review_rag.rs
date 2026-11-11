@@ -647,14 +647,7 @@ impl RagSource for StoreRag<'_> {
     /// be searched: the history goes with the embedder (RV07), so it is also the embedder check.
     async fn context_for(&self, batch: &ReviewBatch) -> Result<Assembled, ReviewError> {
         let text = batch_text(batch);
-        let mut units = Vec::new();
-        for item in &batch.items {
-            units.extend(
-                containing_units_cached(item, self.sources, self.registry, &self.units)?
-                    .into_iter()
-                    .map(escaped),
-            );
-        }
+        let units = self.units_for(batch)?;
         // MAGI FIX (MS3 §6 loop9): an unreadable file costs its own items, declared.
         let (mut unread_defs, mut unread_callers) = (Vec::new(), Vec::new());
         let mut code = definitions_for(&text, self.index, self.sources, &mut unread_defs);
@@ -747,6 +740,21 @@ impl RagSource for StoreRag<'_> {
                 })
                 .collect(),
         )
+    }
+
+    /// The containing units of `batch`, escaped, from the review's own content: what
+    /// `context_for` assembles first (`store_rag_declares_its_units`). No endpoint call.
+    // MAGI FIX (MS3 §6 loop10): declared so the pipeline checks them before any embedder call.
+    fn units_for(&self, batch: &ReviewBatch) -> Result<Vec<ContextItem>, ReviewError> {
+        let mut units = Vec::new();
+        for item in &batch.items {
+            units.extend(
+                containing_units_cached(item, self.sources, self.registry, &self.units)?
+                    .into_iter()
+                    .map(escaped),
+            );
+        }
+        Ok(units)
     }
 
     /// The withheld documentation sources, then the file of each history entry withheld for a
