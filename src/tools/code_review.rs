@@ -1066,10 +1066,14 @@ fn total_secs(total: Duration) -> u64 {
     }
 }
 
-/// The tool's post-report wait, from what is `left` of the run.
+/// The tool's post-report wait, from what is `left` of the run: at most the margin the review
+/// kept for it ([`REVIEW_DEADLINE_MARGIN_SECS`]), and never the last
+/// [`TOOL_DELIVERY_RESERVE_SECS`], so a paid report is handed back before the run's token fires
+/// (`post_report_wait_is_bounded`); what does not finish keeps running on its blocking thread.
+// MAGI FIX (MS3 §6 loop10): the wait could spend the run's whole remaining clock.
 fn post_report_limit(left: Duration) -> Duration {
-    let _ = TOOL_DELIVERY_RESERVE_SECS;
-    left
+    left.saturating_sub(Duration::from_secs(TOOL_DELIVERY_RESERVE_SECS))
+        .min(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS))
 }
 
 /// A review error as the tool's execution error, redacted.
