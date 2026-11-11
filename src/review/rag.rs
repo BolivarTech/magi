@@ -27,7 +27,7 @@ use super::languages::{
     enclosing_unit, ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, SemanticUnit,
     UnitKind,
 };
-use super::secrets::{display_path, mask_secrets};
+use super::secrets::{display_path, holds_key_block, mask_secrets};
 use super::source::ContentSource;
 use super::window::estimate_tokens;
 
@@ -821,7 +821,8 @@ fn cut_on_char(text: &str, max: usize) -> &str {
 /// The text is masked before it is cut: a cut through a raw secret could leave a fragment that
 /// no longer matches its pattern. The prefix is masked the same way (it is `[embedding]`
 /// operator text, and it leaves the process too). A `prefix` longer than the bound is cut to it
-/// (on a char boundary) and leaves no room for the text.
+/// (on a char boundary) and leaves no room for the text. A multi-line private-key block in
+/// either is withheld whole (RV22's exception): no query at all.
 ///
 /// # Arguments
 ///
@@ -830,16 +831,20 @@ fn cut_on_char(text: &str, max: usize) -> &str {
 ///
 /// # Returns
 ///
-/// The query to embed. O(bytes of `text`).
+/// The query to embed, `None` when a key block withholds it. O(bytes of `text`).
 // MAGI FIX (MS3 §6 loop3): the query left raw, and the bound did not count the prefix.
-pub fn doc_search_query(prefix: &str, text: &str) -> String {
+// MAGI FIX (MS3 §6 loop11): a key block in the prefix was only masked, never withheld.
+pub fn doc_search_query(prefix: &str, text: &str) -> Option<String> {
+    if holds_key_block(prefix) || holds_key_block(text) {
+        return None;
+    }
     // MAGI FIX (MS3 §6 loop4): an oversized prefix passed whole, over the bound.
     // MAGI FIX (MS3 §6 loop5): the prefix is operator text that leaves too: masked, then cut.
     let masked_prefix = mask_secrets(prefix);
     let prefix = cut_on_char(&masked_prefix, DOC_QUERY_MAX_BYTES);
     let masked = mask_secrets(text);
     let room = DOC_QUERY_MAX_BYTES.saturating_sub(prefix.len());
-    format!("{prefix}{}", cut_on_char(&masked, room))
+    Some(format!("{prefix}{}", cut_on_char(&masked, room)))
 }
 
 #[cfg(test)]
@@ -908,7 +913,7 @@ mod tests {
         // [MAGI S6 MS3 loop5, R2 Caspar] Only the batch text was masked; the prefix comes from
         // `[embedding]` operator config, and RV22 covers every byte that leaves the process.
         let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
-        let q = doc_search_query(&format!("search {token}: "), "fn a() {}");
+        let q = doc_search_query(&format!("search {token}: "), "fn a() {}").expect("q");
         assert!(!q.contains(token), "{q}");
         assert!(q.ends_with("fn a() {}"), "{q}");
     }
@@ -1674,17 +1679,17 @@ mod tests {
         // (RV22): every one-line secret is masked before the cut, so a cut never leaves a
         // fragment that no longer matches its pattern, and the bound covers the prefix too.
         let secret = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
-        let q = doc_search_query("query: ", &format!("let k = \"{secret}\";"));
+        let q = doc_search_query("query: ", &format!("let k = \"{secret}\";")).expect("q");
         assert!(q.starts_with("query: "), "{q}");
         assert!(!q.contains("sk-ant-"), "{q}");
         assert!(q.contains("<redacted: anthropic-key>"), "{q}");
-        let long = doc_search_query("query: ", &"a".repeat(2 * DOC_QUERY_MAX_BYTES));
+        let long = doc_search_query("query: ", &"a".repeat(2 * DOC_QUERY_MAX_BYTES)).expect("q");
         assert_eq!(long.len(), DOC_QUERY_MAX_BYTES);
         let straddling = format!(
             "{}{secret}",
             "a".repeat(DOC_QUERY_MAX_BYTES - "query: ".len() - 10)
         );
-        let cut = doc_search_query("query: ", &straddling);
+        let cut = doc_search_query("query: ", &straddling).expect("q");
         assert!(
             !cut.contains("sk-ant-"),
             "a cut fragment of the key left: {cut}"
@@ -1811,7 +1816,7 @@ mod tests {
     #[test]
     fn a_query_prefix_longer_than_the_bound_is_cut_to_it_too() {
         // [MAGI S6 MS3 loop4, R2 Caspar] The bound is on the whole query, the prefix included.
-        let q = doc_search_query(&"é".repeat(DOC_QUERY_MAX_BYTES), "fn a() {}");
+        let q = doc_search_query(&"é".repeat(DOC_QUERY_MAX_BYTES), "fn a() {}").expect("q");
         assert!(q.len() <= DOC_QUERY_MAX_BYTES, "{}", q.len());
     }
 

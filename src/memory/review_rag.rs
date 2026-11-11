@@ -76,6 +76,9 @@ pub const DIMENSION_PROBE_TIMEOUT_SECS: u64 = EMBED_QUERY_TIMEOUT_SECS;
 /// Documentation chunks retrieved per batch before `assemble` trims to the budget.
 pub const DOC_SEARCH_K: usize = 8;
 
+/// Why no query was sent when [`doc_search_query`] withholds it (a key block, RV22).
+const QUERY_WITHHELD: &str = "the query prefix holds a private-key block: no query is sent";
+
 /// Bound on the whole documentation preparation of one review (listing, reads and every
 /// reindex), checked between steps and sources; it runs before the review clock (RV06).
 pub const REINDEX_TIMEOUT_SECS: u64 = 120;
@@ -386,17 +389,20 @@ impl StoreRag<'_> {
         if self.embedder_down.load(Ordering::SeqCst) {
             return None;
         }
-        let query = doc_search_query(embedder.query_prefix(), text);
         let bound = Duration::from_secs(EMBED_QUERY_TIMEOUT_SECS);
-        let cause = match tokio::time::timeout(bound, embedder.embed(&[query])).await {
-            // MAGI FIX (MS3 §6 loop2): one query, one vector; any other count is not guessed at.
-            Ok(Ok(mut vectors)) => match (vectors.pop(), vectors.is_empty()) {
-                (Some(v), true) if !v.is_empty() => return Some(v),
-                (None, _) => "the embedder answered no vector".to_string(),
-                _ => "the embedder did not answer one vector for the query".to_string(),
+        // MAGI FIX (MS3 §6 loop11): a key block in the query prefix is withheld, never sent.
+        let cause = match doc_search_query(embedder.query_prefix(), text) {
+            None => QUERY_WITHHELD.to_string(),
+            Some(query) => match tokio::time::timeout(bound, embedder.embed(&[query])).await {
+                // MAGI FIX (MS3 §6 loop2): one query, one vector; any other count is not guessed at.
+                Ok(Ok(mut vectors)) => match (vectors.pop(), vectors.is_empty()) {
+                    (Some(v), true) if !v.is_empty() => return Some(v),
+                    (None, _) => "the embedder answered no vector".to_string(),
+                    _ => "the embedder did not answer one vector for the query".to_string(),
+                },
+                Ok(Err(e)) => outward_text(&e.to_string()),
+                Err(_) => format!("no answer within {EMBED_QUERY_TIMEOUT_SECS} s"),
             },
-            Ok(Err(e)) => outward_text(&e.to_string()),
-            Err(_) => format!("no answer within {EMBED_QUERY_TIMEOUT_SECS} s"),
         };
         if !self.embedder_down.swap(true, Ordering::SeqCst) {
             tracing::event!(
