@@ -3527,6 +3527,49 @@ mod tests {
         );
     }
 
+    /// An embedder whose query prefix is `0`; records what it is asked to embed in `1`.
+    struct KeyPrefix(String, std::sync::Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for KeyPrefix {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            self.1
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(texts.iter().cloned());
+            Ok(texts.iter().map(|_| vec![0.5; 3]).collect())
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+        fn query_prefix(&self) -> &str {
+            &self.0
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
+    async fn key_prefix_sends_no_query() {
+        // MAGI FIX (MS3 §6 loop11): a key block in `[embedding]`'s query prefix left raw.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let prefix = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n{end}\n");
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let embedder = KeyPrefix(prefix, std::sync::Mutex::new(Vec::new()));
+        let mut rag = f.rag(true);
+        rag.embedder = Some(&embedder);
+        rag.context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        let sent = embedder.1.lock().expect("lock").clone();
+        assert!(sent.is_empty(), "nothing leaves: {sent:?}");
+        assert!(rag.embedder_down.load(Ordering::SeqCst), "declared down");
+    }
+
     #[tokio::test]
     async fn a_documentation_chunk_read_through_the_review_cache_is_embedded_masked() {
         // [T3.7] RV22 amended: the review's cache masks every secret it holds, so a README with
