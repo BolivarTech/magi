@@ -653,7 +653,8 @@ impl<'a> SideIndex<'a> {
 /// sides carry its mask there instead, and neither does one that opens a private-key block
 /// (such sides never reach here). O(log lines · context) on `index`: a line starting with
 /// `text` sorts at or after it and before any other line that does not
-/// (`many_hunks_stay_near_linear`).
+/// (`many_hunks_stay_near_linear`). Any line counts, not the one git took it from: a context
+/// shared by two lines is kept either way (cosmetic; the text is the masked side's, declared).
 // MAGI FIX (MS3 §6 loop10): each hunk scanned both whole sides, quadratic in the hunks.
 fn shown_by_a_side(context: &str, index: &SideIndex<'_>) -> bool {
     let Some(text) = context.strip_prefix(' ').filter(|t| !t.is_empty()) else {
