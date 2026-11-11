@@ -418,10 +418,13 @@ pub(crate) fn finish_code_review(r: &Rendered) -> (i32, Option<String>) {
 /// Why a review runs without documentation when its working-tree listing took the whole bound.
 const LISTING_OVERRAN: &str = "listing the working tree took the whole documentation bound";
 
-/// [`LISTING_OVERRAN`] when nothing is `left` of the bound after the listing.
+/// [`LISTING_OVERRAN`] when nothing is `left` of the bound after the listing: the review then
+/// runs without documentation, declared, and never indexes past the bound
+/// (`overran_listing_degrades`). The listing itself is bounded per git call
+/// (`GIT_CALL_TIMEOUT_SECS`), a call in flight finishing before this is seen (declared).
+// MAGI FIX (MS3 §6 loop10): an overrun listing degraded as an indexing timeout.
 fn overran_listing(left: Duration) -> Option<&'static str> {
-    let _ = (left, LISTING_OVERRAN);
-    None
+    left.is_zero().then_some(LISTING_OVERRAN)
 }
 
 /// What is left of the documentation bound ([`REINDEX_TIMEOUT_SECS`]) since `since`, the start
