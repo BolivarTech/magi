@@ -3163,6 +3163,27 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tool_strips_then_masks() {
+        // MAGI FIX (MS3 §6 loop11): the backstop masked, then stripped, so a control byte inside
+        // a key hid it from the detector and the key left whole once the byte was dropped.
+        let key = concat!("sk-ant-api03-", "AAAAAAAAAA\u{1b}AAAAAAAAAA"); // allow-secret-scan
+        let runner = FakeRunner {
+            batches: 1,
+            text: format!("found {key}"),
+            ..FakeRunner::default()
+        };
+        let tool = CodeReviewTool::new(Arc::new(runner), true);
+        let out = tool
+            .execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("runs");
+        assert!(!out.to_string().contains("AAAAAAAAAAAAAAAAAAAA"), "{out}");
+    }
+
     #[test]
     fn post_report_wait_is_bounded() {
         // [MAGI S6 MS3 loop10, R5 Caspar] The tool waited for the history until the run's own

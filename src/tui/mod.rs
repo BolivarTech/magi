@@ -9534,6 +9534,15 @@ end"
     }
 
     #[test]
+    fn error_text_strips_then_masks() {
+        // MAGI FIX (MS3 §6 loop11): masked before `sanitize_text`, a control byte inside a key
+        // hid it from the detector and the key reached the transcript whole.
+        let key = concat!("sk-ant-api03-", "AAAAAAAAAA\u{1b}AAAAAAAAAA"); // allow-secret-scan
+        let text = code_review_error_text(&format!("cannot read {key}"));
+        assert!(!text.contains("AAAAAAAAAAAAAAAAAAAA"), "{text}");
+    }
+
+    #[test]
     fn plan_refusal_is_masked() {
         // [MAGI S6 MS3 loop8, R5 Melchior] The plan arm redacted URL credentials only; a token in
         // a path, ref or git output reached the transcript.
