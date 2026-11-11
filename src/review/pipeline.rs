@@ -1609,7 +1609,9 @@ async fn prepare_contexts(
 }
 
 /// What the completed batches showed as context (U24, RV09): a containing unit's lines count as
-/// reviewed, every other item's file as context only. O(items · log r).
+/// reviewed, every other item's file as context only. Containing units come only from hunk
+/// items, each anchored on a changed line, so each has a gate face (`unit_split_line_reaches_gate`).
+/// O(items · log r).
 ///
 /// An old-side unit's numbers join the same set as the new side's, on purpose: a finding names a
 /// file and a line, no side, so a number shown on either side is reviewed (as a hunk's deleted
@@ -4166,6 +4168,35 @@ mod tests {
             code(&all, 15).is_some(),
             "every unit done: the file is whole"
         );
+    }
+
+    #[test]
+    fn unit_split_line_reaches_gate() {
+        // [MAGI S6 MS3 loop11, R4 Caspar] Verified: a unit-split item brings no containing-unit
+        // context (`containing_units` reads hunks only), so `record_shown_context` marks no line
+        // reviewed that `add_unit_faces` leaves faceless; the unit's own lines have a face.
+        use crate::review::test_support::MapSource;
+        let text = "fn f() {\n    a();\n}\n";
+        let item = BatchItem::Unit {
+            file: "a.rs".into(),
+            name: "f".into(),
+            text: text.into(),
+            first_line: 1,
+            last_line: 3,
+        };
+        let src = MapSource::new(&[("a.rs", text)], &[]);
+        let registry = crate::review::languages::LanguageRegistry::new();
+        let units = crate::review::rag::containing_units(&item, &src, &registry).expect("units");
+        assert!(units.is_empty(), "{units:?}");
+        let batches = vec![ReviewBatch {
+            index: 0,
+            items: vec![item],
+            tokens: 0,
+            companion_tokens: 0,
+        }];
+        let faces = faces_of(&batches, &BTreeSet::from([0]));
+        let code = gate_code(Some("a.rs"), Some(2), &faces, &HashMap::new(), &src);
+        assert!(code.is_some(), "the gate gets the unit's code");
     }
 
     #[test]
