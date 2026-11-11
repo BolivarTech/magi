@@ -227,6 +227,11 @@ fn escaped(item: ContextItem) -> ContextItem {
     }
 }
 
+/// Locks `m`, recovering a poisoned lock explicitly.
+fn relock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The file of a batch item.
 fn item_file(item: &BatchItem) -> &str {
     match item {
@@ -433,19 +438,12 @@ impl StoreRag<'_> {
         docs: &ReviewDocStore,
         query: &[f32],
     ) -> Result<Vec<(DocChunk, f32)>, MemoryError> {
-        let cached = self
-            .doc_vectors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let cached = relock(&self.doc_vectors).clone();
         let vectors = match cached {
             Some(vectors) if vectors.dim() == query.len() => vectors,
             _ => {
                 let loaded = Arc::new(docs.load_vectors(query.len(), &self.doc_sources)?);
-                *self
-                    .doc_vectors
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&loaded));
+                *relock(&self.doc_vectors) = Some(Arc::clone(&loaded));
                 loaded
             }
         };
@@ -459,10 +457,7 @@ impl StoreRag<'_> {
         let Some(git) = self.history_git else {
             return false;
         };
-        let mut memo = self
-            .on_line
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut memo = relock(&self.on_line);
         *memo
             .entry(entry.reviewed_commit.clone())
             .or_insert_with(|| served_as_validated(entry, HISTORY_HEAD, git))
@@ -471,9 +466,7 @@ impl StoreRag<'_> {
     /// Whether the history entry `id`, on `file`, is withheld for the first time in this review.
     /// O(log n).
     fn first_withheld(&self, id: &str, file: &str) -> bool {
-        self.withheld_history
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        relock(&self.withheld_history)
             .insert(id.to_string(), display_path(file))
             .is_none()
     }
@@ -739,10 +732,7 @@ impl RagSource for StoreRag<'_> {
     /// private-key block (`key_block_history_is_declared`), each once.
     // MAGI FIX (MS3 §6 loop10): a withheld history entry's file was never declared.
     fn skipped(&self) -> Vec<String> {
-        let history = self
-            .withheld_history
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let history = relock(&self.withheld_history);
         let mut out = self.withheld_sources.clone();
         for file in history.values() {
             if !out.contains(file) {
@@ -985,10 +975,7 @@ impl ReviewMemory {
                 "the embedder has no known dimension".to_string(),
             ));
         }
-        let key = self
-            .dek
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let key = relock(&self.dek)
             .duplicate()
             .map_err(|e| MemoryError::Crypto(e.to_string()))?;
         ReviewDocStore::new(
@@ -1975,6 +1962,24 @@ mod tests {
             total += a.expect("context").withheld;
         }
         assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn poison_is_recovered_and_cleared() {
+        // [MAGI S6 MS3 loop10, R2 Balthasar] A poisoned lock was swallowed in silence.
+        let m = std::sync::Arc::new(Mutex::new(7u8));
+        let held = std::sync::Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _g = held.lock().expect("lock");
+            panic!("poison");
+        })
+        .join();
+        assert!(m.is_poisoned(), "precondition");
+        assert_eq!(*relock(&m), 7);
+        assert!(
+            !m.is_poisoned(),
+            "recovery is explicit: the poison is cleared"
+        );
     }
 
     #[tokio::test]
