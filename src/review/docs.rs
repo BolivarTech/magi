@@ -1655,6 +1655,16 @@ mod tests {
     }
 
     #[test]
+    fn quoted_bracket_in_attr() {
+        // [MAGI S6 MS3 loop10, R1 Melchior] A `[` inside an attribute's string left the depth
+        // open and swallowed the item line.
+        let lines = ["/// Gated.", "#[cfg(x = \"[\")]", "fn gated() {}"];
+        let c = rust_doc_chunks("a.rs", &lines);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].section, "gated");
+    }
+
+    #[test]
     fn a_secret_only_in_the_path_drops_the_chunk() {
         // [MAGI S6 MS3 loop3, R1 Caspar] The path travels with the chunk (context frame, clear
         // column) and a path cannot be masked and still name its file: RV22's tie-break omits it.
