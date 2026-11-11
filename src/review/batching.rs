@@ -1031,6 +1031,22 @@ mod tests {
     }
 
     #[test]
+    fn headerless_file_header_skipped() {
+        // [MAGI S6 MS3 loop10, R4 Caspar] A headerless text's leading `---`/`+++` pair was
+        // counted as a removed and an added line.
+        let item = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "--- a/a.rs\n+++ b/a.rs\n a\n-b\n".into(),
+            first_line: 7,
+            last_line: 7,
+            old_first_line: 7,
+            old_last_line: 8,
+        };
+        let c = item.hunk_change().expect("a change");
+        assert_eq!((c.added, c.removed), (vec![], vec![8]));
+    }
+
+    #[test]
     fn an_empty_crlf_context_line_is_numbered_as_hunk_change_counts_it() {
         // [MAGI S6 MS3 loop3, R4 Melchior, Balthasar] `number_hunk` split lines on '\n' alone, so
         // an empty context line of a CRLF hunk ("\r") was no line and moved no counter, while
