@@ -1259,6 +1259,26 @@ mod tests {
     }
 
     #[test]
+    fn egress_secret_read_is_noted() {
+        // [MAGI S6 MS3 loop10, R6a Melchior] A sealed cache refusing a raw-secret side
+        // (`EgressSecret`) costs a definition or caller its own item, declared, never the review.
+        struct Sealed;
+        impl ContentSource for Sealed {
+            fn read(&self, p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Err(ReviewError::EgressSecret { path: p.into() })
+            }
+            fn read_old(&self, _p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let files = vec![("a.rs".to_string(), "fn parse() {}\n".to_string())];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        let mut unread = Vec::new();
+        assert!(definitions_for("parse();", &index, &Sealed, &mut unread).is_empty());
+        assert_eq!(unread, vec!["a.rs".to_string()]);
+    }
+
+    #[test]
     fn the_containing_unit_of_a_hunk_is_found_on_its_side_and_priced_as_assemble_charges_it() {
         // [CP2 MS3 loop 12, option 1] One definition for planning's companion and for the context:
         // what plan_batches_with charged is what assemble adds.
