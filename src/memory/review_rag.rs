@@ -39,7 +39,6 @@ use magi_rs::review::history::{
 /// up to now. One definition for the runner's reclassification and the context read.
 pub const HISTORY_HEAD: &str = "HEAD";
 use magi_rs::review::index::LexicalIndex;
-use magi_rs::review::input::SourceKind;
 use magi_rs::review::languages::{ChangedLines, LanguageExtractor, LanguageRegistry};
 use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
 use magi_rs::review::rag::{
@@ -1012,23 +1011,6 @@ impl ReviewMemory {
             key,
             doc_index_id(embedder.model_id(), embedder.dim()),
         )
-    }
-}
-
-/// The revision whose documentation a review serves (RV21, U29): a revision review's new side,
-/// or `None` for the working tree.
-///
-/// # Arguments
-///
-/// * `kind` - The resolved input's content source.
-///
-/// # Returns
-///
-/// The new side's revision, or `None`.
-pub fn doc_revision(kind: &SourceKind) -> Option<&str> {
-    match kind {
-        SourceKind::Revision { new_rev, .. } => Some(new_rev.as_str()),
-        SourceKind::Worktree { .. } => None,
     }
 }
 
@@ -3274,23 +3256,6 @@ mod tests {
         assert_eq!(listed, vec!["README.md", "a.rs", "m.py"]);
         let reads = source.1.lock().expect("lock").clone();
         assert!(!reads.iter().any(|p| p == "B.java"), "{reads:?}");
-    }
-
-    #[test]
-    fn the_documentation_revision_is_the_reviewed_new_side() {
-        // [CP2 MS3 loop 11] main.rs takes `rev` from the resolved input: a revision review lists its new side; every
-        // working-tree input (file, directory, uncommitted: MS2 resolve_input) lists the working tree.
-        let rev = SourceKind::Revision {
-            new_rev: "n1".into(),
-            old_rev: Some("o1".into()),
-        };
-        assert_eq!(doc_revision(&rev), Some("n1"));
-        assert_eq!(
-            doc_revision(&SourceKind::Worktree {
-                old_rev: Some("h".into())
-            }),
-            None
-        );
     }
 
     #[tokio::test]

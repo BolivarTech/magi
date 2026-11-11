@@ -52,9 +52,8 @@ use tokio_util::sync::CancellationToken;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::review_docs::ReviewDocStore;
 use crate::memory::review_rag::{
-    collect_garbage, doc_revision, outbound_prep_reserve_secs, prepare_docs, record_review,
-    DocPrep, RecordStats, ReviewMemory, ReviewRag, HISTORY_HEAD, RECLASSIFY_BUDGET_SECS,
-    REINDEX_TIMEOUT_SECS,
+    collect_garbage, outbound_prep_reserve_secs, prepare_docs, record_review, DocPrep, RecordStats,
+    ReviewMemory, ReviewRag, HISTORY_HEAD, RECLASSIFY_BUDGET_SECS, REINDEX_TIMEOUT_SECS,
 };
 use crate::system::path_guard::PathGuard;
 use crate::system::review_git::{review_path_guard, ScrubbedGit};
@@ -1928,19 +1927,40 @@ fn record_history(
     .map_err(|e| egress_text(&e.to_string()))
 }
 
-/// The history anchor of a review of `input` resolved to `kind`.
-fn history_anchor(input: &ReviewInput, kind: &Result<SourceKind, ReviewError>) -> Option<String> {
-    let _ = input;
-    kind.as_ref()
-        .ok()
-        .and_then(doc_revision)
-        .map(str::to_string)
+/// Whether `input` reviews a git revision (a commit, a range, two branches), whose history is
+/// anchored to it (RV08); the other inputs review the working tree.
+fn is_revision_input(input: &ReviewInput) -> bool {
+    matches!(
+        input,
+        ReviewInput::Commit(_) | ReviewInput::Range { .. } | ReviewInput::Branches { .. }
+    )
 }
 
-/// Whether the documentation side resolves `input`.
+/// The history anchor (RV08) of a review of `input` resolved to `kind`: the reviewed revision's
+/// commit, from the resolution itself. A revision review left without one (its input did not
+/// resolve, or resolved to the working tree) leaves a WARN, so a dropped history is never silent
+/// (`anchorless_revision_warns`); a working-tree review has none by design.
+// MAGI FIX (MS3 §6 loop10): a revision review without an anchor dropped its history unsaid.
+fn history_anchor(input: &ReviewInput, kind: &Result<SourceKind, ReviewError>) -> Option<String> {
+    let anchor = match kind {
+        Ok(SourceKind::Revision { new_rev, .. }) => Some(new_rev.clone()),
+        Ok(SourceKind::Worktree { .. }) | Err(_) => None,
+    };
+    if anchor.is_none() && is_revision_input(input) {
+        tracing::event!(
+            target: REVIEW_LOG_TARGET,
+            tracing::Level::WARN,
+            "the reviewed revision did not resolve: this review's history is not recorded"
+        );
+    }
+    anchor
+}
+
+/// Whether the documentation side resolves `input`: only an embedder uses the resolution, apart
+/// from a revision's history anchor, so a working-tree input without one is not walked.
+// MAGI FIX (MS3 §6 loop10): the tree was walked for nothing without an embedder.
 fn resolves_for_docs(input: &ReviewInput, has_embedder: bool) -> bool {
-    let _ = (input, has_embedder);
-    true
+    has_embedder || is_revision_input(input)
 }
 
 /// Why the history of a revision starting with `-` is not recorded.
