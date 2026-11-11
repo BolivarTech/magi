@@ -1999,6 +1999,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn secret_path_history_withheld() {
+        // [MAGI S6 MS3 loop10, R2 Caspar] A history entry's file path left raw, relying on the
+        // pipeline's backstop; a secret-shaped path withholds the entry here already.
+        let path = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.rs"); // allow-secret-scan
+        let f = RagFixture::new(&[(path, "fn a() {}\n")]).await;
+        let h = HistoryEntry {
+            file: path.into(),
+            ..attended("h4", "off by one")
+        };
+        f.history.record(&[h]).expect("record");
+        f.history
+            .update_status("h4", HistoryStatus::Attended)
+            .expect("status");
+        let rag = f.rag(true);
+        let a = rag
+            .context_for(&batch_on(path, "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(
+            a.items.iter().all(|i| i.kind != ContextKind::History),
+            "{a:?}"
+        );
+        assert_eq!((a.withheld, rag.skipped().len()), (1, 1));
+    }
+
+    #[tokio::test]
     async fn key_block_history_is_declared() {
         // [MAGI S6 MS3 loop10, R2 Melchior] A key-block history entry was only counted: its file
         // never reached the report's `secret` omissions (RV22's exception).
