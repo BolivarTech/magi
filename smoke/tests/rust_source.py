@@ -757,9 +757,16 @@ def secret_openings(root: pathlib.Path) -> list:
               for s in literal.findall(group)]
     fixed = one_definition(text, r"const NON_TOKEN_PREFIXES: &\[&str\] = &\[(.*?)\];",
                            SECRETS_SOURCE, re.S).group(1)
-    url = one_definition(text, r'const URL_AUTHORITY_START: &str = "([^"]+)";',
-                         SECRETS_SOURCE).group(1)
-    openings = tokens + literal.findall(fixed) + [url]
-    if len(tokens) < 2 or "URL_AUTHORITY_START" not in fixed:
+    # MAGI FIX (MS3 §6 loop10): each element is a literal or a `const` named in the file, resolved
+    # here; an element that is neither fails, so a new opening is never dropped (R7b Caspar).
+    openings = list(tokens)
+    for element in (e.strip() for e in fixed.split(",") if e.strip()):
+        value = literal.fullmatch(element)
+        if value is None and re.fullmatch(r"[A-Z][A-Z0-9_]*", element):
+            value = one_definition(text, r'const %s: &str = "([^"]+)";' % element, SECRETS_SOURCE)
+        if value is None:
+            raise AssertionError("%s: NON_TOKEN_PREFIXES element %r did not parse" % (SECRETS_SOURCE, element))
+        openings.append(value.group(1))
+    if len(tokens) < 2:
         raise AssertionError("%s: the openings did not parse: %r" % (SECRETS_SOURCE, openings))
     return [o.lower() for o in openings]
