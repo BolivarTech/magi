@@ -1962,6 +1962,26 @@ mod tests {
         assert_eq!(total, 1);
     }
 
+    #[tokio::test]
+    async fn key_block_history_is_declared() {
+        // [MAGI S6 MS3 loop10, R2 Melchior] A key-block history entry was only counted: its file
+        // never reached the report's `secret` omissions (RV22's exception).
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let h = attended("h3", &format!("{begin}\nQQQQ"));
+        f.history.record(&[h]).expect("record");
+        f.history
+            .update_status("h3", HistoryStatus::Attended)
+            .expect("status");
+        let rag = f.rag(true);
+        for _ in 0..2 {
+            rag.context_for(&batch_on("a.rs", "fn a() {}"))
+                .await
+                .expect("context");
+        }
+        assert_eq!(rag.skipped(), vec!["a.rs".to_string()]);
+    }
+
     use crate::memory::error::EmbeddingError;
 
     /// An embedder that never answers. [CP2 MS3 loop 6] FailingEmbedder now lives in review_docs::test_embedder (T3.3).
