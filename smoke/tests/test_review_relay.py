@@ -145,7 +145,7 @@ class RelayTests(unittest.TestCase):
         # one that is not TOML is a harness error, and the file is left as it was.
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "magi.toml"
-            broken = b'base_url = "r"\nnote = """\n[embedding]\nmodel = "m"\n"""\n'
+            broken = b'[embedding]\nbase_url = """http://a\n/v1"""\nmodel = "m"\n'
             path.write_bytes(broken)
             with self.assertRaisesRegex(HarnessError, "TOML"):
                 runs.point_embedding_at(path, "http://127.0.0.1:9/v1")
