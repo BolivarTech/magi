@@ -20,7 +20,7 @@
 //! let store = ReviewHistoryStore::new(conn, dek)?;
 //! store.record(&entries)?;
 //! let (due, total) = store.due(200)?;
-//! let (validated, cut) = store.validated_on_files(&["src/a.rs".to_string()])?;
+//! let (validated, cut) = store.validated_on_line(&["src/a.rs".to_string()], &|_| true)?;
 //! ```
 
 use std::collections::BTreeSet;
@@ -43,6 +43,11 @@ const FILES_PER_QUERY: usize = 400;
 /// keeps only what fits after the code and the documentation, so more would be decrypted to be
 /// trimmed. Past it the newest are kept and the cut is declared.
 pub const MAX_HISTORY_PER_BATCH: usize = 32;
+
+/// Raw rows (still encrypted, never decrypted here) one file batch of the context read scans
+/// for entries on `HEAD`'s line, eight times [`MAX_HISTORY_PER_BATCH`]: a starting point. Past it
+/// the read declares a cut rather than scan the whole history.
+pub const MAX_HISTORY_SCAN: usize = 8 * MAX_HISTORY_PER_BATCH;
 
 /// Rows the `due` count reads at most: its `total` (the review's backlog) saturates here, so the
 /// count costs O(this) index entries, not O(history). Fifty times the per-review reclassification
@@ -360,51 +365,58 @@ impl ReviewHistoryStore {
     ///
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
-    pub fn validated_on_files(
+    #[cfg(test)]
+    pub(crate) fn validated_on_files(
         &self,
         files: &[String],
+    ) -> Result<(Vec<HistoryEntry>, bool), MemoryError> {
+        self.validated_on_line(files, &|_: &str| true)
+    }
+
+    /// [`Self::validated_on_files`] restricted to the entries whose reviewed commit `on_line`
+    /// accepts (the context read passes its `HEAD` ancestry check), applied to the raw rows
+    /// **before** the bound, so entries of another branch never fill it
+    /// (`off_line_never_starves`). Each file batch reads at most [`MAX_HISTORY_SCAN`] raw rows
+    /// (no decryption); when one reaches it with fewer than the bound kept, more may lie past it
+    /// and the cut is declared. O(scan) `on_line` calls (the caller memoizes them per commit).
+    ///
+    /// # Errors
+    /// As [`Self::validated_on_files`].
+    // MAGI FIX (MS3 §6 loop11): the cap came before the ancestry filter.
+    pub fn validated_on_line(
+        &self,
+        files: &[String],
+        on_line: &dyn Fn(&str) -> bool,
     ) -> Result<(Vec<HistoryEntry>, bool), MemoryError> {
         // MAGI FIX (MS3 §6 loop4): no order (the trimmed tail varied run to run) and no bound
         // (every validated row of the files was decrypted for every batch).
         let distinct: Vec<&String> = files.iter().collect::<BTreeSet<_>>().into_iter().collect();
-        let over = i64::try_from(MAX_HISTORY_PER_BATCH.saturating_add(1)).unwrap_or(i64::MAX);
+        let scan = i64::try_from(MAX_HISTORY_SCAN).unwrap_or(i64::MAX);
         let newest_first = |a: &RawRow, b: &RawRow| {
             b.created_at
                 .cmp(&a.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         };
         let keep = MAX_HISTORY_PER_BATCH.saturating_add(1);
-        let mut raw = Vec::new();
+        let (mut raw, mut saturated) = (Vec::new(), false);
         for batch in distinct.chunks(FILES_PER_QUERY) {
             let mut args: Vec<&dyn rusqlite::ToSql> =
                 batch.iter().map(|f| *f as &dyn rusqlite::ToSql).collect();
-            args.push(&over);
-            raw.extend(self.raw_rows(
+            args.push(&scan);
+            let rows = self.raw_rows(
                 &validated_sql(batch.len()),
                 rusqlite::params_from_iter(args),
-            )?);
+            )?;
+            saturated |= rows.len() >= MAX_HISTORY_SCAN;
+            raw.extend(rows.into_iter().filter(|r| on_line(&r.reviewed_commit)));
             // MAGI FIX (MS3 §6 loop7): every batch's rows were kept until the end, linear in the
             // files; the newest bound + 1 are kept after each one, so the buffer is O(bound).
             raw.sort_by(newest_first);
             raw.truncate(keep);
         }
-        let cut = raw.len() > MAX_HISTORY_PER_BATCH;
+        let cut = raw.len() > MAX_HISTORY_PER_BATCH || saturated;
         raw.truncate(MAX_HISTORY_PER_BATCH);
         Ok((self.decode_all(raw)?, cut))
-    }
-
-    /// [`Self::validated_on_files`] restricted to the entries whose reviewed commit `on_line`
-    /// accepts.
-    ///
-    /// # Errors
-    /// As [`Self::validated_on_files`].
-    pub fn validated_on_line(
-        &self,
-        files: &[String],
-        on_line: &dyn Fn(&str) -> bool,
-    ) -> Result<(Vec<HistoryEntry>, bool), MemoryError> {
-        let _ = on_line;
-        self.validated_on_files(files)
     }
 
     /// [`Self::apply_review`] touching `ids` alone (tests): `checked_at = now`, all or nothing.
