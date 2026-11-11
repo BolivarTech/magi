@@ -15,7 +15,10 @@ which also blanks a trailing ``//`` comment.
 
 A comment line is one whose first non-blank characters are ``//`` (``//``,
 ``///``, ``//!``). The reading is by line, not a Rust lexer, and the limits
-that follow from it are declared rather than handled:
+that follow from it are declared rather than handled. The trade-off is
+deliberate (MAGI §6 MS3 loop11, R7b Balthasar): the harness stays stdlib-only,
+and each format drift fails loudly in its sync guard, which then gets one more
+case here, a recurring cost accepted over a lexer dependency:
 
 - Block comments (``/* ... */``, nested as Rust nests them) are blanked
   before any pattern runs, by a scan that skips string, raw-string and char
