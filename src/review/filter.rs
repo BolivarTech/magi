@@ -569,8 +569,8 @@ fn kept_verdict(
 /// `@@ -a[,b] +c[,d] @@` (`@@@` gives `None`); body lines start with ` `, `+`, `-` or `\`,
 /// anything else gives `None`, and the caller leaves the file out (`secret`).
 ///
-/// O(diff + sides) plus O(hunks × side lines × 80) for the function context (a prefix compare of
-/// at most git's 80-byte context per side line; masked files only).
+/// O(diff + sides) plus O(n log n) to index the n side lines once and O(log n × 80) per hunk for
+/// the function context (masked files only).
 ///
 /// # Returns
 ///
@@ -582,6 +582,7 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
     let (mut next_new, mut next_old) = (0usize, 0usize);
     let mut in_hunk = false;
     let mut diverged = 0usize;
+    let mut index: Option<SideIndex<'_>> = None;
     let mut out = String::with_capacity(diff.len());
     for raw in diff.split_inclusive('\n') {
         let (line, eol) = match raw.strip_suffix('\n') {
@@ -596,7 +597,8 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
             // is, so it carries what the whole-file mask left there and nothing more; masking
             // the context alone would be the diff-alone case (a YAML value with no key line).
             let context = line.get(header.len()..).unwrap_or_default();
-            if shown_by_a_side(context, &new_lines, &old_lines) {
+            let index = index.get_or_insert_with(|| SideIndex::new(&new_lines, &old_lines));
+            if shown_by_a_side(context, index) {
                 out.push_str(context);
             }
             next_old = old_start.saturating_sub(1);
@@ -631,20 +633,35 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
     Some((out, diverged))
 }
 
+/// Every line of both masked sides, sorted once per file, for [`shown_by_a_side`]: the lines
+/// that start with a text are contiguous there, right at the first line not less than it.
+struct SideIndex<'a>(Vec<&'a str>);
+
+impl<'a> SideIndex<'a> {
+    /// The sorted lines of `new` and `old`. O(n log n) for n lines.
+    fn new(new: &[&'a str], old: &[&'a str]) -> Self {
+        let mut lines: Vec<&str> = new.iter().chain(old).copied().collect();
+        visited(lines.len());
+        lines.sort_unstable();
+        Self(lines)
+    }
+}
+
 /// Whether a hunk header's function context (` <text>` after the closing `@@`, git cuts it to
 /// 80 bytes) is shown as it is by some line of the masked sides: the line starts with `<text>`.
 /// An empty context is shown. A context that carries a secret byte never matches, since the
 /// sides carry its mask there instead, and neither does one that opens a private-key block
-/// (such sides never reach here). O(lines · context).
-fn shown_by_a_side(context: &str, new: &[&str], old: &[&str]) -> bool {
+/// (such sides never reach here). O(log lines · context) on `index`: a line starting with
+/// `text` sorts at or after it and before any other line that does not
+/// (`many_hunks_stay_near_linear`).
+// MAGI FIX (MS3 §6 loop10): each hunk scanned both whole sides, quadratic in the hunks.
+fn shown_by_a_side(context: &str, index: &SideIndex<'_>) -> bool {
     let Some(text) = context.strip_prefix(' ').filter(|t| !t.is_empty()) else {
         return context.is_empty();
     };
-    !holds_key_block(text)
-        && new.iter().chain(old).any(|line| {
-            visited(1);
-            line.starts_with(text)
-        })
+    let at = index.0.partition_point(|line| *line < text);
+    visited(index.0.len().max(2).ilog2() as usize);
+    !holds_key_block(text) && index.0.get(at).is_some_and(|line| line.starts_with(text))
 }
 
 #[cfg(test)]
