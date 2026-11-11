@@ -413,6 +413,9 @@ pub(crate) struct HunkLines<'a> {
     lines: std::str::SplitInclusive<'a, char>,
     /// The numbers of the next line, `(old, new)`, while a counter runs.
     counters: Option<(u32, u32)>,
+    /// Leading lines still to read as [`HunkLine::Outside`]: a headerless text's `---`/`+++`
+    /// file-header pair (`headerless_file_header_skipped`).
+    outside: usize,
 }
 
 impl<'a> HunkLines<'a> {
@@ -428,9 +431,16 @@ impl<'a> HunkLines<'a> {
     /// The walker. O(bytes) to look for a header.
     pub(crate) fn new(text: &'a str, start: Option<(u32, u32)>) -> Self {
         let headed = text.lines().any(is_hunk_header);
+        // MAGI FIX (MS3 §6 loop10): a headerless text's file header was counted as body lines.
+        let mut first = text.lines();
+        let file_header = matches!(
+            (first.next(), first.next()),
+            (Some(a), Some(b)) if a.starts_with("--- ") && b.starts_with("+++ ")
+        );
         Self {
             lines: text.split_inclusive('\n'),
             counters: if headed { None } else { start },
+            outside: if !headed && file_header { 2 } else { 0 },
         }
     }
 }
@@ -443,7 +453,10 @@ impl<'a> Iterator for HunkLines<'a> {
         let body = line
             .strip_suffix('\n')
             .map_or(line, |l| l.strip_suffix('\r').unwrap_or(l));
-        let read = if is_hunk_header(body) {
+        let read = if self.outside > 0 {
+            self.outside -= 1;
+            HunkLine::Outside
+        } else if is_hunk_header(body) {
             let first = hunk_ranges(body).map(|((old, _), (new, _))| (old, new));
             self.counters = first;
             HunkLine::Header(first)
