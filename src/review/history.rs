@@ -1028,6 +1028,23 @@ mod tests {
     }
 
     #[test]
+    fn split_footers_are_recognized() {
+        // MAGI FIX (MS3 §6 loop11): a footer joined without its space at a token boundary
+        // ('...PRIVATE' + 'KEY-----'), or an SSH2 one without spaces, slipped the backstop.
+        let d = ARMOR_DASHES;
+        let s = SSH2_DASHES;
+        for footer in [
+            format!("{d}END RSA PRIVATEKEY{d}"),
+            format!("{d}ENDRSA PRIVATE KEY{d}"),
+            format!("{s}END SSH2 {PRIVATE_KEY}{s}"),
+        ] {
+            assert!(holds_key_block_end(&footer), "{footer}");
+        }
+        let mid = format!("x {d}END RSA {PRIVATE_KEY}{d}");
+        assert!(!holds_key_block_end(&mid), "END closes only at line start");
+    }
+
+    #[test]
     fn canonical_footers_are_recognized() {
         // [MAGI S6 MS3 loop8, R3 Caspar/Melchior] The review tool showed the armor dashes
         // mangled; the markers are built from named dash constants, checked here against an
