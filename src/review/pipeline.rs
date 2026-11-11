@@ -1743,7 +1743,8 @@ fn millis(d: Duration) -> u64 {
 
 /// `part / whole` as a fraction; `whole > 0`.
 fn ratio(part: usize, whole: usize) -> f64 {
-    let as_f64 = |n: usize| f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+    // MAGI FIX (MS3 §6 loop10): narrowed through u32. Exact below 2^53, far past any count.
+    let as_f64 = |n: usize| n as f64;
     as_f64(part) / as_f64(whole)
 }
 
