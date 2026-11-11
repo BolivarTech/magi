@@ -1446,7 +1446,7 @@ pub async fn reindex_or_degrade(
 ///
 /// # Errors
 ///
-/// [`MemoryError`] of the store, never swallowed.
+/// [`MemoryError::Storage`] with the store's cause redacted ([`outward_text`]), never swallowed.
 ///
 /// Not one transaction, on purpose: a reclassified status is git's evidence whether or not the
 /// findings are then recorded, and `touch` only moves an entry in the due queue; a failed
@@ -1461,7 +1461,9 @@ pub fn record_review(
     budget: Duration,
 ) -> Result<RecordStats, MemoryError> {
     let started = std::time::Instant::now();
-    let (due, total) = history.due(MAX_RECLASSIFY_PER_REVIEW)?;
+    // MAGI FIX (MS3 §6 loop11): a store error leaves through outward_text, like prepare_docs'.
+    let outward = |e: MemoryError| MemoryError::Storage(outward_text(&e.to_string()));
+    let (due, total) = history.due(MAX_RECLASSIFY_PER_REVIEW).map_err(outward)?;
     // MAGI FIX (MS3 §6 loop10): the writes are gathered, then applied in one transaction.
     let (mut updates, mut touched) = (Vec::new(), Vec::new());
     for entry in &due {
@@ -1473,7 +1475,9 @@ pub fn record_review(
         touched.push(entry.id.clone());
     }
     let checked = touched.len();
-    let recorded = history.apply_review(&updates, &touched, now, findings)?;
+    let recorded = history
+        .apply_review(&updates, &touched, now, findings)
+        .map_err(outward)?;
     Ok(RecordStats {
         reclassified: checked,
         recorded,
