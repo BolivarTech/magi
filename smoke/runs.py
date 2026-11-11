@@ -2447,8 +2447,15 @@ def point_embedding_at(config_path, url: str) -> None:
         lines.append(original)
     if not placed:
         lines.extend((_EMBEDDING_TABLE, line))
-    _replace_bytes(config_path, ("\n".join(lines) + "\n").encode("utf-8"),
-                   "point %s's embedder away" % config_path)
+    rewritten = "\n".join(lines) + "\n"
+    # MAGI FIX (MS3 §6 loop11): the line-based rewrite is parsed back before it is written; one
+    # that is not TOML (a header inside a multi-line string, say) is a harness error, file intact.
+    try:
+        tomllib.loads(rewritten)
+    except tomllib.TOMLDecodeError as exc:
+        raise HarnessError("pointing %s's embedder away gave a file that is not TOML (%s); it is "
+                           "left as it was" % (config_path, exc)) from exc
+    _replace_bytes(config_path, rewritten.encode("utf-8"), "point %s's embedder away" % config_path)
 
 
 def _replace_bytes(path, data: bytes, what: str) -> None:
