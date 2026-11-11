@@ -40,7 +40,7 @@ use magi_rs::review::history::{
 pub const HISTORY_HEAD: &str = "HEAD";
 use magi_rs::review::index::LexicalIndex;
 use magi_rs::review::input::SourceKind;
-use magi_rs::review::languages::LanguageRegistry;
+use magi_rs::review::languages::{ChangedLines, LanguageExtractor, LanguageRegistry};
 use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
 use magi_rs::review::rag::{
     assemble, callers_for, charged_tokens, containing_units_cached, declare_index, declare_lexical,
@@ -267,9 +267,26 @@ fn batch_files(batch: &ReviewBatch) -> Vec<String> {
         .collect()
 }
 
-/// The names of the changed units: each containing unit's, and each unit item's. A whole file
-/// names none (its callers would be every caller of the file).
-fn changed_names(batch: &ReviewBatch, units: &[ContextItem]) -> Vec<String> {
+/// The names of the changed units: each containing unit's, each unit item's, and each named
+/// top-level unit of a whole-file item (all of it is under review; `callers_for` caps what this
+/// brings). O(bytes of the whole-file items) for the extraction.
+// MAGI FIX (MS3 §6 loop10): a whole file named none, so it got no callers (RV07(2)).
+fn changed_names(
+    batch: &ReviewBatch,
+    units: &[ContextItem],
+    registry: &LanguageRegistry,
+) -> Vec<String> {
+    let whole: Vec<String> = batch
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            BatchItem::WholeFile { file, text, .. } => registry.get(file).map(|x| (x, file, text)),
+            _ => None,
+        })
+        .flat_map(|(x, file, text)| x.extract_units(text, file, ChangedLines::All))
+        .map(|u| u.name)
+        .filter(|n| !n.is_empty())
+        .collect();
     let mut seen = BTreeSet::new();
     units
         .iter()
@@ -278,6 +295,7 @@ fn changed_names(batch: &ReviewBatch, units: &[ContextItem]) -> Vec<String> {
             BatchItem::Unit { name, .. } => Some(name.as_str()),
             _ => None,
         }))
+        .chain(whole.iter().map(String::as_str))
         .filter(|n| seen.insert(*n))
         .map(str::to_string)
         .collect()
@@ -624,7 +642,7 @@ impl RagSource for StoreRag<'_> {
         // MAGI FIX (MS3 §6 loop9): an unreadable file costs its own items, declared.
         let (mut unread_defs, mut unread_callers) = (Vec::new(), Vec::new());
         let mut code = definitions_for(&text, self.index, self.sources, &mut unread_defs);
-        let names = changed_names(batch, &units);
+        let names = changed_names(batch, &units, self.registry);
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let (callers, capped) = callers_for(
             &refs,
