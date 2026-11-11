@@ -2983,6 +2983,27 @@ mod tests {
         assert_eq!(prep.doc_sources, BTreeSet::from([src("a.md", "k")]));
     }
 
+    #[tokio::test]
+    async fn allowed_excludes_refused() {
+        // MAGI FIX (MS3 §6 loop11, R1 carry): `doc_sources` is `load_vectors`' allowed set; a
+        // source the store refused leaves it (the netted and bounded ones:
+        // `a_source_whose_code_holds_a_key_block_is_withheld_whole`, `cut_source_leaves_doc_sources`;
+        // `bounded_into` runs before every `index_batch` in `prepare_docs`).
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let bad = format!("{}.md", concat!("sk-ant-api03-", "AAAAAAAAAAAAAAAAAAAA")); // allow-secret-scan
+        let batch = vec![
+            (src(&bad, "k"), vec![chunk(&bad, "s", "x")]),
+            (src("ok.md", "k"), vec![chunk("ok.md", "s", "y")]),
+        ];
+        let mut prep = DocPrep {
+            doc_sources: batch.iter().map(|(s, _)| s.clone()).collect(),
+            ..Default::default()
+        };
+        assert!(index_batch(&f.docs, &batch, &f.embedder, BOUND, &mut prep).await);
+        assert_eq!(prep.doc_sources, BTreeSet::from([src("ok.md", "k")]));
+        assert_eq!(prep.withheld_sources, vec![display_path(&bad)]);
+    }
+
     /// Both sides by path, as `RevisionSource` serves a reviewed diff. [CP2 MS3 loop 10]
     struct TwoSides {
         new: Vec<(&'static str, &'static str)>,
