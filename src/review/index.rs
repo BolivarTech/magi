@@ -510,7 +510,7 @@ impl Reviewed {
 
 /// The named units of `text` that are definitions (a function, a method, a type or a module), at
 /// the top level and down nested blocks (cut by [`LanguageExtractor::split_block`]) to
-/// [`MAX_DEFINITION_DEPTH`] levels, in walk order; a span may come twice. A block's own pieces
+/// `MAX_DEFINITION_DEPTH` levels, in walk order; a span may come twice. A block's own pieces
 /// (header on its first line, one-line close) share its kind and name and are dropped; a nested
 /// block of both starts later and spans lines (declared: a one-line one is not recorded).
 /// O(bytes of `text`) for the extraction.
