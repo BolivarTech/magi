@@ -351,7 +351,7 @@ impl LexicalIndex {
 
     /// Where `name` is defined, as `(file, first_line, last_line)`, in the order the files were
     /// given. Only named units of files with an extractor are definitions, nested ones down to
-    /// [`MAX_DEFINITION_DEPTH`] levels included (see `record_definitions`); a name that is
+    /// `MAX_DEFINITION_DEPTH` levels included (see `record_definitions`); a name that is
     /// defined more than once (homonyms) lists every place. O(1) expected.
     ///
     /// # Arguments
