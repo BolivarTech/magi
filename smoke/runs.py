@@ -2305,20 +2305,19 @@ def embedder_pointed_away(config_path):
 
     For the block's duration, an :func:`error_backend` on loopback answers every
     request with an HTTP error at once, so documentation and history cannot be
-    retrieved and the review must go on without them. A served error, never a
-    guessed port: port 9 is the discard service where it runs (Windows ships it,
-    measured live for R6), which accepts a request and never answers, and a
-    freed ephemeral port can be dropped instead of refused; either way a hang.
+    retrieved and the review must go on without them. (A guessed port such as 9
+    could hang instead: the discard service accepts and never answers.)
 
     Args:
         config_path: The review workspace's configuration, rewritten for the
-            block and restored byte for byte when it ends.
+            block and restored byte for byte when it ends, however it ends; a
+            failed restore is retried once, then raised naming ``--reset-env``.
 
     Yields:
         str: The URL ``[embedding]`` now reaches.
 
     Raises:
-        HarnessError: When the configuration cannot be read or written.
+        HarnessError: When the configuration cannot be read, written or restored.
     """
     # MAGI FIX (S6 MS3 loop2): R17 pointed at port 9, the discard service where it runs.
     # MAGI FIX (MS3 §6 loop8): the file is put back when the block ends, however it ends, so
@@ -2329,11 +2328,32 @@ def embedder_pointed_away(config_path):
         raise HarnessError("could not read %s to point its embedder away: %s"
                            % (config_path, exc)) from exc
     with error_backend() as url:
-        point_embedding_at(config_path, url)
         try:
+            point_embedding_at(config_path, url)
             yield url
         finally:
+            _restore(config_path, original)
+
+
+def _restore(config_path, original: bytes) -> None:
+    """Put *original* back at *config_path*, retrying once (MAGI FIX, MS3 §6 loop10).
+
+    Args:
+        config_path: The file to restore.
+        original: Its bytes before the rewrite.
+
+    Raises:
+        HarnessError: When both attempts fail: the workspace still points
+            ``[embedding]`` at a closed backend, and ``--reset-env`` rebuilds it.
+    """
+    try:
+        _replace_bytes(config_path, original, "restore %s" % config_path)
+    except HarnessError:
+        try:
             _replace_bytes(config_path, original, "restore %s" % config_path)
+        except HarnessError as exc:
+            raise HarnessError("%s; its [embedding] still points at a closed backend: run "
+                               "with --reset-env" % exc) from exc
 
 
 #: The table whose endpoint :func:`point_embedding_at` rewrites.
@@ -3098,6 +3118,14 @@ RELAY_MAX_BODY_BYTES = 32 * 1024 * 1024
 #: for minutes, and the run's own timeout bounds the whole.
 RELAY_UPSTREAM_TIMEOUT_S = 900
 
+#: Seconds the relay waits for a request's body: it is sent at once, so a body
+#: that stalls is a broken client, and its record is incomplete.
+RELAY_BODY_TIMEOUT_S = 30
+
+#: Seconds the relay waits for a byte past the declared body before taking the
+#: request as whole; a client waiting for the answer sends nothing more.
+RELAY_EXTRA_BYTES_WAIT_S = 0.2
+
 #: Headers never copied across the relay: hop by hop, or framing it writes.
 _RELAY_DROPPED_HEADERS = frozenset({"connection", "keep-alive", "proxy-connection",
                                     "transfer-encoding", "te", "trailer", "upgrade",
@@ -3129,7 +3157,7 @@ class RequestBodies:
         """Keep one request, or mark the record incomplete past the cap.
 
         Args:
-            path: Its path, without the query.
+            path: Its target: the path with its query, never the authority.
             body: Its body.
         """
         with self._lock:
@@ -3167,7 +3195,13 @@ class _RelayHandler(_RecordingHandler):
     timeout = RELAY_UPSTREAM_TIMEOUT_S
 
     def _answer(self) -> None:
-        """Record the request, then relay it (see the class)."""
+        """Record the request, then relay it (see the class).
+
+        MAGI FIX (MS3 §6 loop10): the target is kept with its query (never its
+        authority), and a body shorter than its ``Content-Length``, one with
+        bytes past it, or one not read within :data:`RELAY_BODY_TIMEOUT_S`
+        marks the record incomplete and is not forwarded (R7a Caspar, Melchior).
+        """
         rec = self.server.bodies
         declared = (self.headers.get("Content-Length") or "0").strip()
         usable = declared.isascii() and declared.isdigit() and len(declared) <= MAX_CONTENT_LENGTH_DIGITS
@@ -3177,11 +3211,30 @@ class _RelayHandler(_RecordingHandler):
                 rec.lose()
                 self.send_error(413)
                 return
+            self.connection.settimeout(RELAY_BODY_TIMEOUT_S)
             body = self.rfile.read(int(declared))
-            rec.record(urllib.parse.urlsplit(self.path).path, body)
+            if len(body) != int(declared) or self._has_more():
+                rec.lose()
+                self.send_error(400)
+                return
+            self.connection.settimeout(RELAY_UPSTREAM_TIMEOUT_S)
+            parts = urllib.parse.urlsplit(self.path)
+            rec.record(parts.path + ("?" + parts.query if parts.query else ""), body)
             self._forward(body)
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException, ValueError):
             rec.lose()
+
+    def _has_more(self) -> bool:
+        """Whether bytes follow the declared body (a framing anomaly), waiting at most briefly.
+
+        Returns:
+            bool: ``True`` when the client sent more than its ``Content-Length``.
+        """
+        self.connection.settimeout(RELAY_EXTRA_BYTES_WAIT_S)
+        try:
+            return bool(self.rfile.peek(1))
+        except OSError:
+            return False
 
     def _forward(self, body: bytes) -> None:
         """Send *body* to the upstream and stream its answer back.
@@ -3257,6 +3310,28 @@ def recording_relay(upstream: str):
         server.shutdown()
         server.server_close()
         thread.join(timeout=ERROR_BACKEND_TIMEOUT_S)
+
+
+#: The path endings of a trio completion request (Ollama's native chat and the
+#: OpenAI-compatible one); anything else the relay saw went to the embedder or the gate.
+TRIO_PATH_SUFFIXES = ("/api/chat", "/chat/completions")
+
+
+def trio_bodies(request_bodies) -> tuple:
+    """The bodies of the trio's requests among *request_bodies* (MAGI FIX, MS3 §6 loop10).
+
+    Args:
+        request_bodies: ``(target, body)`` pairs, as :class:`RequestBodies` keeps them.
+
+    Returns:
+        tuple: The bodies whose target's path ends in one of :data:`TRIO_PATH_SUFFIXES`.
+
+    Example:
+        >>> trio_bodies((("/api/chat", b"a"), ("/v1/embeddings", b"b")))
+        (b'a',)
+    """
+    return tuple(b for t, b in request_bodies or ()
+                 if t.split("?", 1)[0].endswith(TRIO_PATH_SUFFIXES))
 
 
 def relay_upstream(config_path, environ=None) -> str:
@@ -3953,7 +4028,7 @@ class RunExecutor:
                     + tuple((name, None) for name in _PROXY_VARIABLES)
                     + ((_NO_PROXY_VARIABLE, _LOOPBACK_HOSTS),))
             finally:
-                _replace_bytes(config, original, "restore %s" % config)
+                _restore(config, original)
         recorded.append(bodies)
 
     def _run_setup(self, definition: RunDefinition, workspace: pathlib.Path) -> None:
