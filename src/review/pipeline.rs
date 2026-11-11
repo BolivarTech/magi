@@ -843,8 +843,9 @@ pub fn plan_review(
 /// The content comes from `source`, the cached reads the batches are built from, so the digest
 /// covers the reviewed code (legend, heading and frames are fixed text). Retrieved documentation
 /// and history are not covered: reference text chosen after the approval, so a documentation edit
-/// in between does not refuse the review; accepted as a narrow injection surface, framed as
-/// reference data and secret-scanned. O(bytes reviewed).
+/// in between does not refuse the review; accepted as a narrow injection surface (someone able to
+/// write the workspace between approval and run), framed as reference data and secret-scanned.
+/// O(bytes reviewed).
 ///
 /// # Errors
 ///
