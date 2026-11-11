@@ -1745,6 +1745,23 @@ mod tests {
     }
 
     #[test]
+    fn spaceless_header_is_a_block() {
+        // MAGI FIX (MS3 §6 loop11): a header joined at a token boundary without its space
+        // ('...RSA PRIVATE' + 'KEY-----') opened no block.
+        let (d, s) = (ARMOR_DASHES, SSH2_ARMOR_DASHES);
+        for text in [
+            format!("{PEM_BEGIN}RSA PRIVATEKEY{d}\nMIIBOg\n"),
+            format!("{d}BEGINRSA {PEM_PRIVATE_KEY}\nMIIBOg\n"),
+            format!("{d}BEGIN PGP PRIVATEKEY BLOCK{d}\nbody\n"),
+            format!("{s}BEGIN SSH2 PRIVATE KEY{s}\nAAAAB3\n"),
+        ] {
+            assert!(holds_key_block(&text), "{text}");
+        }
+        let public = format!("{PEM_BEGIN}PUBLIC KEY{d}\nMIIBIj\n");
+        assert!(!holds_key_block(&public), "a public key is no block");
+    }
+
+    #[test]
     fn a_key_block_is_told_from_a_one_line_secret() {
         // [T3.7 fix round 3] RV22's exception keys on this: PEM, SSH2 and OpenPGP private-key
         // blocks are blocks; a URL password, a token or an AWS key is not.
