@@ -1382,7 +1382,9 @@ impl Default for TuiCodeReviewCommand {
 /// helper for the plan and the run arms (`plan_refusal_is_masked`).
 // MAGI FIX (MS3 §6 loop8): the plan arm redacted URL credentials alone.
 fn code_review_error_text(e: &dyn std::fmt::Display) -> String {
-    crate::agent::Agent::sanitize_text(&crate::tools::code_review::egress_text(&e.to_string()))
+    // MAGI FIX (MS3 §6 loop11): sanitized, then masked, as `egress_safe` orders it, so a control
+    // byte inside a key cannot hide it from the detector (`error_text_strips_then_masks`).
+    crate::tools::code_review::egress_text(&crate::agent::Agent::sanitize_text(&e.to_string()))
 }
 
 /// The runner a `/code-review` command runs on: the session's, or with `--no-memory` the same
