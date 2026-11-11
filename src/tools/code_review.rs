@@ -1635,6 +1635,12 @@ impl CodeReviewRunner for ProductionReviewRunner {
             // MAGI FIX (MS3 §6 loop4): the approved plan is checked again here, before the
             // documentation indexing calls the embedder, so a review refused because its content
             // moved since the approval sends nothing out (`run_review` checks once more).
+            // MAGI FIX (MS3 §6 loop11): declared, not closed: the documentation indexing below
+            // reads the working tree after this check, so a file edited in between is embedded
+            // as it then is (each source read once and its key hashed from the bytes it embeds:
+            // `worktree_doc_read_once`), masked (RV22), and `run_review`'s digest then refuses
+            // the review before any trio call. Only documentation text reaches the embedder in
+            // that window; a revision review reads git objects and has no such window.
             if plan.batches > 0 {
                 if let Some(approved) = plan.digest.as_deref() {
                     let now = self.plan(&plan.input)?;
