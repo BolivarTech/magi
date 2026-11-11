@@ -2183,6 +2183,46 @@ mod tests {
         }
     }
 
+    /// A runner whose review fails and that has post-report work queued (an earlier review's).
+    struct FailingWithWork(Arc<std::sync::atomic::AtomicBool>);
+    #[async_trait::async_trait]
+    impl CodeReviewRunner for FailingWithWork {
+        fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+            FakeRunner::default().plan(input)
+        }
+        async fn run(
+            &self,
+            _plan: ReviewPlan,
+            _budget: ReviewBudget,
+            _cancel: &CancellationToken,
+        ) -> Result<Rendered, ReviewError> {
+            Err(ReviewError::Io("the review failed".into()))
+        }
+        fn after_report(&self) -> Option<PostReport> {
+            let drained = Arc::clone(&self.0);
+            Some(Box::new(move || {
+                drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                None
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_run_still_drains() {
+        // MAGI FIX (MS3 §6 loop11): a failed run returned before the post-report work, so a
+        // shared runner's queued history waited on a success that may never come.
+        let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let tool = CodeReviewTool::new(Arc::new(FailingWithWork(Arc::clone(&drained))), true);
+        let r = tool
+            .execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(r.is_err());
+        assert!(drained.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
     #[tokio::test]
     async fn a_history_warning_survives_the_output_cap() {
         // [MAGI S6 MS3 loop2, R5 Caspar] the warning was appended to the report, and the cap cuts

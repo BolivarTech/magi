@@ -9511,6 +9511,21 @@ end"
     }
 
     #[tokio::test]
+    async fn failed_review_still_drains() {
+        // MAGI FIX (MS3 §6 loop11): the error arm skipped the post-report work, so a shared
+        // runner's queued history from an earlier review waited on a success that may not come.
+        let mut app = App::new_for_test();
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            Arc::new(WarningRunner { fail: true }),
+            shown_plan(),
+        );
+        let review = app.approve_code_review().expect("pending");
+        app.run_approved_code_review(review).await;
+        assert!(app.messages.iter().any(|m| m.contains("HISTORY-WARNING")));
+    }
+
+    #[tokio::test]
     async fn a_post_report_warning_is_added_after_the_report_never_in_its_place() {
         // [MAGI S6 MS3 loop5, R5 Caspar] The history warning goes through `apply_response` as an
         // `Error`; that arm appends a line, so the report shown just before stays on screen.
