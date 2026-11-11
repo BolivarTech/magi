@@ -2236,54 +2236,31 @@ mod tests {
     }
 
     #[test]
-    fn unrebuilt_diff_skips_as_secret() {
+    fn unrebuilt_diff_is_masked() {
         // [MAGI S6 MS3 loop2, R6a Balthasar] the safe fallback of `kept_verdict`: a diff that
         // names a line its masked side does not have cannot be rebuilt, so the raw diff, which
-        // carries the key, is never kept; the file is left out instead.
-        // [MAGI S6 MS3 loop9, R6a Caspar] RV22 names the cause of a file left out for a secret:
-        // `secret`, whatever stopped the masking (loop 6 had a `diff not rebuilt` cause).
+        // carries the key, is never kept as it is.
+        // MAGI FIX (MS3 §6 loop11): it was a third omission class; the raw diff is masked now
+        // (`masked_raw_diff`: a body line no masked side shows verbatim is redacted), the file
+        // reviewed and declared masked, and a file named explicitly is no longer refused.
         let removed = "const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
         let diff = format!("@@ -5,2 +5,1 @@\n-{removed}\n fn f() {{}}\n");
         let old = format!("{removed}\nfn f() {{}}\n");
-        let files = vec![
-            ReviewFile {
+        let inner = MapSource::new(&[("a.rs", "fn f() {}\n")], &[("a.rs", old.as_str())]);
+        for explicit in [false, true] {
+            let one = vec![ReviewFile {
                 path: "a.rs".into(),
-                diff: Some(diff),
-            },
-            ReviewFile {
-                path: "b.rs".into(),
-                diff: None,
-            },
-        ];
-        let inner = MapSource::new(
-            &[("a.rs", "fn f() {}\n"), ("b.rs", "fn b() {}\n")],
-            &[("a.rs", old.as_str())],
-        );
-        let src = CachedSource::new(&inner);
-        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-            .expect("b.rs kept");
-        assert_eq!(
-            f.skipped,
-            vec![Skipped {
-                path: "a.rs".into(),
-                cause: SkipCause::Secret
-            }]
-        );
-        assert!(f.masked.is_empty(), "{:?}", f.masked);
-        assert!(f.kept.iter().all(|k| k.path == "b.rs"), "{:?}", f.kept);
-        // Named explicitly, it is refused with that cause.
-        let one = vec![ReviewFile {
-            path: "a.rs".into(),
-            diff: Some(format!("@@ -5,2 +5,1 @@\n-{removed}\n fn f() {{}}\n")),
-        }];
-        let src = CachedSource::new(&inner);
-        assert!(matches!(
-            filter_files(one, &src, &LanguageRegistry::new(), true, &|_| false),
-            Err(ReviewError::NotReviewable {
-                cause: "secret",
-                ..
-            })
-        ));
+                diff: Some(diff.clone()),
+            }];
+            let src = CachedSource::new(&inner);
+            let f = filter_files(one, &src, &LanguageRegistry::new(), explicit, &|_| false)
+                .expect("kept, masked");
+            assert!(f.skipped.is_empty(), "{:?}", f.skipped);
+            assert_eq!(f.masked.len(), 1, "{:?}", f.masked);
+            let sent = f.kept[0].diff.clone().expect("diff");
+            assert!(!sent.contains("sk-proj-"), "{sent}");
+            assert!(sent.contains("<redacted: "), "{sent}");
+        }
     }
 
     #[test]
@@ -2354,7 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn unrebuilt_diff_warns_and_skips() {
+    fn unrebuilt_diff_warns_and_masks() {
         // [MAGI S6 MS3 loop4, R6a Balthasar] The fallback branch itself: a masked file whose diff
         // disagrees with its sides (a body line without a marker) is left out, the safe
         // direction, and the run log says why at WARN so a parser drift is visible.
@@ -2386,19 +2363,11 @@ mod tests {
             path: "a.rs".into(),
             diff: Some("@@ -1 +1 @@\nno marker here\n".into()),
         }];
-        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false);
-        let skipped = match f {
-            Ok(f) => f.skipped,
-            Err(ReviewError::NothingToReview { skipped }) => skipped,
-            Err(e) => panic!("{e:?}"),
-        };
-        assert_eq!(
-            skipped,
-            vec![Skipped {
-                path: "a.rs".into(),
-                cause: SkipCause::Secret
-            }]
-        );
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("kept, masked (MS3 §6 loop11)");
+        assert!(f.skipped.is_empty(), "{:?}", f.skipped);
+        let sent = f.kept[0].diff.clone().expect("diff");
+        assert!(!sent.contains("sk-ant-"), "{sent}");
         assert_eq!(warns.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
