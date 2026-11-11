@@ -943,8 +943,9 @@ impl CodeReviewTool {
 /// Past the cap the whole review is not kept for the agent: `magi code-review` with the same
 /// input prints it in full.
 ///
-/// The bound holds for any `cap` that fits the result's skeleton with the summary's scalars
-/// (well under a kilobyte); below that the summary's scalars are kept and the cap is passed.
+/// The bound holds for any `cap` that fits the result's skeleton with the summary's numbers and
+/// booleans: past the lists and maps, the largest strings are dropped too, named like them
+/// (`oversized_scalar_is_dropped`); below that the cap is passed.
 ///
 /// Memory: the report and the summary are already held whole when this runs, and serializing
 /// them to measure holds one more copy of the same size, so the peak is about twice what the
@@ -1011,11 +1012,17 @@ fn trimmed_summary(summary: Value, cap: usize) -> Value {
         Value::Object(out)
     };
     while json_len(&tool_result("", with_omitted(&fields, &omitted))) > cap {
-        let largest = fields
-            .iter()
-            .filter(|(_, v)| v.is_array() || v.is_object())
-            .max_by_key(|(_, v)| json_len(v))
-            .map(|(k, _)| k.clone());
+        // MAGI FIX (MS3 §6 loop10): a long scalar kept the result over the cap; lists and maps
+        // go first, then the largest scalar.
+        let largest_of = |pick: &dyn Fn(&Value) -> bool| {
+            fields
+                .iter()
+                .filter(|(_, v)| pick(v))
+                .max_by_key(|(_, v)| json_len(v))
+                .map(|(k, _)| k.clone())
+        };
+        let largest = largest_of(&|v| v.is_array() || v.is_object())
+            .or_else(|| largest_of(&|v| v.is_string()));
         let Some(key) = largest else {
             break;
         };
