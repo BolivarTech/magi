@@ -946,12 +946,16 @@ fn filter_and_plan_with(
     })
 }
 
-/// `e` with a `NothingToReview` naming what the filter left out (`filtered`).
+/// `e` with a `NothingToReview` naming what the filter left out (`filtered`) first, then each
+/// entry the planner named itself that is not already there. O(f · p).
+// MAGI FIX (MS3 §6 loop11): the planner's own entries were replaced, not kept.
 fn with_filter_skips(e: ReviewError, filtered: &[Skipped]) -> ReviewError {
     match e {
-        ReviewError::NothingToReview { .. } => ReviewError::NothingToReview {
-            skipped: filtered.to_vec(),
-        },
+        ReviewError::NothingToReview { skipped: own } => {
+            let mut skipped = filtered.to_vec();
+            skipped.extend(own.into_iter().filter(|s| !filtered.contains(s)));
+            ReviewError::NothingToReview { skipped }
+        }
         other => other,
     }
 }
