@@ -1945,6 +1945,38 @@ mod tests {
     }
 
     #[test]
+    fn unit_cache_poison_warns() {
+        // MAGI FIX (MS3 §6 loop11): UnitCache recovered a poisoned lock in silence.
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Count(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Count {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *e.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let cache = UnitCache::default();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = cache.last.lock();
+            panic!("poison");
+        }));
+        let count = Count::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(count.clone()));
+        let registry = LanguageRegistry::new();
+        let x = registry.get("a.rs").expect("rust");
+        cache.units(false, "a.rs", "a.rs", "fn a() {}\n", x);
+        assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!cache.last.is_poisoned(), "cleared");
+    }
+
+    #[test]
     fn same_name_nested_keeps_defs() {
         // MAGI FIX (MS3 §6 loop11): a block nested in one of its own kind and name was dropped
         // with its definitions.
