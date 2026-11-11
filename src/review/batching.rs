@@ -1202,6 +1202,27 @@ mod tests {
     }
 
     #[test]
+    fn continued_file_charges_header() {
+        // [MAGI S6 MS3 loop10, R4 Melchior] A file continued in a new batch: its header is
+        // charged there again (`close` clears `files`), so the batch never undercounts.
+        let h = |n: u32| format!("@@ -{n},1 +{n},1 @@\n+{}\n", "x".repeat(150));
+        let diff = (1..=3).map(|n| h(n * 10)).collect::<String>();
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff),
+        }];
+        let src = MapSource::new(&[("a.rs", "x\n")], &[]);
+        let b = plan_batches(&files, &src, &LanguageRegistry::new(), 100).expect("plans");
+        assert!(b.len() >= 2, "{}", b.len());
+        let header = estimate_tokens(&file_header("a.rs"));
+        for x in &b {
+            let items: usize = x.items.iter().map(|i| estimate_tokens(&i.rendered())).sum();
+            assert_eq!(x.tokens, items + header);
+            assert!(x.tokens <= 100);
+        }
+    }
+
+    #[test]
     fn a_batch_counts_the_header_of_each_of_its_files_once() {
         // [CP2 MS2 S1 loop 3] RV04 bounds what the trio receives, header included.
         let files = vec![ReviewFile {
