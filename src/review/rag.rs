@@ -90,6 +90,11 @@ pub struct Assembled {
 /// Callers kept per name.
 pub const MAX_CALLERS_PER_NAME: usize = 10;
 
+/// The most occurrences of one name [`callers_for`] inspects (the first by `(file, line)`); a
+/// name with more is declared cut like one past [`MAX_CALLERS_PER_NAME`]. Bounds the per-name
+/// work (file loads, unit lookups) on generated code, where one name can occur millions of times.
+pub const MAX_CALLER_SCAN_PER_NAME: usize = 1_024;
+
 /// What indexing left out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexDeclarations {
@@ -2026,6 +2031,33 @@ mod tests {
         );
         assert_eq!(callers.len(), MAX_CALLERS_PER_NAME);
         assert_eq!(capped, vec!["parse".to_string()]);
+    }
+
+    #[test]
+    fn caller_scan_is_bounded() {
+        // MAGI FIX (MS3 §6 loop11): every occurrence of a name was inspected before the cap.
+        use crate::review::test_support::MapSource;
+        let a = "fn parse() {}\n".to_string();
+        let mut b = "// parse\n".repeat(MAX_CALLER_SCAN_PER_NAME);
+        b.push_str("fn c() {\n    parse();\n}\n");
+        let files = vec![
+            ("a.rs".to_string(), a.clone()),
+            ("b.rs".to_string(), b.clone()),
+        ];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        let src = MapSource::new(&[("a.rs", a.as_str()), ("b.rs", b.as_str())], &[]);
+        let (callers, capped) = callers_for(
+            &["parse"],
+            &index,
+            &src,
+            &LanguageRegistry::new(),
+            &mut Vec::new(),
+        );
+        assert!(
+            callers.is_empty(),
+            "the scan stops at the bound: {callers:?}"
+        );
+        assert_eq!(capped, vec!["parse".to_string()], "and says so");
     }
 
     #[test]
