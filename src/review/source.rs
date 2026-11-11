@@ -15,7 +15,8 @@ use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
 use super::secrets::{
-    holds_key_block, holds_secret_prefix, mask_secrets_keeping_lines_within, BoundedMask,
+    holds_key_block, holds_secret_prefix, mask_secrets_keeping_lines,
+    mask_secrets_keeping_lines_within, BoundedMask,
 };
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
@@ -704,7 +705,7 @@ impl ContentSource for RevisionSource<'_> {
 ///
 /// A text side is held with each one-line secret
 /// masked, line breaks kept (RV22; [`ContentSource::masked`] says what was masked). A side held
-/// raw with a secret (a private-key block, a text too dense to mask, a binary side) is safe only
+/// raw with a secret (a private-key block, a binary side) is safe only
 /// because the filter leaves its file out, and the cache enforces it: such a side, once released,
 /// is refused ([`ReviewError::EgressSecret`]), stays refused even if the file later loses its
 /// header, and after [`ContentSource::seal`] is served to no stage. What no pattern recognises (a
@@ -740,7 +741,7 @@ struct Held {
     /// What was masked in each held side, by side and path (RV22).
     masks: HashMap<(Face, String), SideMask>,
     /// Sides released while they were held raw with a secret in them ([`HeldSide::raw_secret`]:
-    /// a private-key block, RV22's exception, a text too dense to mask, a binary side): never
+    /// a private-key block, RV22's exception, a binary side): never
     /// read again, so no stage after the filter can get that secret back.
     withheld: HashSet<(Face, String)>,
     /// Held sides that are raw with a secret in them ([`HeldSide::raw_secret`]).
@@ -852,7 +853,7 @@ impl<'a> CachedSource<'a> {
         // MAGI FIX (MS3 §6 loop4): a side released unread (left out by its name) was fetched
         // fresh and, holding a key block, served raw; the rule now holds for those sides too.
         // MAGI FIX (MS3 §6 loop5): for every released side, read or not, and for any secret it
-        // would be served raw with (a binary side, one too dense to mask, a key block it gained
+        // would be served raw with (a binary side, a key block it gained
         // after its release), not a key block alone.
         // MAGI FIX (MS3 §6 loop5): and once sealed, for a side the filter never read either.
         if raw_secret && (held.sealed || held.released.contains(&key)) {
@@ -895,9 +896,9 @@ impl<'a> CachedSource<'a> {
 }
 
 /// A side as the cache holds it: a UTF-8 text with no NUL has each secret masked, its line
-/// breaks kept ([`mask_secrets_keeping_lines_within`], bounded by `MAX_MASKED_SIDE_BYTES`: a
-/// side too dense in secrets to mask within it is held as read and its file left out as
-/// `secret`); anything else is held as read, since the filter
+/// breaks kept ([`mask_secrets_keeping_lines_within`], bounded by `MAX_MASKED_SIDE_BYTES`; a
+/// side too dense to mask within it is masked unbounded, `dense_side_is_masked`, its growth a
+/// constant factor of a capped file); anything else is held as read, since the filter
 /// leaves a binary or non-UTF-8 side out (masking could hide the NUL that makes it binary). A
 /// text that holds a multi-line private-key block is held as read too, so the filter's secret
 /// check leaves its file out (REQ-RV22's exception: a key body has no pattern of its own, so no
@@ -907,9 +908,9 @@ fn masked_side(read: Option<Vec<u8>>) -> HeldSide {
     held_side(read, MAX_MASKED_SIDE_BYTES)
 }
 
-/// The largest masked side the cache builds: twice the per-file cap, since a mask can be longer
-/// than its secret. A side whose mask would pass it is too dense in secrets to mask; it is held
-/// as read, so the filter leaves its file out as `secret`, the safe direction of RV22.
+/// The masked side the cache builds in one bounded pass: twice the per-file cap, since a mask
+/// can be longer than its secret. A side whose mask would pass it is masked again without the
+/// bound (never held raw: RV22 omits only key blocks); the review's total cap still applies.
 const MAX_MASKED_SIDE_BYTES: usize = 2 * MAX_REVIEW_FILE_BYTES as usize;
 
 /// A side as the cache holds it ([`masked_side`]), and whether it is held raw with a secret in it.
@@ -918,8 +919,8 @@ struct HeldSide {
     bytes: Option<Vec<u8>>,
     /// What was masked in them, if anything.
     mask: Option<SideMask>,
-    /// The bytes held still hold a secret the detector finds: a private-key block, a text too
-    /// dense to mask within the bound, or a binary or non-UTF-8 side (never masked) with a match
+    /// The bytes held still hold a secret the detector finds: a private-key block, or a binary
+    /// or non-UTF-8 side (never masked) with a match
     /// in its lossy decoding. Such a side reaches no model only because the filter leaves its
     /// file out, so the cache never serves it again once released ([`CachedSource::get`]).
     raw_secret: bool,
@@ -943,7 +944,9 @@ fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
         Some(text) => match mask_secrets_keeping_lines_within(text, max_bytes) {
             BoundedMask::Clean => (None, false),
             BoundedMask::Masked(m) => (Some(m), false),
-            BoundedMask::TooLarge => (None, true),
+            // MAGI FIX (MS3 §6 loop10): a side too dense to mask within the bound was held raw
+            // and its file omitted; RV22 masks every one-line secret, so it is masked unbounded.
+            BoundedMask::TooLarge => (mask_secrets_keeping_lines(text), false),
         },
         // MAGI FIX (MS3 §6 loop5): a binary side is never masked; whether it holds a secret is
         // what decides that it is never served again once released.
@@ -985,7 +988,7 @@ impl ContentSource for CachedSource<'_> {
     }
 
     /// Removes side `face` of `path` and gives its bytes back to the total cap. A side held raw
-    /// with a secret in it (a private-key block, a text too dense to mask, a binary side) is
+    /// with a secret in it (a private-key block, a binary side) is
     /// remembered, and a later read of it is refused; so is any later read of a released side,
     /// read before or not, that would serve it raw with a secret
     /// (`a_key_block_side_released_before_it_was_ever_read_is_refused_too`,

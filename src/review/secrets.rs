@@ -1177,8 +1177,8 @@ pub enum BoundedMask {
     Clean,
     /// The text, masked as [`mask_secrets_keeping_lines`] masks it.
     Masked(LineMasked),
-    /// Masking would have produced more than the bound: the text is too dense in secrets to be
-    /// masked, and its caller leaves it out.
+    /// Masking would have produced more than the bound: the text is too dense in secrets to mask
+    /// within it; the review cache then masks it unbounded (RV22 never omits a one-line secret).
     TooLarge,
 }
 
