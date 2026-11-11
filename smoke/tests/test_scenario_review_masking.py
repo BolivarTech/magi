@@ -230,7 +230,7 @@ class S54Tests(unittest.TestCase):
     def test_body_fragments_below_eight_bytes_fail(self) -> None:
         # MAGI FIX (MS3 §6 loop11, R7a/R7b Melchior): the floor was 8 bytes; 6 and 7 fail now.
         r = _result("R19", 2, None, _REFUSAL)
-        for n in (rm.MIN_LEAK_FRAGMENT, rm.MIN_LEAK_FRAGMENT + 1):
+        for n in (6, 7):
             self.assertEqual(Outcome.FAIL, self._judge(2, r, log=b"x " + _BODY[3:3 + n]), n)
 
     def test_the_second_body_line_in_the_run_log_fails_too(self) -> None:
