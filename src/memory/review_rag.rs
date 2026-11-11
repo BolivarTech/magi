@@ -1449,7 +1449,8 @@ pub async fn reindex_or_degrade(
 ///
 /// Not one transaction, on purpose: a reclassified status is git's evidence whether or not the
 /// findings are then recorded, and `touch` only moves an entry in the due queue; a failed
-/// `record` is returned and leaves nothing stored wrong.
+/// `record` is returned and leaves nothing stored wrong. A failure part-way leaves the state a
+/// budget stop after the last entry done would (verified, MS3 §6 loop10); each step is per entry.
 pub fn record_review(
     history: &ReviewHistoryStore,
     findings: &[HistoryEntry],

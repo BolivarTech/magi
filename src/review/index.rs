@@ -267,8 +267,9 @@ impl LexicalIndex {
     }
 
     /// Records that the identifier with id `name` occurs at `line` of the file with id `file`; a
-    /// second occurrence on the same line is not recorded again. Allocates only when a place is
-    /// really added. O(1) amortized.
+    /// second occurrence on the same line is not recorded again (checked against the last place
+    /// only: `scan` visits each file's lines in order, an invariant this relies on). Allocates only
+    /// when a place is really added. O(1) amortized.
     // MAGI FIX (MS3 §6 loop4): the places grew with the reviewed lines, without a bound.
     // MAGI FIX (MS3 §6 loop5): keyed by the interned id; the name was stored a second time.
     fn record_occurrence(&mut self, name: u32, file: u32, line: u32) {
