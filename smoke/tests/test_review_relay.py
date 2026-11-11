@@ -140,6 +140,48 @@ class RelayTests(unittest.TestCase):
                             pass
                         self.assertEqual(original, path.read_bytes())
 
+    def test_rewrite_must_parse(self) -> None:
+        # MAGI FIX (MS3 §6 loop11, R7a Balthasar): the line-based rewrite was never parsed back;
+        # one that is not TOML is a harness error, and the file is left as it was.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "magi.toml"
+            broken = b'base_url = "r"\nnote = """\n[embedding]\nmodel = "m"\n"""\n'
+            path.write_bytes(broken)
+            with self.assertRaisesRegex(HarnessError, "TOML"):
+                runs.point_embedding_at(path, "http://127.0.0.1:9/v1")
+            self.assertEqual(broken, path.read_bytes())
+
+    def test_setup_clears_the_embedder_rewrite(self) -> None:
+        # MAGI FIX (MS3 §6 loop11, R7a Balthasar): a setup invocation inherited the run's flags.
+        seen = []
+        executor = runs.RunExecutor(binary=None, env={}, config=None)
+        definition = runs.RunDefinition(
+            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
+            stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+            unreachable_embedder=True, setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
+        with unittest.mock.patch.object(executor, "_invoke", lambda d, s: seen.append(d)):
+            executor._run_setup(definition, pathlib.Path("."))
+        self.assertEqual([False], [d.unreachable_embedder for d in seen])
+
+    def test_restore_backs_off(self) -> None:
+        # MAGI FIX (MS3 §6 loop11, R7a Balthasar): the retry ran at once, where a lock held by an
+        # indexer clears after a moment.
+        real, left = runs._replace_bytes, [1]
+
+        def flaky(p, data, what):
+            if left[0]:
+                left[0] -= 1
+                raise HarnessError("locked")
+            real(p, data, what)
+        with tempfile.TemporaryDirectory() as tmp, \
+                unittest.mock.patch.object(runs, "_replace_bytes", flaky), \
+                unittest.mock.patch.object(runs.time, "sleep") as slept:
+            path = pathlib.Path(tmp) / "magi.toml"
+            path.write_bytes(b"rewritten")
+            runs._restore(path, b"x")
+            self.assertEqual(b"x", path.read_bytes())
+        slept.assert_called_once_with(runs.RESTORE_RETRY_DELAY_S)
+
     def test_the_upstream_is_the_one_endpoint_the_config_declares(self) -> None:
         with self.assertRaises(HarnessError), runs.recording_relay("http://u:p@127.0.0.1:1/v1"):
             pass
