@@ -3271,6 +3271,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn post_report_notes_hold_anywhere() {
+        // MAGI FIX (MS3 §6 loop11): the notes promised a "next review", which a one-shot
+        // process (`magi query`, the subcommand) never runs; each must be true on every surface.
+        for note in [POST_REPORT_SKIPPED, POST_REPORT_CUT] {
+            assert!(!note.contains("next review"), "{note}");
+            assert!(
+                note.contains("exits"),
+                "says what a one-shot run loses: {note}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn post_report_bound_is_min() {
         // MAGI FIX (MS3 §6 loop11): the work ran to its own 120 s whatever the caller had left.
