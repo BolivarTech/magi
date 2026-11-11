@@ -139,7 +139,7 @@ class ReviewRunDefinitionTests(unittest.TestCase):
         self.assertEqual(runs.review_skipped_files(), definition.files)
         self.assertFalse(definition.needs_trio)
 
-    def test_the_review_runs_that_reach_the_trio_are_the_large_one_and_the_two_context_runs(self) -> None:
+    def test_the_review_runs_that_reach_the_trio_are_the_large_one_and_the_four_context_runs(self) -> None:
         # R12 (S47) is the large review; R17 (S52) a one-batch review whose embedder is unreachable;
         # R18 (S53) a review of a file whose content holds a one-line key, masked.
         reviewing = {rid for rid, d in runs.DEFINITIONS.items()

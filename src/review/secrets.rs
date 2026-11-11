@@ -331,6 +331,8 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
 
 /// The fixed openings of the patterns that are not tokens, lowercase: a PEM, SSH2 or OpenPGP
 /// header, the AWS secret key's names and a URL's authority.
+// The smoke harness parses this table and the `prefixes: &[...]` lists (`secret_openings` in
+// `smoke/tests/rust_source.py`): keep each element a literal or a `const` of this file.
 const NON_TOKEN_PREFIXES: &[&str] = &[
     "-----begin ",
     "---- begin ssh2 ",

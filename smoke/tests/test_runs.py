@@ -292,10 +292,10 @@ class AccessorTests(unittest.TestCase):
 
 
 class DefinitionTableTests(unittest.TestCase):
-    """The nineteen shared runs, declared complete in one place."""
+    """The twenty-one shared runs, declared complete in one place."""
 
     def test_every_run_of_the_table_is_declared(self) -> None:
-        """All nineteen land here, not one per later task.
+        """All twenty-one land here, not one per later task.
 
         A run whose only owner is a task nobody wrote never gets written at
         all, and the table then names something that does not exist.
