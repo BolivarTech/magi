@@ -548,10 +548,11 @@ pub fn definitions_for(
 
 /// The units that name any of `names` (the changed units), one item per `(file, unit)`, never
 /// the definition nor a unit of the same name (a homonym, a recursive call); at most
-/// [`MAX_CALLERS_PER_NAME`] per name, the first by `(file, line)`. Each file is read and split
-/// once; one without an extractor, or gone, gives none; a unit already given is not repeated.
+/// [`MAX_CALLERS_PER_NAME`] per name, the first by `(file, line)` among the first
+/// [`MAX_CALLER_SCAN_PER_NAME`] occurrences. Each file is read and split once; one without an
+/// extractor, or gone, gives none; a unit already given is not repeated.
 ///
-/// O(occurrences of `names` log occurrences + bytes of the files read).
+/// O(occurrences of `names` + S log S per name, S = the scan bound, + bytes of the files read).
 ///
 /// # Arguments
 ///
@@ -578,12 +579,19 @@ pub fn callers_for(
     let mut files: HashMap<String, Option<FileUnits>> = HashMap::new();
     for name in names {
         let mut places: Vec<(&str, u32)> = index.occurrences(name).collect();
+        // MAGI FIX (MS3 §6 loop11): only the first MAX_CALLER_SCAN_PER_NAME are inspected, in
+        // O(occurrences) (a selection, not a full sort); a cut scan is declared.
+        let cut = places.len() > MAX_CALLER_SCAN_PER_NAME;
+        if cut {
+            places.select_nth_unstable(MAX_CALLER_SCAN_PER_NAME);
+            places.truncate(MAX_CALLER_SCAN_PER_NAME);
+        }
         // Not redundant: `occurrences` yields the files in the order they were given to the
         // index (the listing's order), not by path, and the cap keeps "the first by
         // `(file, line)`"; the sort makes which callers survive the cap independent of that order.
         places.sort_unstable();
         let defined = index.definitions(name);
-        let mut kept = 0usize;
+        let (mut kept, mut over) = (0usize, false);
         for (file, line) in places {
             if defined
                 .iter()
@@ -615,12 +623,15 @@ pub fn callers_for(
                 continue;
             }
             if kept >= MAX_CALLERS_PER_NAME {
-                capped.push((*name).to_string());
+                over = true;
                 break;
             }
             seen.insert(key);
             kept += 1;
             items.push(unit_item(ContextKind::Caller, unit));
+        }
+        if over || cut {
+            capped.push((*name).to_string());
         }
     }
     (items, capped)
