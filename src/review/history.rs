@@ -57,6 +57,11 @@ pub enum HistoryStatus {
 }
 
 impl HistoryStatus {
+    /// Whether the status is validated (RV08): attended or weak reject, never pending.
+    pub fn is_validated(self) -> bool {
+        matches!(self, Self::Attended | Self::WeakReject)
+    }
+
     /// The `snake_case` spelling stored in the `status` column (the `serde` one).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -188,9 +193,10 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
     }
 }
 
-/// Whether a stored validated `entry` may be served as validated context against `head`: only
-/// when its reviewed commit is an ancestor of `head`, so a finding validated on another branch
-/// never reaches a review of this one (RV08 reads git's signal on `head`'s line). The context
+/// Whether a stored `entry` may be served as validated context against `head`: only when its
+/// status is validated ([`HistoryStatus::is_validated`], `pending_is_never_served`) and its
+/// reviewed commit is an ancestor of `head` ([`on_heads_line`]), so a finding validated on another
+/// branch never reaches a review of this one (RV08 reads git's signal on `head`'s line). The context
 /// read applies it to every history entry it serves (`StoreRag::history_items`,
 /// `memory::review_rag`), and the reclassification turns the entry `Pending` once git says so
 /// for certain ([`reclassify_then_record`]). Fails closed: a commit that is no commit id, a
@@ -206,8 +212,23 @@ pub fn classify(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> Histo
 /// # Returns
 /// Whether it may be served.
 // MAGI FIX (MS3 §6 loop7): a validated entry was served whatever branch HEAD was on.
+// MAGI FIX (MS3 §6 loop11): the status was not checked: a `Pending` entry was served.
 pub fn served_as_validated(entry: &HistoryEntry, head: &str, git: &dyn GitCommand) -> bool {
-    let commit = entry.reviewed_commit.as_str();
+    entry.status.is_validated() && on_heads_line(&entry.reviewed_commit, head, git)
+}
+
+/// The ancestry half of [`served_as_validated`]: whether `commit` is a commit id that is an
+/// ancestor of `head`. Depends on `commit` and `head` alone, so a caller may memoize it per
+/// commit (`StoreRag`). Fails closed as [`served_as_validated`]. One local git call.
+///
+/// # Arguments
+/// * `commit` - the reviewed commit.
+/// * `head` - the revision the review runs against.
+/// * `git` - the git runner.
+///
+/// # Returns
+/// Whether `commit` is on `head`'s line.
+pub fn on_heads_line(commit: &str, head: &str, git: &dyn GitCommand) -> bool {
     is_commit_id(commit)
         && !head.starts_with('-')
         && git
