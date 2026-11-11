@@ -531,6 +531,8 @@ impl ReviewDocStore {
     /// answer (another identity's rebuild may have wiped this review's rows); the review declares
     /// its documentation unavailable; so is an allowed source no longer indexed
     /// (`vanished_source_is_an_error`). One snapshot. O(stored sources) plus O(r) decryptions.
+    /// So the caller builds `allowed` from what it indexed: after `bounded`, without the sources
+    /// `netted_chunks` dropped and those [`ReindexStats::refused`] names (`allowed_excludes_refused`).
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if another identity holds the index, a row is not of `dim` or a
