@@ -159,10 +159,15 @@ class RelayScenarioTests(unittest.TestCase):
     def test_s53_reads_the_forwarded_requests(self) -> None:
         doc = {"code_review": {"masked": rm.S53_EXPECTED_MASKED, "masked_unlisted": 0,
                                "skipped": [], "skipped_unlisted": 0}}
-        part = runs.REVIEW_MASKED_KEY[3:3 + rm.LEAK_SLICE_BYTES]
+        body = rm.code_review.key_body(runs.REVIEW_MASKED_KEY)
+        part = body[3:3 + rm.MIN_LEAK_FRAGMENT]
         r = _with(_result("R18", 0, doc), request_bodies=(("/api/chat", b'"' + part + b'"'),))
         self.assertEqual([F], _judged("S53", r, rm.S53_ASSERTIONS[3:]))
         self.assertEqual([C], _judged("S53", _with(r, request_bodies=None), rm.S53_ASSERTIONS[3:]))
+        # MAGI FIX (MS3 §6 loop11): a key in a forwarded request's headers fails too.
+        clean = _with(r, request_bodies=R18_HEALTHY_REQUESTS)
+        leaky = _with(clean, request_headers=(b"X-Key: " + part + b"\n",))
+        self.assertEqual([F], _judged("S53", leaky, rm.S53_ASSERTIONS[3:]))
         # [MAGI S6 MS3 loop10, R7a Melchior] A file declared masked but never sent, or a key in a
         # request's query, passed.
         embeds = R18_HEALTHY_REQUESTS[:-1]
