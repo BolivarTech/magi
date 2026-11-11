@@ -204,34 +204,33 @@ impl ReviewHistoryStore {
         rows.into_iter().map(|r| self.decode(r)).collect()
     }
 
-    /// Records new entries; an `id` already stored is kept as it is (first sighting wins), so
-    /// its `reviewed_commit` stays the one `classify` compares from. Replacing it would restart
-    /// the clock on every review, and a finding nobody attends would never become a weak reject.
-    ///
-    /// The one exception is an `attended` entry: the code it pointed at has changed, so a new
-    /// finding on the same `file:line` (the same id) is a new finding. It replaces the old row
-    /// whole (text, commit, status) and is due first; otherwise it would be dropped while the
-    /// old text kept being served as validated context.
-    ///
-    /// Complexity: O(entries), one transaction.
-    ///
-    /// # Returns
-    /// The rows actually inserted or replaced.
+    /// [`Self::apply_review`] of `entries` alone (tests).
     ///
     /// # Errors
-    /// [`MemoryError::Crypto`] if encryption fails, [`MemoryError::Storage`] if a statement
-    /// fails (nothing is recorded then).
-    pub fn record(&self, entries: &[HistoryEntry]) -> Result<usize, MemoryError> {
-        let sealed: Vec<Vec<u8>> = entries
-            .iter()
-            .map(|e| self.seal_text(e))
-            .collect::<Result<_, _>>()?;
-        let created_at = now_secs();
-        let mut c = self.locked_conn();
-        let tx = c
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(db_err)?;
-        let mut inserted = 0;
+    /// As [`Self::apply_review`].
+    #[cfg(test)]
+    pub(crate) fn record(&self, entries: &[HistoryEntry]) -> Result<usize, MemoryError> {
+        self.apply_review(&[], &[], 0, entries)
+    }
+}
+
+/// Records new entries over `tx` (`sealed`: their encrypted text, in order; the caller commits);
+/// an `id` already stored is kept as it is (first sighting wins), so its `reviewed_commit` stays
+/// the one `classify` compares from. Replacing it would restart the clock on every review, and a
+/// finding nobody attends would never become a weak reject.
+///
+/// The one exception is an `attended` entry: the code it pointed at has changed, so a new
+/// finding on the same `file:line` (the same id) is a new finding. It replaces the old row whole
+/// (text, commit, status) and is due first; otherwise it would be dropped while the old text kept
+/// being served as validated context. O(entries). Returns the rows inserted or replaced.
+fn record_in(
+    tx: &Connection,
+    entries: &[HistoryEntry],
+    sealed: &[Vec<u8>],
+) -> Result<usize, MemoryError> {
+    let created_at = now_secs();
+    let mut inserted = 0;
+    {
         {
             let mut stmt = tx
                 .prepare_cached(
@@ -245,7 +244,7 @@ impl ReviewHistoryStore {
                      WHERE code_review_history.status = ?8",
                 )
                 .map_err(db_err)?;
-            for (e, blob) in entries.iter().zip(&sealed) {
+            for (e, blob) in entries.iter().zip(sealed) {
                 inserted += stmt
                     .execute(params![
                         e.id,
@@ -260,10 +259,11 @@ impl ReviewHistoryStore {
                     .map_err(db_err)?;
             }
         }
-        tx.commit().map_err(db_err)?;
-        Ok(inserted)
     }
+    Ok(inserted)
+}
 
+impl ReviewHistoryStore {
     /// Every entry, decrypted. O(n). No order is promised: reclassification reads
     /// [`Self::due`]. Test-only: no review path reads the whole history.
     ///
@@ -287,7 +287,7 @@ impl ReviewHistoryStore {
     /// Every status is due: a weak reject can become attended, and an attended entry whose
     /// change was reverted goes back to a weak reject. An entry that never resolves is checked
     /// again only after all the others, so it never starves them: that rotation needs the caller
-    /// to [`Self::touch`] every entry it checked, changed or not, and `record_review` does
+    /// to touch ([`Self::apply_review`]) every entry it checked, changed or not, and `record_review` does
     /// (`record_review_touches_an_entry_whose_status_did_not_change`, and here, through that
     /// caller, `the_review_caller_touches_every_checked_entry_so_the_tail_is_never_starved`). Decrypts at most `limit`
     /// rows, so the cost of a review does not depend on the size of the history. The count and
@@ -393,34 +393,27 @@ impl ReviewHistoryStore {
         Ok((self.decode_all(raw)?, cut))
     }
 
-    /// Sets `checked_at = now` on `ids`, all or nothing.
+    /// [`Self::apply_review`] touching `ids` alone (tests): `checked_at = now`, all or nothing.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] naming the first id no row has (nothing is touched then), or
-    /// if a statement fails.
-    pub fn touch(&self, ids: &[String], now: i64) -> Result<(), MemoryError> {
-        let mut c = self.locked_conn();
-        let tx = c
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(db_err)?;
-        for id in ids {
-            let changed = tx
-                .execute(
-                    "UPDATE code_review_history SET checked_at = ?1 WHERE id = ?2",
-                    params![now, id],
-                )
-                .map_err(db_err)?;
-            if changed == 0 {
-                return Err(unknown_id(id));
-            }
-        }
-        tx.commit().map_err(db_err)
+    /// As [`Self::apply_review`].
+    #[cfg(test)]
+    pub(crate) fn touch(&self, ids: &[String], now: i64) -> Result<(), MemoryError> {
+        self.apply_review(&[], ids, now, &[]).map(|_| ())
     }
 
-    /// The writes of one review: statuses, touches, then new entries.
+    /// The writes of one review in **one** transaction, all or nothing: each status in `updates`,
+    /// `checked_at = now` on `touched`, then `entries` recorded (`record_in`: first sighting wins,
+    /// an `attended` id replaced) (`apply_review_is_atomic`). Encryption runs before the lock.
+    /// O(writes). The caller touches every entry it checked, changed or not, so the tail rotates.
+    ///
+    /// # Returns
+    /// The rows `entries` inserted or replaced.
     ///
     /// # Errors
-    /// [`MemoryError`] of the first write that fails.
+    /// [`MemoryError::Storage`] naming an unknown id or a failing statement (nothing written);
+    /// [`MemoryError::Crypto`].
+    // MAGI FIX (MS3 §6 loop10): one statement each, so a failure left a review half applied.
     pub fn apply_review(
         &self,
         updates: &[(String, HistoryStatus)],
@@ -428,29 +421,48 @@ impl ReviewHistoryStore {
         now: i64,
         entries: &[HistoryEntry],
     ) -> Result<usize, MemoryError> {
+        let sealed: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|e| self.seal_text(e))
+            .collect::<Result<_, _>>()?;
+        let mut c = self.locked_conn();
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_err)?;
+        let set = |sql: &str, a: &dyn rusqlite::ToSql, id: &str| match tx
+            .execute(sql, params![a, id])
+            .map_err(db_err)?
+        {
+            0 => Err(unknown_id(id)),
+            _ => Ok(()),
+        };
         for (id, status) in updates {
-            self.update_status(id, *status)?;
+            set(
+                "UPDATE code_review_history SET status = ?1 WHERE id = ?2",
+                &status.as_str(),
+                id,
+            )?;
         }
-        self.touch(touched, now)?;
-        self.record(entries)
+        for id in touched {
+            set(
+                "UPDATE code_review_history SET checked_at = ?1 WHERE id = ?2",
+                &now,
+                id,
+            )?;
+        }
+        let inserted = record_in(&tx, entries, &sealed)?;
+        tx.commit().map_err(db_err)?;
+        Ok(inserted)
     }
 
-    /// Sets the status of one entry.
+    /// [`Self::apply_review`] setting one status (tests).
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] naming the id when no row has it, or if the statement fails.
-    pub fn update_status(&self, id: &str, status: HistoryStatus) -> Result<(), MemoryError> {
-        let changed = self
-            .locked_conn()
-            .execute(
-                "UPDATE code_review_history SET status = ?1 WHERE id = ?2",
-                params![status.as_str(), id],
-            )
-            .map_err(db_err)?;
-        if changed == 0 {
-            return Err(unknown_id(id));
-        }
-        Ok(())
+    /// As [`Self::apply_review`].
+    #[cfg(test)]
+    pub(crate) fn update_status(&self, id: &str, status: HistoryStatus) -> Result<(), MemoryError> {
+        self.apply_review(&[(id.to_string(), status)], &[], 0, &[])
+            .map(|_| ())
     }
 }
 
