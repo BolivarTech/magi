@@ -640,7 +640,24 @@ fn shown_by_a_side(context: &str, new: &[&str], old: &[&str]) -> bool {
     let Some(text) = context.strip_prefix(' ').filter(|t| !t.is_empty()) else {
         return context.is_empty();
     };
-    !holds_key_block(text) && new.iter().chain(old).any(|line| line.starts_with(text))
+    !holds_key_block(text)
+        && new.iter().chain(old).any(|line| {
+            visited(1);
+            line.starts_with(text)
+        })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Side lines the function-context lookup examined on this thread (`many_hunks_stay_near_linear`).
+    static CONTEXT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts `n` side-line visits of the function-context lookup (tests only).
+fn visited(n: usize) {
+    #[cfg(test)]
+    CONTEXT_VISITS.with(|c| c.set(c.get().saturating_add(n)));
+    let _ = n;
 }
 
 /// The lines of a side, each without its `\n` (a `\r` stays, as git shows it); none for an
@@ -2165,6 +2182,22 @@ mod tests {
             src.read("k.rs"),
             Err(ReviewError::EgressSecret { .. })
         ));
+    }
+
+    #[test]
+    fn many_hunks_stay_near_linear() {
+        // [MAGI S6 MS3 loop10, R6a Balthasar] Each hunk's context scanned both whole sides.
+        let n = 2_000usize;
+        let side: String = (0..n).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        let diff: String = (1..=n)
+            .map(|i| format!("@@ -{i},1 +{i},1 @@ fn f{}\n fn f{}() {{}}\n", i - 1, i - 1))
+            .collect();
+        CONTEXT_VISITS.with(|c| c.set(0));
+        let (_, diverged) =
+            rebuilt_diff(&diff, Some(side.as_bytes()), Some(side.as_bytes())).expect("rebuilds");
+        assert_eq!(diverged, 0);
+        let visits = CONTEXT_VISITS.with(std::cell::Cell::get);
+        assert!(visits <= 4 * n + 64 * n, "{visits}");
     }
 
     #[test]
