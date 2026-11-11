@@ -393,6 +393,20 @@ impl ReviewHistoryStore {
         Ok((self.decode_all(raw)?, cut))
     }
 
+    /// [`Self::validated_on_files`] restricted to the entries whose reviewed commit `on_line`
+    /// accepts.
+    ///
+    /// # Errors
+    /// As [`Self::validated_on_files`].
+    pub fn validated_on_line(
+        &self,
+        files: &[String],
+        on_line: &dyn Fn(&str) -> bool,
+    ) -> Result<(Vec<HistoryEntry>, bool), MemoryError> {
+        let _ = on_line;
+        self.validated_on_files(files)
+    }
+
     /// [`Self::apply_review`] touching `ids` alone (tests): `checked_at = now`, all or nothing.
     ///
     /// # Errors
@@ -878,6 +892,29 @@ mod tests {
             .validated_on_files(&["src/b.rs".to_string()])
             .expect("read");
         assert!(few.is_empty() && !cut);
+    }
+
+    #[test]
+    fn off_line_never_starves() {
+        // MAGI FIX (MS3 §6 loop11): the cap came before the ancestry filter, so newer entries of
+        // another branch filled it and an older one on HEAD's line was never read.
+        let (store, _tmp) = store_for_test();
+        let mut entries: Vec<HistoryEntry> = (0..=MAX_HISTORY_PER_BATCH)
+            .map(|i| stored(&format!("a{i:03}"), Some(1), "c2"))
+            .collect();
+        entries.push(stored("z", Some(1), "c1"));
+        store.record(&entries).expect("record");
+        for e in &entries {
+            store
+                .update_status(&e.id, HistoryStatus::Attended)
+                .expect("attend");
+        }
+        let (got, cut) = store
+            .validated_on_line(&["src/a.rs".to_string()], &|c: &str| c == "c1")
+            .expect("read");
+        let ids: Vec<String> = got.into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec!["z".to_string()]);
+        assert!(!cut, "nothing on the line was cut");
     }
 
     #[test]

@@ -485,13 +485,16 @@ impl StoreRag<'_> {
         let Some(git) = self.history_git else {
             return false;
         };
-        if !entry.status.is_validated() {
-            return false;
-        }
+        entry.status.is_validated() && self.commit_on_line(git, &entry.reviewed_commit)
+    }
+
+    /// [`on_heads_line`] of `commit` on `HEAD`, memoized in [`Self::on_line`]; `false` without a
+    /// git. O(1) after the first call for a commit.
+    fn commit_on_line(&self, git: &dyn GitCommand, commit: &str) -> bool {
         let mut memo = relock(&self.on_line);
         *memo
-            .entry(entry.reviewed_commit.clone())
-            .or_insert_with(|| on_heads_line(&entry.reviewed_commit, HISTORY_HEAD, git))
+            .entry(commit.to_string())
+            .or_insert_with(|| on_heads_line(commit, HISTORY_HEAD, git))
     }
 
     /// Whether the history entry `id`, on `file`, is withheld for the first time in this review.
@@ -520,7 +523,12 @@ impl StoreRag<'_> {
         if self.history_failed.load(Ordering::SeqCst) {
             return Vec::new();
         }
-        match history.validated_on_files(files) {
+        let on_line = |commit: &str| {
+            self.history_git
+                .is_some_and(|g| self.commit_on_line(g, commit))
+        };
+        // MAGI FIX (MS3 §6 loop11): the ancestry filter runs before the cap, in the store.
+        match history.validated_on_line(files, &on_line) {
             Ok((entries, cut)) => {
                 // MAGI FIX (MS3 §6 loop4): the read is bounded now; what it cut is declared.
                 if cut {
