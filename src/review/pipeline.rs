@@ -2300,6 +2300,22 @@ mod tests {
     }
 
     #[test]
+    fn close_frame_starts_a_line() {
+        // MAGI FIX (MS3 §6 loop11): the newline before the close was decided on the text before
+        // masking; a mask that ends the text without one put the close on its last line.
+        let begin = concat!("-----", "BEGIN RSA ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END RSA ", "PRIVATE KEY-----");
+        for text in [format!("x\n{begin}\nMIIB\n{end}\n"), format!("x {begin}\n")] {
+            let mut item = ctx(ContextKind::Documentation, "README.md", "Setup", None);
+            item.text = text;
+            let (_, close) = context_frame(&item.kind, "README.md", false);
+            let mut prompt = String::new();
+            write_context(&mut prompt, &[item]);
+            assert!(prompt.contains(&format!("\n{close}\n")), "{prompt}");
+        }
+    }
+
+    #[test]
     fn a_number_both_in_an_old_side_unit_and_a_new_range_is_ambiguous() {
         // [MAGI S6 MS3 loop7, R4 Melchior] An old-side unit's line and a new-side hunk line can
         // share a number once a hunk shifts the numbering; the gate read the new side and could
