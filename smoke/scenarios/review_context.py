@@ -307,7 +307,7 @@ _TOKEN_CODE = "pub fn token"
 S56_ASSERTIONS = (
     "exit 0",
     "the embedder was sent the reviewed commit's doc comment as a chunk",
-    "no request the relay forwarded carries the working tree's doc comment",
+    "no request the relay forwarded carries the working tree's or the parent commit's doc comment",
 )
 
 #: S57 (R21, RV08): history validated across revisions reaches the trio.
@@ -374,8 +374,9 @@ def documentation_comes_from_the_reviewed_commit(run):
     yield _judged(texts, 1, "R20",
                   _chunk_sent(run.request_bodies, runs.REVIEW_COMMITTED_DOC.decode(), _ANSWER_CODE),
                   "no embedded text is the committed doc comment alone")
-    dirty = [p for p, b in run.request_bodies if runs.REVIEW_DIRTY_DOC in b]
-    yield _judged(texts, 2, "R20", not dirty, "the working tree's doc comment went to %s" % dirty)
+    other = (runs.REVIEW_DIRTY_DOC, runs.REVIEW_PARENT_DOC)
+    dirty = [p for p, b in run.request_bodies if any(d in b for d in other)]
+    yield _judged(texts, 2, "R20", not dirty, "the working tree's or the parent's doc comment went to %s" % dirty)
 
 
 @scenario("S57", assertions=S57_ASSERTIONS, run="R21", needs_backend=True)

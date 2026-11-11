@@ -2241,10 +2241,13 @@ def review_masked_files() -> tuple[tuple[str, bytes], ...]:
 REVIEW_MASKED_DOC = b"Returns the token of the toy service."
 
 #: R20 (S56, RV21, RV-S36) reviews ``HEAD`` of a two-commit history whose file's
-#: doc comment says :data:`REVIEW_COMMITTED_DOC`, while the working tree's copy,
-#: left dirty, says :data:`REVIEW_DIRTY_DOC`: no request may carry the second.
+#: doc comment says :data:`REVIEW_COMMITTED_DOC` at ``HEAD`` and
+#: :data:`REVIEW_PARENT_DOC` at its parent, while the working tree's copy, left
+#: dirty, says :data:`REVIEW_DIRTY_DOC`: no request may carry either of the last two.
+#: MAGI FIX (MS3 §6 loop11): both commits wrote one doc comment, so HEAD^'s passed.
 REVIEW_DOCREV_FILE = "docrev/answer.rs"
 REVIEW_COMMITTED_DOC = b"Returns the committed answer."
+REVIEW_PARENT_DOC = b"Returns the parent answer."
 REVIEW_DIRTY_DOC = b"Returns the dirty answer."
 
 
@@ -3860,7 +3863,7 @@ DEFINITIONS: dict[str, RunDefinition] = {
         needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=900,
         files=((REVIEW_DOCREV_FILE, _answer_file(REVIEW_DIRTY_DOC, b"3")),),
         records_requests=True,
-        setup=(Commit(((REVIEW_DOCREV_FILE, _answer_file(REVIEW_COMMITTED_DOC, b"1")),)),
+        setup=(Commit(((REVIEW_DOCREV_FILE, _answer_file(REVIEW_PARENT_DOC, b"1")),)),
                Commit(((REVIEW_DOCREV_FILE, _answer_file(REVIEW_COMMITTED_DOC, b"2")),)))),
     "R21": RunDefinition(
         run_id="R21",
