@@ -2996,6 +2996,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tool_result_is_masked_again() {
+        // [MAGI S6 MS3 loop10, R5 Caspar, Melchior] The tool redacted URLs only: a runner whose
+        // `Rendered` skipped `render_outcome` handed secrets and control bytes to the agent.
+        let key = concat!("sk-ant-api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let runner = FakeRunner {
+            batches: 1,
+            text: format!("found {key}\u{1b}[2J"),
+            json: Some(serde_json::json!({ "note": key })),
+            ..FakeRunner::default()
+        };
+        let tool = CodeReviewTool::new(Arc::new(runner), true);
+        let out = tool
+            .execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("runs");
+        let text = out.to_string();
+        assert!(!text.contains("sk-ant-api03-"), "{text}");
+        assert!(
+            !out["report"].as_str().unwrap_or("").contains('\u{1b}'),
+            "{text}"
+        );
+    }
+
     #[test]
     fn post_report_wait_is_bounded() {
         // [MAGI S6 MS3 loop10, R5 Caspar] The tool waited for the history until the run's own
