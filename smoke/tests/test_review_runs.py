@@ -90,7 +90,10 @@ class ReviewInputTests(unittest.TestCase):
         files = dict(runs.review_skipped_files())
         self.assertIn(b"\x00", files["skipped/pixel.png"])
         # [T3.7] a key in the content is masked, so the key must be in the path to be left out.
-        (name, content), = ((p, c) for p, c in files.items() if p != "skipped/pixel.png")
+        # [MAGI S6 MS3 loop11, R7b Balthasar] a length check first, not a bare tuple unpacking.
+        others = [(p, c) for p, c in files.items() if p != "skipped/pixel.png"]
+        self.assertEqual(1, len(others), [p for p, _ in others])
+        (name, content), = others
         self.assertTrue(name.startswith("skipped/sk-ant-"), name)  # allow-secret-scan
         self.assertIn(b"sk-ant-", content)  # allow-secret-scan
 
@@ -139,9 +142,11 @@ class ReviewRunDefinitionTests(unittest.TestCase):
         self.assertEqual(runs.review_skipped_files(), definition.files)
         self.assertFalse(definition.needs_trio)
 
-    def test_the_review_runs_that_reach_the_trio_are_the_large_one_and_the_four_context_runs(self) -> None:
-        # R12 (S47) is the large review; R17 (S52) a one-batch review whose embedder is unreachable;
-        # R18 (S53) a review of a file whose content holds a one-line key, masked.
+    def test_trio_review_runs(self) -> None:
+        # [MAGI S6 MS3 loop11, R7b Balthasar] Renamed: the old name said four context runs. Five
+        # reach the trio: R12 (S47) the large review; R17 (S52) a one-batch review whose embedder
+        # is unreachable; R18 (S53) a file whose content holds a one-line key, masked; R20 (S56)
+        # and R21 (S57) the revision and history reviews.
         reviewing = {rid for rid, d in runs.DEFINITIONS.items()
                      if d.argv[0] == "code-review" and d.needs_trio}
         self.assertEqual({"R12", "R17", "R18", "R20", "R21"}, reviewing)
