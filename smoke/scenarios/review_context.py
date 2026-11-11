@@ -430,6 +430,12 @@ def _history_served(request_bodies, located) -> bool:
     review's reclassification gave it (``history_item`` in
     ``src/memory/review_rag.rs``); titles are compared JSON-escaped, as sent.
 
+    Coupling, declared (MAGI FIX, MS3 §6 loop11): this reads the product's
+    prompt framing byte for byte (the ``<<<context kind=history file=…>>>``
+    frame of ``context_frame`` in ``src/review/pipeline.rs`` and the
+    ``title (status)`` line of ``history_item``). A change to either format
+    turns S57 red while the feature may still work: update this probe with it.
+
     Args:
         request_bodies: The relay's ``(target, body)`` record.
         located: The first review's findings on :data:`runs.REVIEW_HISTORY_FILE`.
