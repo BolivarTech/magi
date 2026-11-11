@@ -911,9 +911,10 @@ enum Side {
 /// logged at WARN with the shown path and the scrubbed error; for a file named explicitly it
 /// stays an error. Nothing of the file is sent either way. A side the cache refuses for a
 /// secret ([`ReviewError::EgressSecret`]: one already left out, such as a path listed twice) is
-/// the skip `secret`. Past the filter that refusal stays an error that ends the review, on
-/// purpose: every later stage reads only the kept files, so a refusal there means a stage read
-/// beyond them, and failing closed is RV22's tie-break
+/// the skip `secret`. Past the filter the cache serves masked content and refuses only raw-secret
+/// sides: the containing units and the lexical index read the kept files, where a refusal ends
+/// the review (failing closed is RV22's tie-break); a definition or caller read
+/// declares its item unreadable instead (`egress_secret_read_is_noted` in `rag`)
 /// (`a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review`,
 /// `after_the_filter_no_stage_is_served_a_key_block_it_never_classified`).
 ///
@@ -1593,7 +1594,7 @@ mod tests {
     fn a_text_file_git_marks_binary_whose_old_key_block_lost_its_begin_line_is_left_out() {
         // [T3.7 fix round 2, re-review R2] the branch reviewed whole from its new side: the old
         // side holds the block, the new side the block's edited body without its armor, which no
-        // fingerprint can match. The block sets of the two sides must be equal, else `secret`.
+        // fingerprint can match. Any side holding a key block leaves the file out (`secret`).
         let section = "diff --git a/key.rs b/key.rs\nindex 1111111..2222222 100644\n\
                        Binary files a/key.rs and b/key.rs differ\n";
         let old = format!(

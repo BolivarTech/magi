@@ -1036,7 +1036,8 @@ impl ContentSource for CachedSource<'_> {
     /// From now on no side held raw with a secret is served, read before or not
     /// (`once_sealed_the_cache_never_serves_a_side_raw_with_a_secret_even_one_never_classified`).
     /// A kept file never has such a side (the filter left it out), so only a read beyond the
-    /// kept files is refused. O(1).
+    /// kept files is refused, and its caller decides: a definition or caller read declares its
+    /// item unreadable, any other stage fails closed. O(1).
     fn seal(&self) {
         self.held
             .lock()
