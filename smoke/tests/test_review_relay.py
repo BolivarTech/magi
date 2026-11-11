@@ -142,6 +142,9 @@ class RelayTests(unittest.TestCase):
 
 
 P, F, C = Outcome.PASS, Outcome.FAIL, Outcome.CANNOT_TEST
+# [MAGI S6 MS3 loop11, R7b Caspar] False positive: `scenario_result` has no `setup_outputs`
+# parameter on purpose; S57's results add it with `dataclasses.replace` (`_with`), so the relay
+# history subcases run and judge (10 tests, OK).
 _with = dataclasses.replace
 
 
