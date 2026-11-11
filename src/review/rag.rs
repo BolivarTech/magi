@@ -494,7 +494,9 @@ impl FileUnits {
 /// The definitions of the names the batch code uses, one item per definition.
 ///
 /// The input is the batch's raw code: every identifier counts, quoted or not, in the order it
-/// first appears. A name with more than one definition (homonyms) marks each as a `candidate`;
+/// first appears. Accepted over-retrieval (declared): a name in a comment or a string fetches its
+/// definition too. It costs budget only: `assemble` holds the batch's limit and can let it
+/// displace lower layers (callers, documentation, history), never a containing unit. A name with more than one definition (homonyms) marks each as a `candidate`;
 /// a name with none (a keyword, an outside symbol) adds nothing. Each file is read once. Needs a
 /// complete index to be exhaustive: when `index.is_complete()` is false some definitions may be
 /// missing.
