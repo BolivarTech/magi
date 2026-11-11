@@ -24,6 +24,7 @@
 //! ```
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -97,6 +98,8 @@ pub struct ReviewHistoryStore {
     vault: CryptoVault,
     /// The data key, masked in RAM; the lock is never held across the connection lock (R-V08).
     dek: Mutex<MaskedDek>,
+    /// Rows a read skipped because they did not decode (each one WARNed).
+    corrupt: AtomicUsize,
 }
 
 fn db_err(e: rusqlite::Error) -> MemoryError {
@@ -139,6 +142,7 @@ impl ReviewHistoryStore {
             conn,
             vault: CryptoVault::default(),
             dek: Mutex::new(dek),
+            corrupt: AtomicUsize::new(0),
         })
     }
 
@@ -203,6 +207,11 @@ impl ReviewHistoryStore {
             detail,
             status,
         })
+    }
+
+    /// How many rows this store's reads skipped because they did not decode.
+    pub fn corrupt_rows(&self) -> usize {
+        self.corrupt.load(Ordering::SeqCst)
     }
 
     fn decode_all(&self, rows: Vec<RawRow>) -> Result<Vec<HistoryEntry>, MemoryError> {
@@ -904,6 +913,33 @@ mod tests {
             .validated_on_files(&["src/b.rs".to_string()])
             .expect("read");
         assert!(few.is_empty() && !cut);
+    }
+
+    #[test]
+    fn corrupt_row_is_skipped() {
+        // MAGI FIX (MS3 §6 loop11): one undecryptable row failed the whole read.
+        let (store, _tmp) = store_for_test();
+        let entries = [stored("bad", Some(1), "c1"), stored("good", Some(2), "c1")];
+        store.record(&entries).expect("record");
+        for e in &entries {
+            store
+                .update_status(&e.id, HistoryStatus::Attended)
+                .expect("attend");
+        }
+        store
+            .locked_conn()
+            .execute(
+                "UPDATE code_review_history SET finding_blob = x'00' WHERE id = 'bad'",
+                [],
+            )
+            .expect("corrupt");
+        let (got, _) = store
+            .validated_on_files(&["src/a.rs".to_string()])
+            .expect("the rest is read");
+        let ids: Vec<String> = got.into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec!["good".to_string()]);
+        assert_eq!(store.corrupt_rows(), 1);
+        assert_eq!(store.due(10).expect("due").0.len(), 1);
     }
 
     #[test]

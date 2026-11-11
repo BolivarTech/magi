@@ -76,6 +76,9 @@ pub const DIMENSION_PROBE_TIMEOUT_SECS: u64 = EMBED_QUERY_TIMEOUT_SECS;
 /// Documentation chunks retrieved per batch before `assemble` trims to the budget.
 pub const DOC_SEARCH_K: usize = 8;
 
+/// What the report says when history rows that did not decode were skipped.
+const CORRUPT_HISTORY: &str = "history rows that could not be decoded were skipped";
+
 /// Why a listed working-tree documentation source gave no bytes: it was gone when read.
 const VANISHED: &str = "gone since it was listed";
 
@@ -146,6 +149,8 @@ pub struct StoreRag<'a> {
     pub docs_failed: AtomicBool,
     /// A history read failed once: no later batch reads it.
     pub history_failed: AtomicBool,
+    /// Skipped history rows (they did not decode) were declared once.
+    pub corrupt_declared: AtomicBool,
     /// The reviewed revision's documentation sources: `search` sees only these (RV21).
     pub doc_sources: BTreeSet<DocSource>,
     /// Documentation paths left out for a secret, as `display_path`, returned by `skipped`: a
@@ -530,6 +535,11 @@ impl StoreRag<'_> {
         // MAGI FIX (MS3 §6 loop11): the ancestry filter runs before the cap, in the store.
         match history.validated_on_line(files, &on_line) {
             Ok((entries, cut)) => {
+                // MAGI FIX (MS3 §6 loop11): a row that did not decode is skipped, declared once.
+                if history.corrupt_rows() > 0 && !self.corrupt_declared.swap(true, Ordering::SeqCst)
+                {
+                    declared.push((ContextKind::History, CORRUPT_HISTORY.to_string()));
+                }
                 // MAGI FIX (MS3 §6 loop4): the read is bounded now; what it cut is declared.
                 if cut {
                     declared.push((
@@ -914,6 +924,7 @@ impl RagSource for ReviewRag<'_> {
             embedder_down: AtomicBool::new(false),
             docs_failed: AtomicBool::new(false),
             history_failed: AtomicBool::new(false),
+            corrupt_declared: AtomicBool::new(false),
             doc_sources: BTreeSet::new(),
             withheld_sources: Vec::new(),
             masked_sources: Vec::new(),
@@ -1618,6 +1629,7 @@ mod tests {
                 embedder_down: Default::default(),
                 docs_failed: Default::default(),
                 history_failed: Default::default(),
+                corrupt_declared: Default::default(),
                 doc_sources: BTreeSet::new(),
                 withheld_sources: Vec::new(),
                 masked_sources: Vec::new(),
