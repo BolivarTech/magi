@@ -40,8 +40,8 @@ use magi_rs::vault::MaskedDek;
 /// The tracing target of this module's WARNs (the review's).
 const LOG_TARGET: &str = "magi_rs::review";
 
-/// Files per `validated_on_files` query: one parameter each plus none fixed, well under the
-/// 999-parameter limit of older SQLite builds.
+/// Files per `validated_on_line` query: one parameter each plus the fixed `LIMIT ?`, so 401 in
+/// all, well under the 999-parameter limit of older SQLite builds (raise it to 998 at most).
 const FILES_PER_QUERY: usize = 400;
 
 /// Validated entries one batch reads at most (a starting point, not a measurement): the context
