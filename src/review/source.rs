@@ -1057,6 +1057,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn egress_secret_path_is_shown() {
+        // MAGI FIX (MS3 §6 loop11): the refusal carried the raw path, control characters and a
+        // secret-shaped name included, to any formatter or serializer.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let keyed = format!("{begin}\nMIIBVQ\n");
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        for path in ["k\u{1b}[2J.pem".to_string(), format!("{token}.pem")] {
+            let inner = crate::review::test_support::MapSource::new(
+                &[(path.as_str(), keyed.as_str())],
+                &[],
+            );
+            let cache = CachedSource::new(&inner);
+            assert!(cache.read(&path).expect("read").is_some());
+            cache.release(Face::New, &path);
+            match cache.read(&path) {
+                Err(ReviewError::EgressSecret { path: shown }) => {
+                    let want = crate::review::secrets::display_path(&path);
+                    assert_eq!(shown, want, "{shown:?}");
+                    assert!(
+                        !shown.contains('\u{1b}') && !shown.contains(token),
+                        "{shown:?}"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn a_released_key_block_side_is_never_read_again() {
         // [MAGI S6 MS3 loop3, R6a Melchior] A side holding a private-key block is held raw (RV22's
         // exception), and only the filter leaving its file out kept it from a model; a later
