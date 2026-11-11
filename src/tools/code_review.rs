@@ -567,20 +567,16 @@ pub(crate) fn egress_text(text: &str) -> String {
     mask_secrets(redact_foreign_text(text).as_str())
 }
 
-/// `value` with every string and key passed through [`mask_secrets`], after the format
-/// characters that reorder or hide text ([`is_hidden_format_char`]) are dropped, as the text
-/// form drops them; serde escapes C0 controls itself. O(size of `value`).
+/// `value` with every string and key passed through [`mask_secrets`], after [`terminal_safe`]
+/// drops every C0 and C1 control but `\n`/`\t` and every format character that reorders or hides
+/// text, as the text form does: serde escapes C0 controls but writes C1 (U+009B) as is, and a
+/// control inside a key would hide it from the detector (`json_drops_c1_controls`). O(size).
 // MAGI FIX (MS3 §6 loop4): a bidi override reached the JSON envelope; only the text dropped it.
 fn masked_json(value: Value) -> Value {
     map_json_text(
         value,
-        &|text| {
-            let shown: String = text
-                .chars()
-                .filter(|&c| !is_hidden_format_char(c))
-                .collect();
-            mask_secrets(&shown)
-        },
+        // MAGI FIX (MS3 §6 loop11): C1 controls (serde writes them raw) went out too.
+        &|text| mask_secrets(&terminal_safe(text)),
         true,
     )
 }
