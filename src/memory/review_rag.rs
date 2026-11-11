@@ -2991,6 +2991,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vanished_doc_is_unreadable() {
+        // MAGI FIX (MS3 §6 loop11): a source gone between listing and read left in silence.
+        struct Gone;
+        impl ContentSource for Gone {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &Gone,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        assert!(prep.doc_index.unreadable, "{prep:?}");
+    }
+
+    #[tokio::test]
     async fn unread_def_is_declared() {
         // [MAGI S6 MS3 loop9, R2 Melchior] A definition file that cannot be read failed the
         // batch's whole context; that item is left out and declared, the rest is served.
