@@ -4093,8 +4093,10 @@ class RunExecutor:
             if isinstance(step, Commit):
                 commit_files(workspace, step)
                 continue
+            # MAGI FIX (MS3 §6 loop11): every rewrite flag is cleared, not inherited from the run.
             once = dataclasses.replace(definition, argv=step.argv, timeout_s=step.timeout_s,
-                                       setup=(), records_requests=False, files=())
+                                       setup=(), records_requests=False, files=(),
+                                       unreachable_embedder=False)
             try:
                 self._setup_outputs.append(self._invoke(once, b""))
             except TimedOut as expired:
