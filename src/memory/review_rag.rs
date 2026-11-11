@@ -488,8 +488,9 @@ impl StoreRag<'_> {
     }
 
     /// The validated history on `files`, each one-line secret of a title or detail masked
-    /// ([`mask_secrets`], RV22 amended); an entry whose title or detail holds a private-key block
-    /// counts in `withheld` instead (RV22's exception). A read error leaves history out for the
+    /// ([`mask_secrets`], RV22 amended); an entry whose title or detail holds a private-key block,
+    /// or whose file path quotes a secret (a path is not maskable and still names its file), counts
+    /// in `withheld` instead, its file declared `secret` (RV22). A read error leaves history out for the
     /// rest of the review, declared once.
     // MAGI FIX (MS3 §6 loop1): an entry quoting a one-line secret was withheld, not masked.
     fn history_items(
@@ -522,7 +523,11 @@ impl StoreRag<'_> {
                     // branch) was served; each one is checked against HEAD first.
                     .filter(|e| self.served_on_heads_line(e))
                     .filter_map(|e| {
-                        if holds_key_block(&e.title) || holds_key_block(&e.detail) {
+                        // MAGI FIX (MS3 §6 loop10): a secret-shaped file path was left raw.
+                        if holds_key_block(&e.title)
+                            || holds_key_block(&e.detail)
+                            || find_secret(&e.file).is_some()
+                        {
                             // MAGI FIX (MS3 §6 loop9): counted again by every batch on its file.
                             if self.first_withheld(&e.id, &e.file) {
                                 *withheld = withheld.saturating_add(1);
