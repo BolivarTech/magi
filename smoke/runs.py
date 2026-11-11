@@ -2341,6 +2341,11 @@ def embedder_pointed_away(config_path):
             _restore(config_path, original)
 
 
+#: The pause before :func:`_restore` retries, once: long enough for a transient file lock to
+#: clear, short enough that a run never waits on it noticeably.
+RESTORE_RETRY_DELAY_S = 0.5
+
+
 def _restore(config_path, original: bytes) -> None:
     """Put *original* back at *config_path*, retrying once (MAGI FIX, MS3 §6 loop10).
 
@@ -2355,6 +2360,9 @@ def _restore(config_path, original: bytes) -> None:
     try:
         _replace_bytes(config_path, original, "restore %s" % config_path)
     except HarnessError:
+        # MAGI FIX (MS3 §6 loop11): one bounded pause first, so a lock an indexer or an
+        # antivirus holds for a moment clears before the one retry.
+        time.sleep(RESTORE_RETRY_DELAY_S)
         try:
             _replace_bytes(config_path, original, "restore %s" % config_path)
         except HarnessError as exc:
