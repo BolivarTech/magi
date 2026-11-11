@@ -863,20 +863,41 @@ fn resolve_uncommitted(
     }
 }
 
-/// Fails closed when the working tree moved since its diff was captured: the diff against
+/// Fails closed when the working tree moved since its diff was captured (RV21): the diff against
 /// `head` is taken again, after the review read every side, and must equal `captured` (each
-/// diffed file's path and diff, in order).
+/// diffed file's path and diff, in order), so an edit inside a hunk or outside every hunk between
+/// the capture and the reads stops the review before any byte is sent (`stale_diff_fails_closed`).
+/// One git call. A commit or range review reads git objects, which cannot move, and needs none.
+///
+/// Declared limit: an edit made and exactly undone between the two diffs, with a read in between,
+/// is not seen; the sides read are still masked and whole-side checked by the filter.
+///
+/// # Arguments
+/// * `git` - The workspace's git.
+/// * `head` - The pinned `HEAD` the diff is taken against.
+/// * `captured` - The diffed files as the review captured them.
 ///
 /// # Errors
 /// [`ReviewError::Git`] when it differs, or when git fails.
+// MAGI FIX (MS3 §6 loop11): a stale diff was reviewed as if it matched the sides read.
 pub fn ensure_diff_current(
     git: &dyn GitCommand,
     head: &str,
     captured: &[(String, String)],
 ) -> Result<(), ReviewError> {
-    let _ = (git, head, captured);
-    Ok(())
+    let now = from_diff(&worktree_diff(git, head)?, String::new(), None).files;
+    let mut now = now.into_iter().filter_map(|f| f.diff.map(|d| (f.path, d)));
+    let same = captured.iter().all(|c| now.next().as_ref() == Some(c)) && now.next().is_none();
+    if same {
+        Ok(())
+    } else {
+        Err(ReviewError::Git(STALE_DIFF.to_string()))
+    }
 }
+
+/// Why a working-tree review stops when its diff moved while it read the sides.
+const STALE_DIFF: &str =
+    "the working tree changed while the review read it: its diff no longer matches; run it again";
 
 /// Whether `path` is a link (or a junction) whose target does not exist. Such a link reads as a
 /// file that does not exist, so an enumeration leaves it out the way it leaves out a tracked

@@ -30,7 +30,9 @@ use super::error::{BudgetLimit, ReviewError};
 use super::filter::{filter_files, Filtered, Masked, SkipCause, Skipped};
 use super::gate::{Gate, GateState, GateVerdict};
 use super::index::{LexicalIndex, Reviewed};
-use super::input::{renamed_from, resolve_input, ReviewFile, ReviewInput, SourceKind};
+use super::input::{
+    ensure_diff_current, renamed_from, resolve_input, ReviewFile, ReviewInput, SourceKind,
+};
 use super::languages::LanguageRegistry;
 use super::rag::{item_cost, Assembled, ContextItem, ContextKind};
 use super::report::{name, BatchMetrics, ReviewSummary, TrimmedItem};
@@ -530,6 +532,19 @@ pub async fn run_review(
     };
     let mut summary = ReviewSummary::default();
     let resolved = resolve_input(&req.input, req.workspace, deps.git, deps.guard)?;
+    // MAGI FIX (MS3 §6 loop11): a working-tree diff is checked again once its sides are read.
+    let worktree_head = match &resolved.source_kind {
+        SourceKind::Worktree {
+            old_rev: Some(head),
+        } => Some(head.clone()),
+        _ => None,
+    };
+    let captured: Vec<(String, String)> = resolved
+        .files
+        .iter()
+        .filter(|_| worktree_head.is_some())
+        .filter_map(|f| f.diff.clone().map(|d| (f.path.clone(), d)))
+        .collect();
     let inner = content_source(resolved.source_kind, req.workspace, deps.git);
     let source = CachedSource::new(inner.as_ref());
     let explicit = matches!(req.input, ReviewInput::File(_));
@@ -550,6 +565,9 @@ pub async fn run_review(
         ),
         &resolved.not_utf8,
     )?;
+    if let Some(head) = &worktree_head {
+        ensure_diff_current(deps.git, head, &captured)?;
+    }
     let limit = prompt_limit_tokens(&window);
     summary.skipped = filtered.skipped;
     summary
