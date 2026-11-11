@@ -827,9 +827,7 @@ impl<'a> CachedSource<'a> {
         // stage, released or not.
         let key = (face, path.to_string());
         if held.withheld.contains(&key) || (held.sealed && held.raw_secret.contains(&key)) {
-            return Err(ReviewError::EgressSecret {
-                path: path.to_string(),
-            });
+            return Err(ReviewError::egress_secret(path));
         }
         let side = match face {
             Face::New => &held.new,
@@ -857,9 +855,7 @@ impl<'a> CachedSource<'a> {
         // after its release), not a key block alone.
         // MAGI FIX (MS3 §6 loop5): and once sealed, for a side the filter never read either.
         if raw_secret && (held.sealed || held.released.contains(&key)) {
-            return Err(ReviewError::EgressSecret {
-                path: path.to_string(),
-            });
+            return Err(ReviewError::egress_secret(path));
         }
         let len = read
             .as_ref()
