@@ -1145,9 +1145,10 @@ impl Tool for CodeReviewTool {
         {
             report = format!("{warning}\n{report}");
         }
+        // MAGI FIX (MS3 §6 loop10): URL redaction alone; any runner's text is masked here too.
         Ok(bounded_result(
-            redact_foreign_text(&report).as_str(),
-            redacted_json(rendered.json),
+            terminal_safe(&egress_text(&report)).as_str(),
+            masked_json(redacted_json(rendered.json)),
             self.output_cap,
         ))
     }
