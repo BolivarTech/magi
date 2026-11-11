@@ -9508,7 +9508,7 @@ end"
             })
         }
         fn after_report(&self) -> Option<crate::tools::code_review::PostReport> {
-            Some(Box::new(|| Some("HISTORY-WARNING".to_string())))
+            Some(Box::new(|_| Some("HISTORY-WARNING".to_string())))
         }
     }
 

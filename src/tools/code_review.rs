@@ -256,7 +256,9 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
 
 /// Blocking work a review leaves for after its report: git and SQLite calls, never awaited on
 /// the async runtime.
-pub(crate) type PostReport = Box<dyn FnOnce() -> Option<String> + Send>;
+/// The work gets its bound: [`finish_after_report`] passes the smaller of
+/// [`POST_REPORT_LIMIT_SECS`] and what is left of the caller's run.
+pub(crate) type PostReport = Box<dyn FnOnce(Duration) -> Option<String> + Send>;
 
 /// What the tool's result says when the run had no time left for the post-report work.
 const POST_REPORT_SKIPPED: &str =
@@ -300,7 +302,8 @@ pub(crate) async fn finish_after_report(
         return Some(POST_REPORT_SKIPPED.to_string());
     }
     let work = runner.after_report()?;
-    let task = tokio::task::spawn_blocking(work);
+    let bound = Duration::from_secs(POST_REPORT_LIMIT_SECS);
+    let task = tokio::task::spawn_blocking(move || work(bound));
     let bounded = async {
         match limit {
             Some(limit) => tokio::time::timeout(limit, task).await.ok(),
@@ -1786,7 +1789,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
             return None;
         }
         let workspace = self.workspace.clone();
-        Some(Box::new(move || {
+        Some(Box::new(move |_bound| {
             let git = ScrubbedGit::new(workspace);
             let deadline = std::time::Instant::now() + Duration::from_secs(POST_REPORT_LIMIT_SECS);
             run_follow_ups(&memory, &git, follows, deadline)
@@ -2187,7 +2190,7 @@ mod tests {
             self.0.run(plan, budget, cancel).await
         }
         fn after_report(&self) -> Option<PostReport> {
-            Some(Box::new(|| {
+            Some(Box::new(|_bound| {
                 Some(format!("{HISTORY_NOT_UPDATED}: the store is locked"))
             }))
         }
@@ -2210,7 +2213,7 @@ mod tests {
         }
         fn after_report(&self) -> Option<PostReport> {
             let drained = Arc::clone(&self.0);
-            Some(Box::new(move || {
+            Some(Box::new(move |_bound| {
                 drained.store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }))
@@ -3100,7 +3103,7 @@ mod tests {
         fn after_report(&self) -> Option<PostReport> {
             let rx = self.release.lock().expect("lock").take()?;
             let started = Arc::clone(&self.started);
-            Some(Box::new(move || {
+            Some(Box::new(move |_bound| {
                 started.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = rx.recv_timeout(Duration::from_secs(60));
                 None
@@ -3239,6 +3242,42 @@ mod tests {
             .await
             .expect("runs");
         assert!(!out.to_string().contains("AAAAAAAAAAAAAAAAAAAA"), "{out}");
+    }
+
+    /// A runner whose post-report work records the bound it was given.
+    struct BoundSeen(Arc<std::sync::Mutex<Option<Duration>>>);
+    #[async_trait::async_trait]
+    impl CodeReviewRunner for BoundSeen {
+        fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+            FakeRunner::default().plan(input)
+        }
+        async fn run(
+            &self,
+            plan: ReviewPlan,
+            budget: ReviewBudget,
+            cancel: &CancellationToken,
+        ) -> Result<Rendered, ReviewError> {
+            FakeRunner::default().run(plan, budget, cancel).await
+        }
+        fn after_report(&self) -> Option<PostReport> {
+            let seen = Arc::clone(&self.0);
+            Some(Box::new(move |bound| {
+                *seen.lock().expect("lock") = Some(bound);
+                None
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn post_report_bound_is_min() {
+        // MAGI FIX (MS3 §6 loop11): the work ran to its own 120 s whatever the caller had left.
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let runner = BoundSeen(Arc::clone(&seen));
+        finish_after_report(&runner, Some(Duration::from_secs(7)), None).await;
+        assert_eq!(*seen.lock().expect("lock"), Some(Duration::from_secs(7)));
+        finish_after_report(&runner, None, None).await;
+        let full = Duration::from_secs(POST_REPORT_LIMIT_SECS);
+        assert_eq!(*seen.lock().expect("lock"), Some(full));
     }
 
     #[test]
