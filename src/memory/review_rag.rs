@@ -2574,6 +2574,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn whole_file_method_callers() {
+        // MAGI FIX (MS3 §6 loop11): a whole file named its top-level units only, so its
+        // methods got no callers.
+        let a = "struct S;\nimpl S {\n    fn m(&self) {}\n}\n";
+        let c = "fn c() {\n    get().m();\n}\n";
+        let f = RagFixture::new(&[("a.rs", a), ("c.rs", c)]).await;
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 10,
+            companion_tokens: 0,
+            items: vec![BatchItem::WholeFile {
+                file: "a.rs".into(),
+                text: a.into(),
+                lines: 4,
+            }],
+        };
+        let got = f.rag(false).context_for(&batch).await.expect("context");
+        assert!(
+            got.items
+                .iter()
+                .any(|i| i.kind == ContextKind::Caller && i.label == "c"),
+            "{:?}",
+            got.items
+        );
+    }
+
+    #[tokio::test]
     async fn a_secret_outside_the_changed_lines_reaches_every_code_context_item_masked() {
         // [MAGI S6 MS3 loop4, R2 all three] Units, definitions and callers are read through the
         // review's cache (`CachedSource`, the source the pipeline binds), which holds every text
