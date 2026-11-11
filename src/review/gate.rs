@@ -1706,7 +1706,7 @@ mod tests {
         for footer in [
             format!("{d}END PRIVATE KEY{d}"),
             format!("{d}END PGP PRIVATE KEY BLOCK{d}"),
-            format!("x{d}-END RSA PRIVATE KEY{d}"),
+            format!("  {d}END RSA PRIVATE KEY{d}"),
             format!("{SSH2_DASHES} END SSH2 ENCRYPTED PRIVATE KEY {SSH2_DASHES}"),
         ] {
             assert!(holds_armor_end(&footer), "{footer}");
@@ -1718,6 +1718,27 @@ mod tests {
             );
         }
         assert!(!holds_armor_end("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC+/="));
+    }
+
+    #[test]
+    fn armor_end_must_open_its_line() {
+        // [MAGI S6 MS3 loop10, R6b Caspar, Melchior] `----- END` matched the SSH2 opener one dash
+        // in, and an END quoted inside a block (`Comment: …`, `x-----END`) closed it early, so
+        // the body after it was sent. An END line closes only when it opens its line.
+        let d = ARMOR_DASHES;
+        for not_end in [
+            format!("{d} END PRIVATE KEY{d}"),
+            format!("Comment: {d}END PGP PRIVATE KEY BLOCK{d}"),
+            format!("x{d}-END RSA PRIVATE KEY{d}"),
+        ] {
+            assert!(!holds_armor_end(&not_end), "{not_end}");
+            let body: String = (0..60).map(|i| format!("b{i}\n")).collect();
+            let code = format!("OPEN\n{not_end}\n{body}");
+            assert!(
+                window_overlaps_block_of(&code, 55, &|t| t.contains("OPEN")),
+                "{not_end}"
+            );
+        }
     }
 
     #[test]
