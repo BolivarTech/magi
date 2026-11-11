@@ -2997,6 +2997,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oversized_scalar_is_dropped() {
+        // [MAGI S6 MS3 loop10, R5 Caspar] Only lists and maps were dropped, so a long scalar
+        // (a path, a cause) left the result over its cap.
+        let summary = serde_json::json!({ "cause": "x".repeat(5_000), "n": 1 });
+        let out = bounded_result("report", summary, 500);
+        assert!(json_len(&out) <= 500, "{}", json_len(&out));
+        assert_eq!(out["code_review"]["n"], 1);
+    }
+
     #[tokio::test]
     async fn tool_result_is_masked_again() {
         // [MAGI S6 MS3 loop10, R5 Caspar, Melchior] The tool redacted URLs only: a runner whose
