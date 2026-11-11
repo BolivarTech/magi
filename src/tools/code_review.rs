@@ -1665,7 +1665,8 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 u64::try_from(docs_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             // MAGI FIX (S6 loop 3): the preparation done here (git's ignored paths, the gate) is
             // part of the review's `prep_ms`.
-            let prep_started = Instant::now();
+            // MAGI FIX (MS3 §6 loop11): from before the indexing, which a given start covers.
+            let prep_started = docs_started;
             let ignored = self.ignored(&input)?;
             let guard = |p: &Path| self.guard(p);
             let is_ignored = |p: &str| ignored.contains(p);

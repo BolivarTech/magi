@@ -405,13 +405,14 @@ pub struct ReviewRequest<'a> {
     /// whose content moved since fails with [`ReviewError::ContentChanged`] before any trio call,
     /// even when its batch count did not change.
     pub approved_digest: Option<[u8; 32]>,
-    /// When the caller started preparing this review, if before this call: the preparation it
-    /// did first (its own git reads, the gate) is part of `prep_ms`. `None` starts it here.
+    /// When the caller started preparing this review, if before this call: everything since it
+    /// (the documentation indexing, its own git reads, the gate) is `prep_ms`. `None` starts it
+    /// here and adds the context source's `index_ms`, the indexing done before the call.
     ///
-    /// Contract: it marks a moment after the documentation indexing, never before it. `prep_ms`
-    /// adds the context source's own `index_ms` to the time since this instant, so an instant
-    /// taken before the indexing would count it twice. The production runner takes it after
-    /// `prepare_documentation` returns.
+    /// One owner per span, by construction: a given start never adds `index_ms`, so no instant
+    /// can count the indexing twice (`given_start_counts_index_once`); a start taken after the
+    /// indexing only undercounts. The production runner takes it before indexing.
+    // MAGI FIX (MS3 §6 loop11): it was a convention ("after the indexing"), unchecked.
     pub prep_started: Option<Instant>,
 }
 
@@ -523,7 +524,10 @@ pub async fn run_review(
     mut deps: ReviewDeps<'_>,
 ) -> Result<ReviewOutcome, ReviewError> {
     // MAGI FIX (S6 loop 3): `prep_ms` counts from the caller's start, when it gave one.
-    let prep = req.prep_started.unwrap_or_else(Instant::now);
+    let (prep, add_index) = match req.prep_started {
+        Some(start) => (start, false),
+        None => (Instant::now(), true),
+    };
     let mut summary = ReviewSummary::default();
     let resolved = resolve_input(&req.input, req.workspace, deps.git, deps.guard)?;
     let inner = content_source(resolved.source_kind, req.workspace, deps.git);
@@ -636,8 +640,11 @@ pub async fn run_review(
     };
     summary.ceiling_below_configured =
         ceiling_below_configured(total, ceiling, req.agent_timeout_secs);
-    summary.prep_ms =
-        millis(prep.elapsed()).saturating_add(deps.rag.map_or(0, |rag| rag.index_ms()));
+    let index_ms = deps
+        .rag
+        .filter(|_| add_index)
+        .map_or(0, |rag| rag.index_ms());
+    summary.prep_ms = millis(prep.elapsed()).saturating_add(index_ms);
 
     let clock = ReviewTimer {
         clock: deps.clock,
