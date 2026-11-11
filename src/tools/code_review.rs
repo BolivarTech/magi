@@ -71,6 +71,10 @@ use crate::tools::{Tool, ToolError, ToolResult};
 /// report is rendered before that work starts, and the work only gets what is left after it.
 pub(crate) const REVIEW_DEADLINE_MARGIN_SECS: u64 = 30;
 
+/// Seconds the tool keeps, at the end of the run, for handing its result back after the
+/// post-report work ([`post_report_limit`]).
+const TOOL_DELIVERY_RESERVE_SECS: u64 = 5;
+
 /// Exit code of a rendered review that produced its report.
 const EXIT_OK: i32 = 0;
 /// Exit code of a rendered review whose consolidation failed (the batch reports are printed).
@@ -1062,6 +1066,12 @@ fn total_secs(total: Duration) -> u64 {
     }
 }
 
+/// The tool's post-report wait, from what is `left` of the run.
+fn post_report_limit(left: Duration) -> Duration {
+    let _ = TOOL_DELIVERY_RESERVE_SECS;
+    left
+}
+
 /// A review error as the tool's execution error, redacted.
 fn tool_error(e: &ReviewError) -> ToolError {
     ToolError::ExecutionError(egress_text(&e.to_string()))
@@ -1126,7 +1136,7 @@ impl Tool for CodeReviewTool {
         // report from its end and took the appended warning with it.
         let limit = self
             .deadline
-            .map(|d| d.saturating_duration_since(Instant::now()));
+            .map(|d| post_report_limit(d.saturating_duration_since(Instant::now())));
         if let Some(warning) = finish_after_report(self.runner.as_ref(), limit, Some(cancel)).await
         {
             report = format!("{warning}\n{report}");
@@ -2980,6 +2990,17 @@ mod tests {
                 .is_some_and(|r| r.contains(POST_REPORT_CUT)),
             "{out}"
         );
+    }
+
+    #[test]
+    fn post_report_wait_is_bounded() {
+        // [MAGI S6 MS3 loop10, R5 Caspar] The tool waited for the history until the run's own
+        // end, so its token could fire before a paid report was delivered.
+        let s = Duration::from_secs;
+        let margin = s(REVIEW_DEADLINE_MARGIN_SECS);
+        assert_eq!(post_report_limit(s(600)), margin);
+        assert_eq!(post_report_limit(s(10)), s(10 - TOOL_DELIVERY_RESERVE_SECS));
+        assert_eq!(post_report_limit(s(TOOL_DELIVERY_RESERVE_SECS)), s(0));
     }
 
     #[tokio::test(start_paused = true)]
