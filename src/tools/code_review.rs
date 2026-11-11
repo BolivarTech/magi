@@ -2471,6 +2471,20 @@ mod tests {
     }
 
     #[test]
+    fn json_drops_c1_controls() {
+        // MAGI FIX (MS3 §6 loop11): serde escapes C0 but writes C1 (U+009B CSI, U+009D OSC)
+        // as is; one in a key or inside a secret reached stdout or hid the secret.
+        let key = concat!("sk-ant-api03-", "AAAAAAAAAA\u{9b}AAAAAAAAAA"); // allow-secret-scan
+        let v = masked_json(serde_json::json!({ "a\u{9d}b": format!("x\u{9b}2Jy {key}") }));
+        let shown = v.to_string();
+        assert!(
+            !shown.contains('\u{9b}') && !shown.contains('\u{9d}'),
+            "{shown}"
+        );
+        assert!(!shown.contains("AAAAAAAAAAAAAAAAAAAA"), "{shown}");
+    }
+
+    #[test]
     fn egress_safe_masks_a_secret_in_every_field_of_a_rendered_review() {
         // [MAGI S6 loop 3, S2] RV22's every-byte rule at the last point: model text in the text,
         // the failure and both JSON objects passes the product's own detector.
