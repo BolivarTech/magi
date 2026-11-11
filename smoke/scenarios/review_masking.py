@@ -30,10 +30,11 @@ embedder, each gate question, as well as stdout, stderr and the run log. The
 unit suite pins the same with recording doubles
 (``no_byte_of_a_one_line_secret_reaches_the_embedder_or_the_trio``).
 
-Declared limits: the relay sees requests, not the on-disk `.magi-rs-memory.db*` (encrypted,
-never sent); the leak check looks for the secret's bytes (whole, and every
-:data:`LEAK_SLICE_BYTES` window), not for pieces shorter than a window sent apart nor for a transformed encoding of them
-(base64, percent-encoding, another case); and S53 reviews a directory, so the
+Declared limits: the relay sees requests (target, headers and body), not the on-disk
+`.magi-rs-memory.db*` (encrypted, never sent); a response body is the backend's output, not
+egress, and is not read; the leak check looks for the secret whole and for every fragment of its
+random body of at least :data:`MIN_LEAK_FRAGMENT` bytes (shorter ones occur in ordinary text and
+prove nothing), not for a transformed encoding of it (base64, percent-encoding, another case); and S53 reviews a directory, so the
 amended clause that a file NAMED explicitly with a one-line key is reviewed
 masked, not refused, is pinned in the unit suite only.
 """
@@ -82,7 +83,7 @@ S54_EXPECTED_OMISSIONS = [(runs.REVIEW_KEYBLOCK_FILE, "secret")]
 
 #: The leak probe S49 shares (:func:`smoke.scenarios.code_review.with_slices`).
 #: MAGI FIX (MS3 §6 loop9): one definition for S49, S53 and S54; the floor is 8 bytes.
-LEAK_SLICE_BYTES = code_review.LEAK_SLICE_BYTES
+MIN_LEAK_FRAGMENT = code_review.MIN_LEAK_FRAGMENT
 _with_slices = code_review.with_slices
 
 
@@ -100,7 +101,7 @@ def _no_capture(texts, run_id):
         texts, run_id, "run %s produced no capture to inspect" % run_id)
 
 
-def _leak_finding(texts, index, run_id, run, needles, what, relayed=False):
+def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodies=()):
     """Judge an assertion that none of *needles* left the process.
 
     Reads stdout, stderr and the captured run log, for each needle and a
@@ -118,6 +119,8 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False):
             carries is ``bytes`` (``ProductOutput``, ``RunResult``'s fields),
             so a needle is never compared with text.
         needles: Byte strings that must appear in no output.
+        bodies: Their random bodies, looked for by every fragment of at least
+            :data:`MIN_LEAK_FRAGMENT` bytes (:func:`_with_slices`).
         what: Short name of what the needles are, for the failure detail.
         relayed: Whether the run's forwarded requests are read too.
 
@@ -126,13 +129,15 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False):
         when none does but a log file could not be read whole; otherwise
         ``PASS`` (an absent log directory carries nothing).
     """
-    needles = _with_slices(needles)
+    needles = _with_slices(needles, bodies)
     outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
                ("the run log", run.review_log or ()))
     if relayed:
         # MAGI FIX (MS3 §6 loop10): the target (its query) is read too, not the body alone.
         outputs += (("a forwarded request", tuple(t.encode("utf-8", "surrogateescape") + b"\n" + b
-                                                  for t, b in run.request_bodies or ())),)
+                                                  for t, b in run.request_bodies or ())),
+                    # MAGI FIX (MS3 §6 loop11): the headers leave the process too.
+                    ("a forwarded request's headers", run.request_headers or ()))
     leaked = [name for name, bodies in outputs
               if any(needle in body for needle in needles for body in bodies)]
     if leaked:
@@ -223,7 +228,8 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
     else:
         yield _masked_finding(section)
         yield _skipped_finding(section)
-    yield _leak_finding(texts, 3, "R18", run, (runs.REVIEW_MASKED_KEY,), "the toy key", relayed=True)
+    yield _leak_finding(texts, 3, "R18", run, (runs.REVIEW_MASKED_KEY,), "the toy key", relayed=True,
+                        bodies=(code_review.key_body(runs.REVIEW_MASKED_KEY),))
 
 
 def _masked_finding(section):
@@ -301,4 +307,4 @@ def a_private_key_block_is_left_out_and_never_leaked(run):
     if run is not None and not run.timed_out:
         # MAGI FIX (MS3 §6 loop4): the marker lines are part of the block RV22 leaves out.
         yield _leak_finding(S54_ASSERTIONS, 2, "R19", run, runs.REVIEW_KEYBLOCK_LINES,
-                            "a private-key block line")
+                            "a private-key block line", bodies=runs.REVIEW_KEYBLOCK_BODY_LINES)

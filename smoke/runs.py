@@ -621,6 +621,8 @@ class RunResult:
     #: whose record is incomplete (:attr:`RequestBodies.complete`), so a
     #: scenario never reads a partial record as "nothing was sent".
     request_bodies: tuple[tuple[str, bytes], ...] | None = None
+    #: The header lines of each request in :attr:`request_bodies`, ``None`` with it.
+    request_headers: tuple[bytes, ...] | None = None
     #: The output of each :class:`Invocation` setup step, in order.
     setup_outputs: tuple[ProductOutput, ...] = ()
 
@@ -2192,6 +2194,10 @@ REVIEW_MASKED_FILE = REVIEW_MASKED_DIR + "/keyed.rs"
 #: key-shaped literal; it matches the product's ``anthropic-key`` pattern. Its
 #: body is non-uniform (numbered), so no window S53 probes is ordinary text.
 _TOY_MASKED_PREFIX = "sk-ant-api03-"  # allow-secret-scan
+
+#: The known prefix of every toy key (its pattern's), outside the key's random body: the leak
+#: checks probe the body's fragments (``smoke.scenarios.code_review.with_slices``).
+TOY_KEY_PREFIX = _TOY_MASKED_PREFIX.encode("ascii")
 REVIEW_MASKED_KEY = (_TOY_MASKED_PREFIX + "".join("%02dM" % i for i in range(9)) + "M").encode("ascii")
 
 #: The pattern the product reports for it (``name`` in ``src/review/secrets.rs``).
@@ -3151,18 +3157,24 @@ class RequestBodies:
         self._cap = RELAY_MAX_REQUESTS if cap is None else cap
         self._lock = threading.Lock()
         self._recorded: list[tuple[str, bytes]] = []
+        self._headers: list[bytes] = []
         self._lost = False
 
-    def record(self, path: str, body: bytes) -> None:
+    def record(self, path: str, body: bytes, headers: bytes = b"") -> None:
         """Keep one request, or mark the record incomplete past the cap.
+
+        MAGI FIX (MS3 §6 loop11): the headers are kept too, apart from the
+        ``(path, body)`` pairs, so the leak checks read them (never printed).
 
         Args:
             path: Its target: the path with its query, never the authority.
             body: Its body.
+            headers: Its header lines, as sent (``Name: value`` per line).
         """
         with self._lock:
             if len(self._recorded) < self._cap:
                 self._recorded.append((path, body))
+                self._headers.append(headers)
             else:
                 self._lost = True
 
@@ -3176,6 +3188,12 @@ class RequestBodies:
         """tuple: The kept ``(path, body)`` pairs, in arrival order."""
         with self._lock:
             return tuple(self._recorded)
+
+    @property
+    def headers(self) -> tuple[bytes, ...]:
+        """tuple: The kept requests' header lines, in the order of :attr:`recorded`."""
+        with self._lock:
+            return tuple(self._headers)
 
     @property
     def complete(self) -> bool:
@@ -3219,7 +3237,9 @@ class _RelayHandler(_RecordingHandler):
                 return
             self.connection.settimeout(RELAY_UPSTREAM_TIMEOUT_S)
             parts = urllib.parse.urlsplit(self.path)
-            rec.record(parts.path + ("?" + parts.query if parts.query else ""), body)
+            sent = "".join("%s: %s\n" % kv for kv in self.headers.items())
+            rec.record(parts.path + ("?" + parts.query if parts.query else ""), body,
+                       sent.encode("utf-8", "surrogateescape"))
             self._forward(body)
         except (OSError, http.client.HTTPException, ValueError):
             rec.lose()
@@ -3976,6 +3996,8 @@ class RunExecutor:
             backend_requests=sum(self._reached) if self._reached else None,
             request_bodies=(recorded[0].recorded if recorded and recorded[0].complete
                             else None),
+            request_headers=(recorded[0].headers if recorded and recorded[0].complete
+                             else None),
             setup_outputs=tuple(self._setup_outputs),
         )
 

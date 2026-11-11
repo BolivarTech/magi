@@ -116,36 +116,55 @@ S49_EXPECTED_OMISSIONS = (
 #: every output and never prints it.
 S49_SECRET = runs.review_skipped_files()[1][1].split(b"=", 1)[1].strip()
 
-#: The shortest fragment of a secret the leak checks find (RV22: no byte of the
-#: secret leaves): every window this long across a needle is probed, so an echo
-#: of at least this many consecutive bytes fails. Shorter is a declared limit: 7
-#: bytes of a toy key are as likely to be ordinary text as a piece of it.
-LEAK_SLICE_BYTES = 8
+#: The shortest fragment of a secret's random body the leak checks find (RV22: no
+#: byte of the secret leaves). Every contiguous substring of a body at least this
+#: long holds one of its windows of this length, so probing every window probes
+#: every such substring. Shorter proves nothing: a toy body is two-digit counters
+#: and a letter (``00A01A…``), and five bytes or fewer of that alphabet (``1A02A``)
+#: also occur in ordinary output (line numbers, ids, digests), so finding one would
+#: fail a run that leaks nothing. MAGI FIX (MS3 §6 loop11): the floor was 8 bytes.
+MIN_LEAK_FRAGMENT = 6
 
 
-def _with_slices(needles):
-    """Each needle and every window of :data:`LEAK_SLICE_BYTES` across it.
+def _with_slices(needles, bodies=()):
+    """Each needle whole, then every :data:`MIN_LEAK_FRAGMENT` window of each body.
 
     MAGI FIX (S6 MS3 loop7): only whole needles were looked for, so a product
-    that echoed part of a secret passed. MAGI FIX (MS3 §6 loop8): one inner
-    slice only; every window is probed (the toy secrets are non-uniform, so no
-    window is ordinary text). MAGI FIX (MS3 §6 loop9): moved here for S49, the
-    floor lowered from 12 bytes to 8.
+    that echoed part of a secret passed. MAGI FIX (MS3 §6 loop8): every window is
+    probed. MAGI FIX (MS3 §6 loop11): the windows run over the random body alone
+    (a key without its pattern's prefix, a key block's body line), down to
+    :data:`MIN_LEAK_FRAGMENT`; a known prefix or an armor line is looked for whole.
 
     Args:
-        needles: The secrets, as bytes.
+        needles: The secrets, as bytes, looked for whole.
+        bodies: Their random bodies, as bytes, looked for by fragment.
 
     Returns:
-        tuple: Every needle followed by each of its windows, in order; a needle
-        no longer than a window is its only piece.
+        tuple: Every needle, then each body's windows, in order; a body no longer
+        than a window gives none.
 
     Example:
-        >>> _with_slices((b"0123456789", b"short"))
-        (b'0123456789', b'01234567', b'12345678', b'23456789', b'short')
+        >>> _with_slices((b"k-0123456",), (b"0123456",))
+        (b'k-0123456', b'012345', b'123456')
     """
-    return tuple(piece for n in needles
-                 for piece in (n, *(n[i:i + LEAK_SLICE_BYTES]
-                                    for i in range(len(n) - LEAK_SLICE_BYTES + 1))))
+    return tuple(needles) + tuple(b[i:i + MIN_LEAK_FRAGMENT] for b in bodies
+                                  for i in range(len(b) - MIN_LEAK_FRAGMENT + 1))
+
+
+def key_body(key):
+    """The random body of a toy key: *key* without :data:`smoke.runs.TOY_KEY_PREFIX`.
+
+    Args:
+        key: A toy key, as bytes.
+
+    Returns:
+        bytes: The key past its prefix; the key itself when it lacks the prefix.
+
+    Example:
+        >>> key_body(runs.TOY_KEY_PREFIX + b"00A")
+        b'00A'
+    """
+    return key[len(runs.TOY_KEY_PREFIX):] if key.startswith(runs.TOY_KEY_PREFIX) else key
 
 #: The product's wording that S48 and S49 look for in stderr. Every stderr
 #: text S48-S51 parse (these two phrases, ``; left out: ``, ``, and N more``,
@@ -964,7 +983,7 @@ def _secret_finding(run):
     """
     # MAGI FIX (MS3 §6 loop9): the whole key only; the key is the file's name now,
     # the value a log most often echoes cut short, so every window is probed.
-    needles = _with_slices((S49_SECRET,))
+    needles = _with_slices((S49_SECRET,), (key_body(S49_SECRET),))
     outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
                ("the run log", run.review_log or ()))
     leaked = [name for name, bodies in outputs
