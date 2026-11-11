@@ -30,7 +30,9 @@ use magi_rs::review::error::ReviewError;
 use magi_rs::review::filter::ignored_paths;
 use magi_rs::review::gate::{Gate, GateVerdict};
 use magi_rs::review::history::entries_from_review;
-use magi_rs::review::input::{in_work_tree, pin_refs, resolve_input, validate_ref, ReviewInput};
+use magi_rs::review::input::{
+    in_work_tree, pin_refs, resolve_input, validate_ref, ReviewInput, SourceKind,
+};
 use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{
     plan_review, precheck_budget, run_review, BatchConsult, ReviewDeps, ReviewOutcome,
@@ -1385,12 +1387,14 @@ impl ProductionReviewRunner {
         let guard = |p: &Path| self.guard(p);
         // MAGI FIX (MS3 §6 loop2): the history anchor depends on the input alone (RV08), so it
         // is resolved before, and kept through, anything the documentation needs.
+        if !resolves_for_docs(input, self.parts.embedder.is_some()) {
+            return DocContext {
+                repository,
+                ..DocContext::default()
+            };
+        }
         let kind = resolve_input(input, &self.workspace, &self.git, &guard).map(|r| r.source_kind);
-        let rev = kind
-            .as_ref()
-            .ok()
-            .and_then(doc_revision)
-            .map(str::to_string);
+        let rev = history_anchor(input, &kind);
         // Without an embedder `docs_unavailable` stays false on purpose: the context source
         // declares the omission as `without_embedder`, its own cause; "index unavailable" would
         // name a failure that did not happen.
@@ -1922,6 +1926,21 @@ fn record_history(
         Duration::from_secs(RECLASSIFY_BUDGET_SECS),
     )
     .map_err(|e| egress_text(&e.to_string()))
+}
+
+/// The history anchor of a review of `input` resolved to `kind`.
+fn history_anchor(input: &ReviewInput, kind: &Result<SourceKind, ReviewError>) -> Option<String> {
+    let _ = input;
+    kind.as_ref()
+        .ok()
+        .and_then(doc_revision)
+        .map(str::to_string)
+}
+
+/// Whether the documentation side resolves `input`.
+fn resolves_for_docs(input: &ReviewInput, has_embedder: bool) -> bool {
+    let _ = (input, has_embedder);
+    true
 }
 
 /// Why the history of a revision starting with `-` is not recorded.
@@ -3001,6 +3020,46 @@ mod tests {
                 .as_str()
                 .is_some_and(|r| r.contains(POST_REPORT_CUT)),
             "{out}"
+        );
+    }
+
+    #[test]
+    fn anchorless_revision_warns() {
+        // [MAGI S6 MS3 loop10, R5 Caspar] A revision review whose input did not resolve dropped
+        // its history with no trace; it is a WARN now. A worktree review has no anchor, unsaid.
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Warns(Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warns {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *e.metadata().level() == tracing::Level::WARN {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let warns = Warns::default();
+        let _g =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(warns.clone()));
+        let commit = ReviewInput::Commit(None);
+        let worktree = Ok(SourceKind::Worktree { old_rev: None });
+        let rev = Ok(SourceKind::Revision {
+            new_rev: "abc".into(),
+            old_rev: None,
+        });
+        assert_eq!(history_anchor(&commit, &rev).as_deref(), Some("abc"));
+        assert_eq!(history_anchor(&ReviewInput::Uncommitted, &worktree), None);
+        assert_eq!(warns.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let failed = Err(ReviewError::Git("no".into()));
+        assert_eq!(history_anchor(&commit, &failed), None);
+        assert_eq!(history_anchor(&commit, &worktree), None);
+        assert_eq!(warns.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(!resolves_for_docs(&ReviewInput::Uncommitted, false));
+        assert!(
+            resolves_for_docs(&commit, false) && resolves_for_docs(&ReviewInput::Uncommitted, true)
         );
     }
 
