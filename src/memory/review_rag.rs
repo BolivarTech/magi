@@ -38,8 +38,8 @@ use magi_rs::review::history::{
 /// What the history is reclassified and served against: everything after the reviewed commit,
 /// up to now. One definition for the runner's reclassification and the context read.
 pub const HISTORY_HEAD: &str = "HEAD";
-use magi_rs::review::index::LexicalIndex;
-use magi_rs::review::languages::{ChangedLines, LanguageExtractor, LanguageRegistry};
+use magi_rs::review::index::{definition_units, LexicalIndex};
+use magi_rs::review::languages::LanguageRegistry;
 use magi_rs::review::pipeline::{escape_fence, RagSource, ReviewMaterial, CONTEXT_HEADING};
 use magi_rs::review::rag::{
     assemble, callers_for, charged_tokens, containing_units_cached, declare_index, declare_lexical,
@@ -294,8 +294,8 @@ fn batch_files(batch: &ReviewBatch) -> Vec<String> {
 }
 
 /// The names of the changed units: each containing unit's, each unit item's, and each named
-/// top-level unit of a whole-file item (all of it is under review; `callers_for` caps what this
-/// brings). O(bytes of the whole-file items) for the extraction.
+/// definition of a whole-file item, its methods included ([`definition_units`]; all of it is under
+/// review; `callers_for` caps what this brings). O(bytes of the whole-file items).
 // MAGI FIX (MS3 §6 loop10): a whole file named none, so it got no callers (RV07(2)).
 fn changed_names(
     batch: &ReviewBatch,
@@ -309,7 +309,8 @@ fn changed_names(
             BatchItem::WholeFile { file, text, .. } => registry.get(file).map(|x| (x, file, text)),
             _ => None,
         })
-        .flat_map(|(x, file, text)| x.extract_units(text, file, ChangedLines::All))
+        // MAGI FIX (MS3 §6 loop11): the methods too, not only the top-level units.
+        .flat_map(|(x, file, text)| definition_units(x, file, text))
         .map(|u| u.name)
         .filter(|n| !n.is_empty())
         .collect();

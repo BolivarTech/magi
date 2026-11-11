@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::languages::{
-    ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, UnitKind,
+    ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, SemanticUnit, UnitKind,
 };
 
 /// Distinct identifiers the index holds before it stops growing (memory bound; a starting point,
@@ -301,45 +301,7 @@ impl LexicalIndex {
         // MAGI FIX (MS3 §6 loop5): the duplicate check scanned each name's list, O(n^2) for a
         // name defined many times in one file (generated code); spans seen are now a set.
         let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
-        // MAGI FIX (MS3 §6 loop10): blocks are split down to MAX_DEFINITION_DEPTH levels.
-        let mut level = extractor.extract_units(text, file, ChangedLines::All);
-        let mut all = Vec::new();
-        for _ in 0..MAX_DEFINITION_DEPTH {
-            let next: Vec<_> = level
-                .iter()
-                .flat_map(|block| {
-                    extractor
-                        .split_block(block)
-                        .into_iter()
-                        // MAGI FIX (MS3 §6 loop11): a block's own pieces (header on its first
-                        // line, one-line close) share its kind and name; a nested block of both
-                        // starts later and spans lines. Declared: a one-line one is not recorded.
-                        .filter(move |p| {
-                            p.kind != block.kind
-                                || p.name != block.name
-                                || (p.start_line > block.start_line && p.end_line > p.start_line)
-                        })
-                })
-                .collect();
-            all.append(&mut level);
-            if next.is_empty() {
-                break;
-            }
-            level = next;
-        }
-        for unit in all {
-            if !matches!(
-                unit.kind,
-                UnitKind::Function
-                    | UnitKind::Method
-                    | UnitKind::Class
-                    | UnitKind::Struct
-                    | UnitKind::Enum
-                    | UnitKind::Trait
-                    | UnitKind::Module
-            ) {
-                continue;
-            }
+        for unit in definition_units(extractor, file, text) {
             // The same span yielded twice is one definition (a path given twice is skipped by
             // the caller).
             if !seen.insert((unit.name.clone(), unit.start_line, unit.end_line)) {
@@ -544,6 +506,60 @@ impl Reviewed {
             .and_then(|map| map.range(..=line).next_back())
             .is_some_and(|(_, &end)| end >= line)
     }
+}
+
+/// The named units of `text` that are definitions (a function, a method, a type or a module), at
+/// the top level and down nested blocks (cut by [`LanguageExtractor::split_block`]) to
+/// [`MAX_DEFINITION_DEPTH`] levels, in walk order; a span may come twice. A block's own pieces
+/// (header on its first line, one-line close) share its kind and name and are dropped; a nested
+/// block of both starts later and spans lines (declared: a one-line one is not recorded).
+/// O(bytes of `text`) for the extraction.
+///
+/// # Arguments
+///
+/// * `extractor` - The file's language extractor.
+/// * `file` - The file's path, labelling the units.
+/// * `text` - The file's content.
+///
+/// # Returns
+///
+/// The definition units.
+// MAGI FIX (MS3 §6 loop10): blocks are split down to MAX_DEFINITION_DEPTH levels.
+// MAGI FIX (MS3 §6 loop11): shared with the callers of a whole file, which named top-level units
+// only; a same-name nested block was dropped with its definitions.
+pub fn definition_units(extractor: &ExtractorKind, file: &str, text: &str) -> Vec<SemanticUnit> {
+    let mut level = extractor.extract_units(text, file, ChangedLines::All);
+    let mut all = Vec::new();
+    for _ in 0..MAX_DEFINITION_DEPTH {
+        let next: Vec<_> = level
+            .iter()
+            .flat_map(|block| {
+                extractor.split_block(block).into_iter().filter(move |p| {
+                    p.kind != block.kind
+                        || p.name != block.name
+                        || (p.start_line > block.start_line && p.end_line > p.start_line)
+                })
+            })
+            .collect();
+        all.append(&mut level);
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    all.retain(|unit| {
+        matches!(
+            unit.kind,
+            UnitKind::Function
+                | UnitKind::Method
+                | UnitKind::Class
+                | UnitKind::Struct
+                | UnitKind::Enum
+                | UnitKind::Trait
+                | UnitKind::Module
+        )
+    });
+    all
 }
 
 #[cfg(test)]
