@@ -2420,6 +2420,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn whole_file_gets_callers() {
+        // [MAGI S6 MS3 loop10, R2 Melchior] A whole-file batch named no changed unit, so it never
+        // retrieved the callers of its functions.
+        let a = "fn a() {}\n";
+        let f = RagFixture::new(&[("a.rs", a), ("c.rs", "fn c() {\n    a();\n}\n")]).await;
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 10,
+            companion_tokens: 0,
+            items: vec![BatchItem::WholeFile {
+                file: "a.rs".into(),
+                text: a.into(),
+                lines: 1,
+            }],
+        };
+        let got = f.rag(false).context_for(&batch).await.expect("context");
+        assert!(
+            got.items
+                .iter()
+                .any(|i| i.kind == ContextKind::Caller && i.file == "c.rs"),
+            "{:?}",
+            got.items
+        );
+    }
+
+    #[tokio::test]
     async fn a_secret_outside_the_changed_lines_reaches_every_code_context_item_masked() {
         // [MAGI S6 MS3 loop4, R2 all three] Units, definitions and callers are read through the
         // review's cache (`CachedSource`, the source the pipeline binds), which holds every text
