@@ -76,6 +76,9 @@ pub const DIMENSION_PROBE_TIMEOUT_SECS: u64 = EMBED_QUERY_TIMEOUT_SECS;
 /// Documentation chunks retrieved per batch before `assemble` trims to the budget.
 pub const DOC_SEARCH_K: usize = 8;
 
+/// Why a listed working-tree documentation source gave no bytes: it was gone when read.
+const VANISHED: &str = "gone since it was listed";
+
 /// Why no query was sent when [`doc_search_query`] withholds it (a key block, RV22).
 const QUERY_WITHHELD: &str = "the query prefix holds a private-key block: no query is sent";
 
@@ -1054,8 +1057,9 @@ type Listed = (DocSource, Option<Vec<u8>>);
 /// through `sources` and keyed by [`worktree_key`]; a path that quotes a secret is never read,
 /// and a path given twice is one source.
 ///
-/// A file that cannot be read (a hard or escaping link, one another process holds open) is left
-/// out with one WARN and declared (`unreadable`), never costing the rest; the size cap cuts the
+/// A file that cannot be read (a hard or escaping link, one another process holds open, one gone
+/// since the listing) is left out with one WARN and declared (`unreadable`), never costing the
+/// rest; the size cap cuts the
 /// source (`size_capped`). Memory: the listed bytes are held until chunked, bounded by the
 /// `CachedSource`'s `MAX_REVIEW_TOTAL_BYTES` (twice it at peak with the cache's copy).
 ///
@@ -1098,12 +1102,13 @@ fn list_worktree(
                 },
                 Some(bytes),
             )),
-            Ok(None) => {}
             Err(e) if is_size_cap(&e) => prep.doc_index.size_capped = true,
-            Err(e) => {
+            // MAGI FIX (MS3 §6 loop11): a source gone since the listing is unreadable, declared.
+            read => {
                 // MAGI FIX (MS3 §6 loop7): declared in the report too, not only logged.
                 prep.doc_index.unreadable = true;
-                let (shown, error) = (display_path(path), outward_text(&e.to_string()));
+                let cause = read.err().map_or(VANISHED.to_string(), |e| e.to_string());
+                let (shown, error) = (display_path(path), outward_text(&cause));
                 tracing::event!(
                     target: LOG_TARGET,
                     tracing::Level::WARN,
