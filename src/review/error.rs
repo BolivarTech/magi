@@ -175,27 +175,9 @@ pub enum ReviewError {
         display_path(.path)
     )]
     EgressSecret {
-        /// The file path, as [`display_path`] shows it (build it with [`Self::egress_secret`]).
+        /// The file path.
         path: String,
     },
-}
-
-impl ReviewError {
-    /// An [`Self::EgressSecret`] for `path`, held as [`display_path`] shows it, so the field
-    /// itself carries no control character and no secret-shaped name to any formatter or
-    /// serializer (`egress_secret_path_is_shown`). O(bytes of `path`).
-    ///
-    /// # Arguments
-    /// * `path` - The raw path of the refused side.
-    ///
-    /// # Returns
-    /// The error.
-    // MAGI FIX (MS3 §6 loop11): some sites stored the raw path in the field.
-    pub fn egress_secret(path: &str) -> Self {
-        Self::EgressSecret {
-            path: display_path(path),
-        }
-    }
 }
 
 /// How many omissions a [`ReviewError::NothingToReview`] message names before it counts the rest;

@@ -15,7 +15,7 @@ use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
 use super::secrets::{
-    holds_key_block, holds_secret_prefix, mask_secrets_keeping_lines,
+    display_path, holds_key_block, holds_secret_prefix, mask_secrets_keeping_lines,
     mask_secrets_keeping_lines_within, BoundedMask,
 };
 
@@ -827,7 +827,7 @@ impl<'a> CachedSource<'a> {
         // stage, released or not.
         let key = (face, path.to_string());
         if held.withheld.contains(&key) || (held.sealed && held.raw_secret.contains(&key)) {
-            return Err(ReviewError::egress_secret(path));
+            return Err(egress_secret(path));
         }
         let side = match face {
             Face::New => &held.new,
@@ -855,7 +855,7 @@ impl<'a> CachedSource<'a> {
         // after its release), not a key block alone.
         // MAGI FIX (MS3 §6 loop5): and once sealed, for a side the filter never read either.
         if raw_secret && (held.sealed || held.released.contains(&key)) {
-            return Err(ReviewError::egress_secret(path));
+            return Err(egress_secret(path));
         }
         let len = read
             .as_ref()
@@ -1045,6 +1045,16 @@ impl ContentSource for CachedSource<'_> {
     fn masked(&self, face: Face, path: &str) -> Option<SideMask> {
         let held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         held.masks.get(&(face, path.to_string())).copied()
+    }
+}
+
+/// A [`ReviewError::EgressSecret`] for `path`, held as [`display_path`] shows it, so the field
+/// itself carries no control character and no secret-shaped name to any formatter or serializer
+/// (`egress_secret_path_is_shown`). O(bytes of `path`).
+// MAGI FIX (MS3 §6 loop11): the refusals here stored the raw path in the field.
+fn egress_secret(path: &str) -> ReviewError {
+    ReviewError::EgressSecret {
+        path: display_path(path),
     }
 }
 
