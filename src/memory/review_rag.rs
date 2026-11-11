@@ -2636,6 +2636,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_error_is_outward() {
+        // MAGI FIX (MS3 §6 loop11): a store error left record_review raw, unlike prepare_docs.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let conn = rusqlite::Connection::open(f._db.path()).expect("open");
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER t BEFORE INSERT ON code_review_history \
+             BEGIN SELECT RAISE(ABORT, '{token}'); END;"
+        ))
+        .expect("trigger");
+        let entry = HistoryEntry {
+            status: HistoryStatus::Pending,
+            ..attended("n1", "d")
+        };
+        let e = record_review(&f.history, &[entry], "HEAD", &LineOneChanged, 100, BUDGET)
+            .expect_err("the trigger aborts");
+        assert!(!e.to_string().contains(token), "{e}");
+    }
+
+    #[tokio::test]
     async fn record_review_reclassifies_first_then_records() {
         // [CP2 MS3 loop 3] The bin composition: reclassify_then_record, then update_status and record.
         let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
