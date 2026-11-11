@@ -3138,6 +3138,13 @@ _RELAY_DROPPED_HEADERS = frozenset({"connection", "keep-alive", "proxy-connectio
                                     "content-length", "host"})
 
 
+#: The status codes the relay never forwards (a redirect could take the product off the relay).
+HTTP_REDIRECT_FIRST, HTTP_REDIRECT_LAST = 300, 399
+
+#: What the relay answers instead of a redirect: the observation is incomplete, never a pass.
+RELAY_REDIRECT_REFUSED = 502
+
+
 class RequestBodies:
     """A bounded, thread-safe record of the requests :func:`recording_relay` forwarded.
 
@@ -3274,6 +3281,12 @@ class _RelayHandler(_RecordingHandler):
             headers = {k: v for k, v in self.headers.items() if k.lower() not in _RELAY_DROPPED_HEADERS}
             conn.request(self.command, self.path, body=body, headers=headers)
             reply = conn.getresponse()
+            if HTTP_REDIRECT_FIRST <= reply.status <= HTTP_REDIRECT_LAST:
+                # MAGI FIX (MS3 §6 loop11): a redirect the product followed would leave the
+                # relay unrecorded; it is never forwarded, and the record is incomplete.
+                self.server.bodies.lose()
+                self.send_error(RELAY_REDIRECT_REFUSED)
+                return
             self.send_response_only(reply.status, reply.reason)
             for key, value in reply.getheaders():
                 if key.lower() not in _RELAY_DROPPED_HEADERS:
