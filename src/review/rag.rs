@@ -90,6 +90,9 @@ pub struct Assembled {
 /// Callers kept per name.
 pub const MAX_CALLERS_PER_NAME: usize = 10;
 
+/// The tracing target of this module's WARNs (the pipeline's).
+const LOG_TARGET: &str = "magi_rs::review";
+
 /// The most occurrences of one name [`callers_for`] inspects (the first by `(file, line)`); a
 /// name with more is declared cut like one past [`MAX_CALLERS_PER_NAME`]. Bounds the per-name
 /// work (file loads, unit lookups) on generated code, where one name can occur millions of times.
@@ -713,10 +716,20 @@ impl UnitCache {
         extractor: &ExtractorKind,
     ) -> std::sync::Arc<FileUnits> {
         let slot = usize::from(old_side);
-        let mut last = self
-            .last
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // MAGI FIX (MS3 §6 loop11): recovered with a WARN and cleared, as review_rag's `relock`;
+        // the slot is replaced whole after an extraction, so what it holds is safe to reuse.
+        let mut last = match self.last.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::event!(
+                    target: LOG_TARGET,
+                    tracing::Level::WARN,
+                    "the containing-unit cache lock was poisoned by a panic; its data is used as left"
+                );
+                self.last.clear_poison();
+                poisoned.into_inner()
+            }
+        };
         // MAGI FIX (MS3 §6 loop8): keyed by read path alone, another file reused these labels.
         if let Some(Some((path, held_file, units))) = last.get(slot) {
             if path == read_path && held_file == file {
