@@ -1415,3 +1415,8 @@ def _exclusion_finding(run, stderr):
                     "git lists %s, and stderr does not name %s as ignored"
                     % (", ".join(run.protected_visible),
                        ", ".join(missing) if found else "any of them"))
+
+#: The helpers sibling scenarios (`review_masking`) build on: a public surface, so a
+#: refactor of the private names here fails at import, never in silence (MAGI FIX, MS3 §6 loop10).
+with_slices, finding, verdict, all_cannot_test = _with_slices, _finding, _verdict, _all_cannot_test
+refusal, list_under, is_count, slashed, omissions = _refusal, _list_under, _is_count, _slashed, _omissions
