@@ -302,7 +302,10 @@ pub(crate) async fn finish_after_report(
         return Some(POST_REPORT_SKIPPED.to_string());
     }
     let work = runner.after_report()?;
-    let bound = Duration::from_secs(POST_REPORT_LIMIT_SECS);
+    // MAGI FIX (MS3 §6 loop11): the work's own bound was its constant whatever the caller had
+    // left; it is the smaller of the two (`post_report_bound_is_min`).
+    let full = Duration::from_secs(POST_REPORT_LIMIT_SECS);
+    let bound = limit.map_or(full, |l| l.min(full));
     let task = tokio::task::spawn_blocking(move || work(bound));
     let bounded = async {
         match limit {
@@ -1789,9 +1792,9 @@ impl CodeReviewRunner for ProductionReviewRunner {
             return None;
         }
         let workspace = self.workspace.clone();
-        Some(Box::new(move |_bound| {
+        Some(Box::new(move |bound| {
             let git = ScrubbedGit::new(workspace);
-            let deadline = std::time::Instant::now() + Duration::from_secs(POST_REPORT_LIMIT_SECS);
+            let deadline = std::time::Instant::now() + bound;
             run_follow_ups(&memory, &git, follows, deadline)
         }))
     }
