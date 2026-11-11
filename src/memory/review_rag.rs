@@ -17,7 +17,7 @@
 //! The query is embedded before any store is touched, and every store call is a short
 //! synchronous one: no database lock is ever held across an `.await`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -173,9 +173,9 @@ pub struct StoreRag<'a> {
     /// `served_as_validated` by reviewed commit, so entries sharing one cost one git call. Sound
     /// while its verdict reads only the entry's commit (`merge-base --is-ancestor <commit> HEAD`).
     pub on_line: Mutex<HashMap<String, bool>>,
-    /// The ids of the history entries already counted as withheld, so an entry two batches meet
-    /// counts once.
-    pub withheld_history: Mutex<HashSet<String>>,
+    /// The history entries already counted as withheld, id to the [`display_path`] of their file,
+    /// so an entry two batches meet counts once and its file is declared `secret` (`skipped`).
+    pub withheld_history: Mutex<BTreeMap<String, String>>,
 }
 
 /// What the documentation preparation of one review produced.
@@ -468,12 +468,14 @@ impl StoreRag<'_> {
             .or_insert_with(|| served_as_validated(entry, HISTORY_HEAD, git))
     }
 
-    /// Whether the history entry `id` is withheld for the first time in this review. O(1).
-    fn first_withheld(&self, id: &str) -> bool {
+    /// Whether the history entry `id`, on `file`, is withheld for the first time in this review.
+    /// O(log n).
+    fn first_withheld(&self, id: &str, file: &str) -> bool {
         self.withheld_history
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.to_string())
+            .insert(id.to_string(), display_path(file))
+            .is_none()
     }
 
     /// The validated history on `files`, each one-line secret of a title or detail masked
@@ -513,7 +515,7 @@ impl StoreRag<'_> {
                     .filter_map(|e| {
                         if holds_key_block(&e.title) || holds_key_block(&e.detail) {
                             // MAGI FIX (MS3 §6 loop9): counted again by every batch on its file.
-                            if self.first_withheld(&e.id) {
+                            if self.first_withheld(&e.id, &e.file) {
                                 *withheld = withheld.saturating_add(1);
                             }
                             None
@@ -733,8 +735,21 @@ impl RagSource for StoreRag<'_> {
         )
     }
 
+    /// The withheld documentation sources, then the file of each history entry withheld for a
+    /// private-key block (`key_block_history_is_declared`), each once.
+    // MAGI FIX (MS3 §6 loop10): a withheld history entry's file was never declared.
     fn skipped(&self) -> Vec<String> {
-        self.withheld_sources.clone()
+        let history = self
+            .withheld_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut out = self.withheld_sources.clone();
+        for file in history.values() {
+            if !out.contains(file) {
+                out.push(file.clone());
+            }
+        }
+        out
     }
 
     fn masked(&self) -> Vec<(String, &'static str)> {
@@ -865,7 +880,7 @@ impl RagSource for ReviewRag<'_> {
             units: UnitCache::default(),
             history_git: self.history_git,
             on_line: Mutex::new(HashMap::new()),
-            withheld_history: Mutex::new(HashSet::new()),
+            withheld_history: Mutex::default(),
         }
         .with_prep(self.prep.clone());
         Some(Box::new(rag))
@@ -1583,7 +1598,7 @@ mod tests {
                 units: UnitCache::default(),
                 history_git: Some(&ON_HEADS_LINE),
                 on_line: Mutex::new(HashMap::new()),
-                withheld_history: Mutex::new(HashSet::new()),
+                withheld_history: Mutex::default(),
             }
         }
     }
