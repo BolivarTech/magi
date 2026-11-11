@@ -227,9 +227,25 @@ fn escaped(item: ContextItem) -> ContextItem {
     }
 }
 
-/// Locks `m`, recovering a poisoned lock explicitly.
+/// Locks `m`; a poisoned lock is recovered explicitly: a WARN, the poison cleared, the data used.
+///
+/// Every lock of this module guards a cache or a set written in one step (a memo entry, an
+/// `Option` replaced whole, a set insert), so a panic elsewhere never leaves it half-written;
+/// the next review starts with fresh ones (`poison_is_recovered_and_cleared`).
+// MAGI FIX (MS3 §6 loop10): a poisoned lock was recovered in silence.
 fn relock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    match m.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::WARN,
+                "a code-review RAG lock was poisoned by a panic; its data is used as left"
+            );
+            m.clear_poison();
+            poisoned.into_inner()
+        }
+    }
 }
 
 /// The file of a batch item.
