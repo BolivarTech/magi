@@ -18,7 +18,7 @@ use super::input::{
     ReviewInput,
 };
 use super::languages::LanguageRegistry;
-use super::secrets::{display_path, find_secret, holds_key_block, mask_secrets};
+use super::secrets::{display_path, find_secret, holds_key_block, mask_secrets, REDACTED_OPEN};
 use super::source::{is_never_reviewed, ContentSource, Face, GitCommand, HARD_LINK_CAUSE};
 
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
@@ -467,17 +467,16 @@ struct SidesRead<'a> {
 /// The sides come masked from the source ([`ContentSource::masked`]; a key-block side never
 /// reaches here, [`content_verdict`] leaves it out). When anything was masked, the diff is
 /// rebuilt from the masked sides ([`rebuilt_diff`]) and the file declared with the first
-/// pattern found; it is left out as `secret` instead when the diff cannot be rebuilt or the
-/// rebuilt one still holds a secret (RV22's cause either way, `unrebuilt_diff_skips_as_secret`),
-/// with a WARN naming which. Declared limit: a rebuild whose body lines differ beyond masking
-/// (sides changed after the diff was read; RV21 reads both through one git access) keeps the
-/// diff's hunk ranges with the sides' text, said by a run-log WARN only.
+/// pattern found; when the diff cannot be rebuilt or the rebuilt one still holds a secret, the
+/// raw diff is masked by line instead ([`masked_raw_diff`], `unrebuilt_diff_is_masked`), with a
+/// WARN naming which: RV22 leaves out only a private-key block and a secret-shaped path. Declared
+/// limit: a rebuild whose body lines differ beyond masking (sides changed after the diff was read;
+/// RV21 reads both through one git access) keeps the diff's hunk ranges with the sides' text,
+/// said by a run-log WARN only.
 ///
-/// That fallback omits rather than masking the diff alone on purpose: a hunk shows only some
-/// lines, and a pattern may need one it leaves out (a YAML value under its key), so RV22's
-/// tie-break ("no byte of the secret leaves") wins over "mask, do not omit"; a file named
-/// explicitly is then refused. For the same reason the diff is rebuilt even when it shows no
-/// secret of its own; a file with no secret keeps the very string git produced. O(diff + sides).
+/// The diff is rebuilt even when it shows no secret of its own: a hunk shows only some lines, and
+/// a pattern may need one it leaves out (a YAML value under its key). A file with no secret keeps
+/// the very string git produced. O(diff + sides).
 ///
 /// # Arguments
 ///
@@ -538,11 +537,11 @@ fn kept_verdict(
                     path = shown.as_str(),
                     cause = why,
                     pattern = pattern,
-                    "a masked file's diff could not be rebuilt from its sides; the file is left out"
+                    "a masked file's diff could not be rebuilt from its sides; its own lines are masked"
                 );
-                // MAGI FIX (MS3 §6 loop6): a structural failure had its own cause.
-                // MAGI FIX (MS3 §6 loop9): RV22's cause is `secret` either way; the WARN says why.
-                return secret(read.path, pattern);
+                // MAGI FIX (MS3 §6 loop11): it was a third omission class (RV22 allows two); the
+                // raw diff is masked instead, by line, and the file reviewed.
+                Some(masked_raw_diff(&d, read.new, read.old, pattern))
             }
         },
         None => None,
@@ -553,6 +552,49 @@ fn kept_verdict(
         with_old,
         masked: Some(pattern),
     })
+}
+
+/// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it: a header line (outside a
+/// hunk, or an `@@` line) is masked with [`mask_secrets`]; a body line is kept only when a masked
+/// side shows its text verbatim (context and added lines on `new`, context and deleted on `old`),
+/// else its text becomes `<redacted: pattern>` after its marker. [`mask_secrets`] alone on the
+/// diff is not enough: a hunk can hold a secret's value without the key line that makes it one
+/// (`a_diff_alone_cannot_be_masked_safely_so_an_unrebuildable_one_is_left_out`), and every line
+/// holding a byte of a masked secret differs from its masked side. So masking, never omission, and
+/// no byte of the secret leaves (RV22's tie-break) (`unrebuilt_diff_is_masked`). O(diff + sides).
+fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>, pattern: &str) -> String {
+    let set = |side: Option<&[u8]>| -> HashSet<String> {
+        side_lines(side)
+            .unwrap_or_default()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    };
+    let (new_lines, old_lines) = (set(new), set(old));
+    let redacted = format!("{REDACTED_OPEN}{pattern}>");
+    let mut in_hunk = false;
+    let mut out = String::with_capacity(diff.len());
+    for line in diff.split_inclusive('\n') {
+        let (body, end) = line.strip_suffix('\n').map_or((line, ""), |b| (b, "\n"));
+        if body.starts_with("@@") {
+            in_hunk = true;
+        }
+        let marker = body.chars().next();
+        let text = body.get(1..).unwrap_or_default();
+        let kept = match (in_hunk && !body.starts_with("@@"), marker) {
+            (false, _) | (true, Some('\\')) => mask_secrets(body),
+            (true, Some(' ')) if new_lines.contains(text) && old_lines.contains(text) => {
+                body.into()
+            }
+            (true, Some('+')) if new_lines.contains(text) => body.into(),
+            (true, Some('-')) if old_lines.contains(text) => body.into(),
+            (true, Some(m @ (' ' | '+' | '-'))) => format!("{m}{redacted}"),
+            (true, _) => redacted.clone(),
+        };
+        out.push_str(&kept);
+        out.push_str(end);
+    }
+    out
 }
 
 /// `diff` with every content line taken from the (masked) side it shows: a context or added line
