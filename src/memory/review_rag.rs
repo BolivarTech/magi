@@ -32,7 +32,7 @@ use magi_rs::review::docs::{
 };
 use magi_rs::review::error::ReviewError;
 use magi_rs::review::history::{
-    reclassify_then_record, served_as_validated, HistoryEntry, MAX_RECLASSIFY_PER_REVIEW,
+    on_heads_line, reclassify_then_record, HistoryEntry, MAX_RECLASSIFY_PER_REVIEW,
 };
 
 /// What the history is reclassified and served against: everything after the reviewed commit,
@@ -175,8 +175,8 @@ pub struct StoreRag<'a> {
     /// The git each served history entry is checked against (`served_as_validated` on `HEAD`);
     /// `None` serves no history entry, since none can be checked.
     pub history_git: Option<&'a dyn GitCommand>,
-    /// `served_as_validated` by reviewed commit, so entries sharing one cost one git call. Sound
-    /// while its verdict reads only the entry's commit (`merge-base --is-ancestor <commit> HEAD`).
+    /// `on_heads_line` by reviewed commit, so entries sharing one cost one git call; it reads the
+    /// commit alone, and the status is checked per entry (`memo_shares_no_verdict`).
     pub on_line: Mutex<HashMap<String, bool>>,
     /// The history entries already counted as withheld, id to the [`display_path`] of their file,
     /// so an entry two batches meet counts once and its file is declared `secret` (`skipped`).
@@ -475,17 +475,23 @@ impl StoreRag<'_> {
         docs.search_loaded(&vectors, query, DOC_SEARCH_K)
     }
 
-    /// Whether `entry` may be served: [`served_as_validated`] on `HEAD` through
+    /// Whether `entry` may be served: `served_as_validated` on `HEAD` through
     /// [`Self::history_git`], once per reviewed commit (memoized in [`Self::on_line`]); without a
     /// git, nothing is served. O(1) after the first call for a commit.
+    // MAGI FIX (MS3 §6 loop11): the memo held `served_as_validated`'s whole verdict, keyed by
+    // commit alone; it holds only `on_heads_line`, which reads nothing but the commit, and the
+    // status is checked per entry, so the invariant holds by construction in every build.
     fn served_on_heads_line(&self, entry: &HistoryEntry) -> bool {
         let Some(git) = self.history_git else {
             return false;
         };
+        if !entry.status.is_validated() {
+            return false;
+        }
         let mut memo = relock(&self.on_line);
         *memo
             .entry(entry.reviewed_commit.clone())
-            .or_insert_with(|| served_as_validated(entry, HISTORY_HEAD, git))
+            .or_insert_with(|| on_heads_line(&entry.reviewed_commit, HISTORY_HEAD, git))
     }
 
     /// Whether the history entry `id`, on `file`, is withheld for the first time in this review.
