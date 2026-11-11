@@ -2462,14 +2462,6 @@ impl App {
                     let failure = crate::agent::Agent::sanitize_text(&failure);
                     apply_response(self, AgentResponse::Error(failure));
                 }
-                // After the report is on screen: the history and the index clean-up. Its warning
-                // goes through the UI, never to stderr while the alternate screen is up.
-                if let Some(warning) =
-                    crate::tools::code_review::finish_after_delivered_report(runner.as_ref()).await
-                {
-                    let warning = crate::agent::Agent::sanitize_text(&warning);
-                    apply_response(self, AgentResponse::Error(warning));
-                }
             }
             Err(e) => {
                 // MAGI FIX (MS3 §6 loop5): the same two stages as the tool path's errors (URL
@@ -2478,6 +2470,16 @@ impl App {
                 // (`a_failed_tui_review_writes_its_error_with_its_secrets_masked`).
                 apply_response(self, AgentResponse::Error(code_review_error_text(&e)));
             }
+        }
+        // After the report (or the error) is on screen: the history and the index clean-up. Its
+        // warning goes through the UI, never to stderr while the alternate screen is up.
+        // MAGI FIX (MS3 §6 loop11): after a failed review too: the shared runner may hold an
+        // earlier review's history (`failed_review_still_drains`).
+        if let Some(warning) =
+            crate::tools::code_review::finish_after_delivered_report(runner.as_ref()).await
+        {
+            let warning = crate::agent::Agent::sanitize_text(&warning);
+            apply_response(self, AgentResponse::Error(warning));
         }
     }
 

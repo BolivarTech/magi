@@ -1141,24 +1141,34 @@ impl Tool for CodeReviewTool {
         let input = parse_tool_input(&args)?;
         let budget = self.review_budget()?;
         let plan = self.plan_for(&args, &input).map_err(|e| tool_error(&e))?;
-        let rendered = self
-            .runner
-            .run(plan, budget, cancel)
-            .await
-            .map_err(|e| tool_error(&e))?;
+        let ran = self.runner.run(plan, budget, cancel).await;
+        // The tool's report is its result, so what follows it runs before the result is handed
+        // back; a history that could not be updated is said in it, never dropped.
+        // MAGI FIX (MS3 §6 loop11): it runs whether the review succeeded or not, as the
+        // subcommand's does: a shared runner may hold an earlier review's history.
+        let limit = self
+            .deadline
+            .map(|d| post_report_limit(d.saturating_duration_since(Instant::now())));
+        let warning = finish_after_report(self.runner.as_ref(), limit, Some(cancel)).await;
+        let rendered = match ran {
+            Ok(rendered) => rendered,
+            Err(e) => {
+                let text = match warning {
+                    Some(w) => format!("{e}\n{w}"),
+                    None => e.to_string(),
+                };
+                return Err(ToolError::ExecutionError(egress_text(&terminal_safe(
+                    &text,
+                ))));
+            }
+        };
         let mut report = match &rendered.failure {
             Some(failure) => format!("error: {failure}\n{}", rendered.text),
             None => rendered.text,
         };
-        // The tool's report is its result, so what follows it runs before the result is handed
-        // back; a history that could not be updated is said in it, never dropped.
         // MAGI FIX (MS3 §6 loop2): the warning opens the report, since the output cap cuts a
         // report from its end and took the appended warning with it.
-        let limit = self
-            .deadline
-            .map(|d| post_report_limit(d.saturating_duration_since(Instant::now())));
-        if let Some(warning) = finish_after_report(self.runner.as_ref(), limit, Some(cancel)).await
-        {
+        if let Some(warning) = warning {
             report = format!("{warning}\n{report}");
         }
         // MAGI FIX (MS3 §6 loop10): URL redaction alone; any runner's text is masked here too.
