@@ -937,18 +937,23 @@ fn filter_and_plan_with(
     };
     // MAGI FIX (S6 loop 4): when the kept files give no batch (all empty, or diffs without a
     // hunk), the error names what the filter left out, as the filter's own error does.
-    let batches = planned.map_err(|e| match e {
-        ReviewError::NothingToReview { .. } => ReviewError::NothingToReview {
-            skipped: filtered.skipped.clone(),
-        },
-        other => other,
-    })?;
+    let batches = planned.map_err(|e| with_filter_skips(e, &filtered.skipped))?;
     Ok(Planned {
         filtered,
         window,
         batches,
         index,
     })
+}
+
+/// `e` with a `NothingToReview` naming what the filter left out (`filtered`).
+fn with_filter_skips(e: ReviewError, filtered: &[Skipped]) -> ReviewError {
+    match e {
+        ReviewError::NothingToReview { .. } => ReviewError::NothingToReview {
+            skipped: filtered.to_vec(),
+        },
+        other => other,
+    }
 }
 
 /// [`filter_and_plan_with`] without a context source, as the MS2 tests of the filter and the
@@ -2308,6 +2313,25 @@ mod tests {
         assert!(code(6).expect("read").ambiguous);
         let old_only = code(2).expect("read");
         assert!(old_only.old_side && !old_only.ambiguous);
+    }
+
+    #[test]
+    fn remap_keeps_batching_skips() {
+        // MAGI FIX (MS3 §6 loop11): the remap replaced the planner's own skipped entries.
+        use crate::review::filter::SkipCause;
+        let skip = |p: &str| Skipped {
+            path: p.into(),
+            cause: SkipCause::Binary,
+        };
+        let planner = ReviewError::NothingToReview {
+            skipped: vec![skip("b.bin"), skip("a.bin")],
+        };
+        match with_filter_skips(planner, &[skip("a.bin")]) {
+            ReviewError::NothingToReview { skipped } => {
+                assert_eq!(skipped, vec![skip("a.bin"), skip("b.bin")]);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
