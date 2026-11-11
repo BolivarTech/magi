@@ -912,16 +912,6 @@ fn masked_side(read: Option<Vec<u8>>) -> HeldSide {
 /// as read, so the filter leaves its file out as `secret`, the safe direction of RV22.
 const MAX_MASKED_SIDE_BYTES: usize = 2 * MAX_REVIEW_FILE_BYTES as usize;
 
-/// [`masked_side`] with an explicit bound on the masked side, its bytes and mask only.
-#[cfg(test)]
-fn masked_side_within(
-    read: Option<Vec<u8>>,
-    max_bytes: usize,
-) -> (Option<Vec<u8>>, Option<SideMask>) {
-    let held = held_side(read, max_bytes);
-    (held.bytes, held.mask)
-}
-
 /// A side as the cache holds it ([`masked_side`]), and whether it is held raw with a secret in it.
 struct HeldSide {
     /// The bytes held.
@@ -1189,14 +1179,17 @@ mod tests {
     }
 
     #[test]
-    fn a_side_too_dense_in_secrets_is_held_as_read_so_its_file_is_left_out() {
-        // [MAGI S6 MS3 loop4, R6a Caspar] Its mask would pass the bound: it is not masked, and
-        // the filter's secret check then leaves the file out (declared `secret`).
+    fn dense_side_is_masked() {
+        // [MAGI S6 MS3 loop4, R6a Caspar] A side whose mask would pass the bound was held raw.
+        // [MAGI S6 MS3 loop10, R6a Balthasar] Its file was then omitted: RV22 masks one-line
+        // secrets and omits only key blocks. Past the bound it is masked anyway.
         let dense = "a://:p@h ".repeat(1_000).into_bytes();
-        let (held, mask) = masked_side_within(Some(dense.clone()), dense.len());
-        assert_eq!((held, mask), (Some(dense.clone()), None));
-        let (held, mask) = masked_side_within(Some(dense.clone()), 64 * dense.len());
-        assert!(mask.is_some() && held != Some(dense));
+        for bound in [dense.len(), 64 * dense.len()] {
+            let side = held_side(Some(dense.clone()), bound);
+            assert!(side.mask.is_some() && !side.raw_secret, "{bound}");
+            let held = String::from_utf8(side.bytes.expect("held")).expect("utf-8");
+            assert!(!held.contains("a://:p@h"), "{bound}");
+        }
     }
 
     #[test]
