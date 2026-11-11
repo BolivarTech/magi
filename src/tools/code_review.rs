@@ -415,6 +415,15 @@ pub(crate) fn finish_code_review(r: &Rendered) -> (i32, Option<String>) {
     }
 }
 
+/// Why a review runs without documentation when its working-tree listing took the whole bound.
+const LISTING_OVERRAN: &str = "listing the working tree took the whole documentation bound";
+
+/// [`LISTING_OVERRAN`] when nothing is `left` of the bound after the listing.
+fn overran_listing(left: Duration) -> Option<&'static str> {
+    let _ = (left, LISTING_OVERRAN);
+    None
+}
+
 /// What is left of the documentation bound ([`REINDEX_TIMEOUT_SECS`]) since `since`, the start
 /// of the working tree's listing: the listing and the indexing share that one bound, which the
 /// budget check reserves (`outbound_prep_reserve_secs`). O(1).
@@ -1460,6 +1469,10 @@ impl ProductionReviewRunner {
             Some(r) => Box::new(RevisionSource::new(&self.git, r.clone(), None)),
             None => Box::new(WorktreeSource::new(self.workspace.clone())),
         };
+        let left = docs_time_left(listing_started);
+        if let Some(cause) = overran_listing(left) {
+            return unavailable(Some(docs), cause);
+        }
         let source = CachedSource::new(inner.as_ref());
         let keep = |p: &str| !is_never_reviewed(p) && !ignored.contains(p);
         let prep = prepare_docs(
@@ -1471,7 +1484,7 @@ impl ProductionReviewRunner {
             &keep,
             &self.registry,
             embedder,
-            docs_time_left(listing_started),
+            left,
         )
         .await;
         // A degraded preparation did not complete its listing: the clean-up then keeps every
@@ -3041,6 +3054,14 @@ mod tests {
                 .is_some_and(|r| r.contains(POST_REPORT_CUT)),
             "{out}"
         );
+    }
+
+    #[test]
+    fn overran_listing_degrades() {
+        // [MAGI S6 MS3 loop10, R5 Caspar] A working-tree listing that spent the whole bound
+        // degraded as an indexing timeout; it names the listing now.
+        assert_eq!(overran_listing(Duration::ZERO), Some(LISTING_OVERRAN));
+        assert_eq!(overran_listing(Duration::from_secs(1)), None);
     }
 
     #[test]
