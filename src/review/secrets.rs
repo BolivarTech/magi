@@ -1147,11 +1147,44 @@ pub struct LineMasked {
 ///
 /// assert!(!holds_key_block("let u = \"postgres://svc:pw@db\";"));
 /// ```
+// MAGI FIX (MS3 §6 loop11): a header joined at a token boundary without its space opened none.
 pub fn holds_key_block(text: &str) -> bool {
     SECRET_PATTERNS
         .iter()
         .filter(|p| p.matcher.opens_key_block())
         .any(|p| p.matcher.matches(text))
+        || text.lines().any(spaceless_key_header)
+}
+
+/// The most bytes of type words (with `PRIVATE KEY` and `BLOCK`) a header may hold between
+/// `BEGIN` and its closing dashes once its spaces are gone: a bound on the scan, far above
+/// [`PEM_MAX_TYPE_WORDS`] real words.
+const MAX_SPACELESS_HEADER_RUN: usize = 96;
+
+/// Whether `line`, every ASCII space removed, holds a private-key header: four or more dashes,
+/// `BEGIN`, upper-case letters or digits ending in `PRIVATEKEY` or `PRIVATEKEYBLOCK`, then four
+/// dashes. So a PEM, OpenPGP or SSH2 header split at a token boundary (`…RSA PRIVATE` +
+/// `KEY-----`, in a separator-free concatenation) still opens a block
+/// (`spaceless_header_is_a_block`); upper case only, as [`holds_key_block`]. Errs toward a block,
+/// RV22's safe direction. O(bytes of `line`).
+fn spaceless_key_header(line: &str) -> bool {
+    let line = line.replace(' ', "");
+    line.match_indices("BEGIN").any(|(at, begin)| {
+        let opened = at
+            .checked_sub(SSH2_ARMOR_DASHES.len())
+            .and_then(|from| line.get(from..at))
+            .is_some_and(|d| d == SSH2_ARMOR_DASHES);
+        let rest = line.get(at + begin.len()..).unwrap_or_default();
+        let run = rest
+            .bytes()
+            .take(MAX_SPACELESS_HEADER_RUN)
+            .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            .count();
+        let (words, after) = (rest.get(..run).unwrap_or_default(), rest.get(run..));
+        opened
+            && (words.ends_with("PRIVATEKEY") || words.ends_with("PRIVATEKEYBLOCK"))
+            && after.is_some_and(|a| a.starts_with(SSH2_ARMOR_DASHES))
+    })
 }
 
 /// `text` masked as [`mask_secrets`] masks it, but with every line break a masked span held
