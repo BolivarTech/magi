@@ -589,13 +589,29 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
 }
 
 /// `depth` after the square brackets of `line`: each `[` opens, each `]` closes, saturating at
-/// zero. O(len of `line`).
+/// zero; a bracket inside a `"…"` string (with `\` escapes, on this line) is text. O(len of
+/// `line`).
+// MAGI FIX (MS3 §6 loop10): `#[cfg(x = "[")]` left the depth open.
 fn bracket_depth(depth: usize, line: &str) -> usize {
-    line.chars().fold(depth, |d, c| match c {
-        '[' => d.saturating_add(1),
-        ']' => d.saturating_sub(1),
-        _ => d,
-    })
+    let (mut d, mut quoted, mut escaped) = (depth, false, false);
+    for c in line.chars() {
+        if quoted {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '[' => d = d.saturating_add(1),
+            ']' => d = d.saturating_sub(1),
+            _ => {}
+        }
+    }
+    d
 }
 
 /// Strips the `///` or `//!` opener and one following space.
