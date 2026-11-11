@@ -260,13 +260,21 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
 /// [`POST_REPORT_LIMIT_SECS`] and what is left of the caller's run.
 pub(crate) type PostReport = Box<dyn FnOnce(Duration) -> Option<String> + Send>;
 
-/// What the tool's result says when the run had no time left for the post-report work.
-const POST_REPORT_SKIPPED: &str =
-    "note: the review history and the documentation index clean-up are left for the next review: the run's time is spent";
+/// What the tool's result says when the run had no time left for the post-report work. True on
+/// every surface: a long-lived one (the TUI) runs it after its next review, a one-shot process
+/// (`magi query`) drops it when it exits.
+// MAGI FIX (MS3 §6 loop11): it promised a "next review" a one-shot process never runs.
+const POST_REPORT_SKIPPED: &str = concat!(
+    "note: the review history and the documentation index clean-up did not run, the run's time ",
+    "is spent; they wait for a later review in this process and are lost if it exits first"
+);
 
-/// What a surface says when the post-report work did not finish before the run ended.
-const POST_REPORT_CUT: &str =
-    "note: the review history and the documentation index clean-up did not finish before the run ended";
+/// What a surface says when the post-report work did not finish before the run ended: it goes
+/// on in the background, so a process that exits first loses the rest.
+const POST_REPORT_CUT: &str = concat!(
+    "note: the review history and the documentation index clean-up did not finish before the run ",
+    "ended; the rest goes on in the background and is lost if the process exits first"
+);
 
 /// Runs the work [`CodeReviewRunner::after_report`] leaves, off the async runtime
 /// (`spawn_blocking`), bounded by `limit` and `cancel` when given.
