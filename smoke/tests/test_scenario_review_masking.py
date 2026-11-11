@@ -165,6 +165,32 @@ class S53Tests(unittest.TestCase):
                 self.assertNotIn(opening, lowered)
 
 
+class SecretOpeningsTests(unittest.TestCase):
+    """[MAGI S6 MS3 loop10, R7b Caspar] Identifiers in NON_TOKEN_PREFIXES resolve to their values."""
+
+    def test_every_fixed_opening_is_read(self) -> None:
+        got = secret_openings(pathlib.Path(__file__).resolve().parents[2])
+        for fixed in ("-----begin ", "---- begin ssh2 ", "aws_secret", "secretaccesskey", "://"):
+            self.assertIn(fixed, got)
+
+    def test_an_identifier_is_resolved_or_refused(self) -> None:
+        import tempfile
+        table = ('const prefixes_a: () = (); // prefixes: &["sk-", "ghp_"]\n'
+                 'const A: &[&str] = &["x"];\nconst URL_AUTHORITY_START: &str = "://";\n'
+                 'const NEW_START: &str = "zz-";\n'
+                 'const NON_TOKEN_PREFIXES: &[&str] = &[\n    "aws_secret",\n    NEW_START,\n'
+                 '    URL_AUTHORITY_START,\n];\nfn f() { let p = Pattern { prefixes: &["sk-", "ghp_"] }; }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            src = pathlib.Path(tmp, "src", "review")
+            src.mkdir(parents=True)
+            (src / "secrets.rs").write_text(table, encoding="utf-8")
+            self.assertIn("zz-", secret_openings(pathlib.Path(tmp)))
+            (src / "secrets.rs").write_text(table.replace('const NEW_START: &str = "zz-";\n', ""),
+                                            encoding="utf-8")
+            with self.assertRaises(AssertionError):
+                secret_openings(pathlib.Path(tmp))
+
+
 class S54Tests(unittest.TestCase):
     """S54 (R19): a private-key block file is left out as secret and its body never printed."""
 
