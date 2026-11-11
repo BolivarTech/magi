@@ -179,9 +179,21 @@ pub trait RagSource: Send + Sync {
         0
     }
 
+    /// The batch's containing units alone, built locally (no endpoint call): the pipeline checks
+    /// every batch's units against the limit before any [`Self::context_for`]. The default
+    /// declares none; then the check runs only on the assembled context, after its calls.
+    ///
+    /// # Errors
+    ///
+    /// A read error of the review's content.
+    fn units_for(&self, batch: &ReviewBatch) -> Result<Vec<ContextItem>, ReviewError> {
+        let _ = batch;
+        Ok(Vec::new())
+    }
+
     /// Documentation paths left out for a secret, to list as skipped (RV22). Read from the
-    /// source the pipeline is given, never from the one [`Self::for_review`] binds (that one may
-    /// keep this default), as is [`Self::masked`].
+    /// source the pipeline is given (the bound one may keep this default), as is
+    /// [`Self::masked`], and from the bound one after its batches.
     fn skipped(&self) -> Vec<String> {
         Vec::new()
     }
@@ -6791,6 +6803,31 @@ mod tests {
         let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
         assert!(matches!(r, Err(ReviewError::TooLargeForBatch { .. })));
         assert_eq!(consult.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_units_fail_first() {
+        // [MAGI S6 MS3 loop10, R4 Caspar] A unit past the limit failed only after `context_for`
+        // (and its query embeddings) ran; the units are checked before any of it now.
+        struct UnitsFirst(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl RagSource for UnitsFirst {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(assembled(vec![]))
+            }
+            fn units_for(&self, _b: &ReviewBatch) -> Result<Vec<ContextItem>, ReviewError> {
+                let mut unit = ctx(ContextKind::Unit, "f0.rs", "f0", Some((1, 26)));
+                unit.text = "x ".repeat(300_000);
+                Ok(vec![unit])
+            }
+        }
+        let rag = UnitsFirst(Default::default());
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        assert!(matches!(r, Err(ReviewError::TooLargeForBatch { .. })));
+        assert_eq!(rag.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
