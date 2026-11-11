@@ -1185,7 +1185,9 @@ impl Tool for CodeReviewTool {
 
     /// The batches and the worst case, from a plan that `execute` reuses for the same
     /// arguments. `None` when the arguments or the plan fail (the failure is `execute`'s to
-    /// report).
+    /// report). One slot, by contract: the agent loop shows one prompt at a time and runs it
+    /// before the next; a second prompt replaces the first, whose run is then refused
+    /// (`ContentChanged`), never run unshown.
     fn approval_detail(&self, args: &Value) -> Option<String> {
         let input = parse_tool_input(args).ok()?;
         let plan = self.runner.plan(&input).ok();
@@ -1315,7 +1317,9 @@ pub(crate) struct ProductionReviewRunner {
     /// What it was built from.
     parts: ReviewRunnerParts,
     /// What the reviews left for after their reports, oldest first: each run adds its own, so
-    /// overlapping reviews of one runner never overwrite each other.
+    /// overlapping reviews of one runner never overwrite each other. Unbounded by contract:
+    /// every surface drains it after each report (`finish_after_report`), so it holds at most
+    /// the reviews in flight; a new surface must do the same.
     follow_up: Mutex<Vec<FollowUp>>,
 }
 
@@ -1379,7 +1383,10 @@ impl ProductionReviewRunner {
     ///
     /// A working-tree review lists the tree here and again for the review (and computes the
     /// ignored paths twice): local git calls, bounded and counted in `prep_ms`, kept apart so the
-    /// documentation side never shares state with the reviewed side.
+    /// documentation side never shares state with the reviewed side. Its candidates come from the
+    /// tree's resolution (`.gitignore` and the never-reviewed rules applied), a revision's from
+    /// its tree with neither: the two modes may list different sources for the same content
+    /// (declared).
     ///
     /// [`CodeReviewRunner::run`] checks the budget ([`precheck_budget`]) before calling this, so
     /// a review refused for its `--timeout` never reaches the embedder; this duration is still
@@ -1476,6 +1483,7 @@ impl ProductionReviewRunner {
         if let Some(cause) = overran_listing(left) {
             return unavailable(Some(docs), cause);
         }
+        // Raw content on purpose: `prepare_docs` masks every chunk before it is embedded (RV22).
         let source = CachedSource::new(inner.as_ref());
         let keep = |p: &str| !is_never_reviewed(p) && !ignored.contains(p);
         let prep = prepare_docs(
