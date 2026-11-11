@@ -1519,15 +1519,23 @@ async fn prepare_contexts(
     summary: &mut ReviewSummary,
 ) -> Result<Vec<Vec<ContextItem>>, ReviewError> {
     // MAGI FIX (MS3 §6 loop10): units past the limit failed after earlier batches' calls.
+    // MAGI FIX (MS3 §6 loop11): each unit's egress is computed here once and reused below when
+    // `context_for` brings the same units (the `units_for` contract), not computed twice.
+    let mut pre_units: Vec<Vec<ContextEgress>> = Vec::with_capacity(batches.len());
     for batch in batches {
-        let units: usize = rag
+        let egress: Vec<ContextEgress> = rag
             .units_for(batch)?
             .into_iter()
-            .map(|u| match context_egress(u) {
-                ContextEgress::Send(item, _) => item_cost(&item),
+            .map(context_egress)
+            .collect();
+        let units: usize = egress
+            .iter()
+            .map(|e| match e {
+                ContextEgress::Send(item, _) => item_cost(item),
                 ContextEgress::Withhold(_) => 0,
             })
             .sum();
+        pre_units.push(egress);
         let code = batch
             .tokens
             .saturating_add(estimate_tokens(CONTEXT_HEADING));
@@ -1540,8 +1548,8 @@ async fn prepare_contexts(
         }
     }
     let mut contexts = Vec::with_capacity(batches.len());
-    for batch in batches {
-        let assembled = rag.context_for(batch).await?;
+    for (batch, pre) in batches.iter().zip(pre_units) {
+        let mut assembled = rag.context_for(batch).await?;
         summary.trimmed.extend(
             assembled
                 .trimmed
@@ -1555,9 +1563,20 @@ async fn prepare_contexts(
         summary.without_memory |= assembled.without_memory;
         summary.context_withheld = summary.context_withheld.saturating_add(assembled.withheld);
         let charged: usize = assembled.items.iter().map(item_cost).sum();
-        let mut kept = Vec::with_capacity(assembled.items.len());
-        for item in assembled.items {
-            match context_egress(item) {
+        let units = assembled
+            .items
+            .iter()
+            .filter(|i| i.kind == ContextKind::Unit)
+            .count();
+        let reuse = !pre.is_empty() && pre.len() == units;
+        if reuse {
+            assembled.items.retain(|i| i.kind != ContextKind::Unit);
+        }
+        let mut kept = Vec::with_capacity(assembled.items.len().saturating_add(pre.len()));
+        let egress = assembled.items.into_iter().map(context_egress);
+        let pre = if reuse { pre } else { Vec::new() };
+        for e in pre.into_iter().chain(egress) {
+            match e {
                 ContextEgress::Withhold(file) => {
                     summary.context_withheld = summary.context_withheld.saturating_add(1);
                     skip_for_secret(summary, &file);
