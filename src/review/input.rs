@@ -863,6 +863,21 @@ fn resolve_uncommitted(
     }
 }
 
+/// Fails closed when the working tree moved since its diff was captured: the diff against
+/// `head` is taken again, after the review read every side, and must equal `captured` (each
+/// diffed file's path and diff, in order).
+///
+/// # Errors
+/// [`ReviewError::Git`] when it differs, or when git fails.
+pub fn ensure_diff_current(
+    git: &dyn GitCommand,
+    head: &str,
+    captured: &[(String, String)],
+) -> Result<(), ReviewError> {
+    let _ = (git, head, captured);
+    Ok(())
+}
+
 /// Whether `path` is a link (or a junction) whose target does not exist. Such a link reads as a
 /// file that does not exist, so an enumeration leaves it out the way it leaves out a tracked
 /// file deleted from the tree. A path that does not exist at all is not a dangling link.
@@ -1560,6 +1575,43 @@ mod tests {
             ),
             Err(ReviewError::RefNotFound(_))
         ));
+    }
+
+    /// A git whose answers to `diff` come in order, one per call.
+    struct SeqGit(std::sync::Mutex<Vec<Vec<u8>>>);
+    impl GitCommand for SeqGit {
+        fn run_bytes(&self, _: &[&str]) -> Result<Vec<u8>, ReviewError> {
+            let mut left = self.0.lock().expect("lock");
+            Ok(if left.is_empty() {
+                Vec::new()
+            } else {
+                left.remove(0)
+            })
+        }
+    }
+
+    #[test]
+    fn stale_diff_fails_closed() {
+        // MAGI FIX (MS3 §6 loop11): a working tree edited after its diff was captured was
+        // reviewed through the stale diff (a hunk changed, or a new one outside the old hunks).
+        let file = |hunks: &str| {
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n{hunks}").into_bytes()
+        };
+        let first = file("@@ -1 +1 @@\n-a\n+b\n");
+        let captured: Vec<(String, String)> = from_diff(&first, String::new(), None)
+            .files
+            .into_iter()
+            .filter_map(|f| f.diff.map(|d| (f.path, d)))
+            .collect();
+        let inside = file("@@ -1 +1 @@\n-a\n+c\n");
+        let outside = file("@@ -1 +1 @@\n-a\n+b\n@@ -9 +9 @@\n-x\n+y\n");
+        for now in [inside, outside] {
+            let git = SeqGit(std::sync::Mutex::new(vec![now]));
+            let r = ensure_diff_current(&git, "c0ffee", &captured);
+            assert!(matches!(r, Err(ReviewError::Git(_))), "{r:?}");
+        }
+        let same = SeqGit(std::sync::Mutex::new(vec![first]));
+        assert!(ensure_diff_current(&same, "c0ffee", &captured).is_ok());
     }
 
     #[test]

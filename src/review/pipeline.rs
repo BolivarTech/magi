@@ -3029,6 +3029,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn moved_worktree_fails_closed() {
+        // MAGI FIX (MS3 §6 loop11, R6a Melchior): the diff is taken again after the sides are
+        // read; a working tree that moved in between fails the review before any trio call.
+        struct Moving(FakeGit, std::sync::atomic::AtomicUsize);
+        impl GitCommand for Moving {
+            fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                let diffs = a.first() == Some(&"diff");
+                if diffs && self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+                    return Ok(b"diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-x\n+z\n".to_vec());
+                }
+                self.0.run_bytes(a)
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.rs"), "y\n").expect("write");
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n";
+        let git = Moving(
+            FakeGit::from(&[
+                ("rev-parse --is-inside-work-tree", Ok("true\n")),
+                ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
+                (
+                    "diff --no-color --no-ext-diff --no-textconv --relative abc",
+                    Ok(diff),
+                ),
+                ("ls-files --others --exclude-standard -z", Ok("")),
+                (
+                    "ls-tree -z --end-of-options abc -- a.rs",
+                    Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
+                ),
+                (
+                    "show --no-ext-diff --no-textconv --end-of-options abc:./a.rs",
+                    Ok("x\n"),
+                ),
+            ]),
+            std::sync::atomic::AtomicUsize::new(0),
+        );
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let client = MockDecisionClient::new();
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let r = run_review(
+            ReviewRequest {
+                input: ReviewInput::Uncommitted,
+                workspace: dir.path(),
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                approved_digest: None,
+                prep_started: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+                rag: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(&r, Err(ReviewError::Git(m)) if m.contains("changed")),
+            "{:?}",
+            r.err()
+        );
+        assert_eq!(consult.calls(), 0);
+    }
+
+    #[tokio::test]
     async fn a_finding_on_a_deleted_file_reaches_the_gate_with_old_side_code() {
         // [CP2 MS2 S2 loop 3] RV10 + RV21: a deleted file has no new side; the gate sees the old side, numbered as the old side.
         let dir = tempfile::tempdir().expect("tempdir");
