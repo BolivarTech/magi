@@ -1945,6 +1945,35 @@ mod tests {
     }
 
     #[test]
+    fn same_name_nested_keeps_defs() {
+        // MAGI FIX (MS3 §6 loop11): a block nested in one of its own kind and name was dropped
+        // with its definitions.
+        let files: Vec<(String, String)> = [
+            (
+                "a.rs",
+                "mod m {\n    mod m {\n        fn f() {}\n    }\n}\n",
+            ),
+            (
+                "c.py",
+                "class A:\n    class A:\n        def h(self):\n            pass\n",
+            ),
+        ]
+        .iter()
+        .map(|(p, t)| (p.to_string(), t.to_string()))
+        .collect();
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        for (name, file) in [("f", "a.rs"), ("h", "c.py")] {
+            let defs = index.definitions(name);
+            assert!(defs.iter().any(|d| d.0 == file), "{name}: {defs:?}");
+        }
+        assert_eq!(
+            index.definitions("m").len(),
+            2,
+            "both modules, no header piece"
+        );
+    }
+
+    #[test]
     fn a_referenced_type_reaches_the_definitions() {
         // [CP2 MS3 loop 10] RV07(2) names referenced types too: a `struct` is a top-level unit with
         // a name.
