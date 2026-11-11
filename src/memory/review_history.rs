@@ -417,6 +417,24 @@ impl ReviewHistoryStore {
         tx.commit().map_err(db_err)
     }
 
+    /// The writes of one review: statuses, touches, then new entries.
+    ///
+    /// # Errors
+    /// [`MemoryError`] of the first write that fails.
+    pub fn apply_review(
+        &self,
+        updates: &[(String, HistoryStatus)],
+        touched: &[String],
+        now: i64,
+        entries: &[HistoryEntry],
+    ) -> Result<usize, MemoryError> {
+        for (id, status) in updates {
+            self.update_status(id, *status)?;
+        }
+        self.touch(touched, now)?;
+        self.record(entries)
+    }
+
     /// Sets the status of one entry.
     ///
     /// # Errors
@@ -514,6 +532,25 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("row")
+    }
+
+    #[test]
+    fn apply_review_is_atomic() {
+        // [MAGI S6 MS3 loop10, R2 Balthasar; controller ruling] A review's history writes were
+        // one statement each, so a failure part-way left them half applied.
+        let (store, _t) = store_for_test();
+        store
+            .record(&[stored("h1", Some(1), "c1")])
+            .expect("record");
+        let r = store.apply_review(
+            &[("h1".into(), HistoryStatus::Attended)],
+            &["nope".into()],
+            5,
+            &[stored("h2", Some(2), "c1")],
+        );
+        assert!(r.is_err());
+        assert_eq!(raw_status(&store, "h1"), HistoryStatus::Pending.as_str());
+        assert_eq!(store.all().expect("all").len(), 1, "h2 not recorded");
     }
 
     #[test]

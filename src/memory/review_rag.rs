@@ -1451,19 +1451,18 @@ pub fn record_review(
 ) -> Result<RecordStats, MemoryError> {
     let started = std::time::Instant::now();
     let (due, total) = history.due(MAX_RECLASSIFY_PER_REVIEW)?;
-    let mut checked = 0usize;
+    // MAGI FIX (MS3 §6 loop10): the writes are gathered, then applied in one transaction.
+    let (mut updates, mut touched) = (Vec::new(), Vec::new());
     for entry in &due {
         if started.elapsed() >= budget {
             break;
         }
-        let (updates, _) = reclassify_then_record(std::slice::from_ref(entry), &[], head, git);
-        for (id, status) in updates {
-            history.update_status(&id, status)?;
-        }
-        history.touch(std::slice::from_ref(&entry.id), now)?;
-        checked = checked.saturating_add(1);
+        let (changed, _) = reclassify_then_record(std::slice::from_ref(entry), &[], head, git);
+        updates.extend(changed);
+        touched.push(entry.id.clone());
     }
-    let recorded = history.record(findings)?;
+    let checked = touched.len();
+    let recorded = history.apply_review(&updates, &touched, now, findings)?;
     Ok(RecordStats {
         reclassified: checked,
         recorded,
