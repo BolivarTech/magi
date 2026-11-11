@@ -822,6 +822,15 @@ mod tests {
     }
 
     #[test]
+    fn pending_is_never_served() {
+        // MAGI FIX (MS3 §6 loop11): `served_as_validated` read ancestry only, not the status.
+        let on_line = FakeGit::from(&[("merge-base --is-ancestor c1 HEAD", Ok(""))]);
+        let pending = entry(Some(5));
+        assert_eq!(pending.status, HistoryStatus::Pending);
+        assert!(!served_as_validated(&pending, "HEAD", &on_line));
+    }
+
+    #[test]
     fn reclassification_is_capped_per_review_oldest_first() {
         // [CP2 MS3 loop 3] Without pruning the pending set grows; each review pays at most the cap.
         // [CP2 MS3 loop 4] FakeGit answers by argv, never consumed: all 201 share c1 and a.rs, so two keys answer every call.
