@@ -2526,6 +2526,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_rag_declares_its_units() {
+        // [MAGI S6 MS3 loop10, R4 Caspar] The pipeline checks `units_for` before any embedder
+        // call; the production source declares the units its `context_for` assembles.
+        let f = RagFixture::new(&[("a.rs", "fn a() {\n    b();\n}\n")]).await;
+        let batch = batch_on("a.rs", "    b();");
+        let rag = f.rag(false);
+        let units = rag.units_for(&batch).expect("units");
+        let assembled = rag.context_for(&batch).await.expect("context");
+        let from_context: Vec<_> = assembled
+            .items
+            .into_iter()
+            .filter(|i| i.kind == ContextKind::Unit)
+            .collect();
+        assert!(!units.is_empty());
+        assert_eq!(units, from_context);
+    }
+
+    #[tokio::test]
     async fn whole_file_gets_callers() {
         // [MAGI S6 MS3 loop10, R2 Melchior] A whole-file batch named no changed unit, so it never
         // retrieved the callers of its functions.
