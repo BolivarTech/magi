@@ -1966,11 +1966,8 @@ mod tests {
             let defs = index.definitions(name);
             assert!(defs.iter().any(|d| d.0 == file), "{name}: {defs:?}");
         }
-        assert_eq!(
-            index.definitions("m").len(),
-            2,
-            "both modules, no header piece"
-        );
+        let m = index.definitions("m");
+        assert_eq!(m.len(), 2, "both modules, no header piece: {m:?}");
     }
 
     #[test]

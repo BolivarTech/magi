@@ -311,7 +311,14 @@ impl LexicalIndex {
                     extractor
                         .split_block(block)
                         .into_iter()
-                        .filter(move |p| p.kind != block.kind || p.name != block.name)
+                        // MAGI FIX (MS3 §6 loop11): a block's own pieces (header on its first
+                        // line, one-line close) share its kind and name; a nested block of both
+                        // starts later and spans lines. Declared: a one-line one is not recorded.
+                        .filter(move |p| {
+                            p.kind != block.kind
+                                || p.name != block.name
+                                || (p.start_line > block.start_line && p.end_line > p.start_line)
+                        })
                 })
                 .collect();
             all.append(&mut level);
