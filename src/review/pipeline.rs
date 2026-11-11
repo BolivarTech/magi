@@ -1496,7 +1496,9 @@ fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
 /// # Errors
 ///
 /// The first error of `rag`, and [`ReviewError::TooLargeForBatch`] when a batch's containing
-/// units alone pass `limit` (`oversized_unit_fails_closed`), all before any trio call.
+/// units alone pass `limit` (`oversized_unit_fails_closed`), all before any trio call; with the
+/// units the source declares ([`RagSource::units_for`]), before any `context_for` and its
+/// embedder calls (`oversized_units_fail_first`).
 async fn prepare_contexts(
     rag: &dyn RagSource,
     given: &dyn RagSource,
@@ -1504,6 +1506,27 @@ async fn prepare_contexts(
     limit: usize,
     summary: &mut ReviewSummary,
 ) -> Result<Vec<Vec<ContextItem>>, ReviewError> {
+    // MAGI FIX (MS3 §6 loop10): units past the limit failed after earlier batches' calls.
+    for batch in batches {
+        let units: usize = rag
+            .units_for(batch)?
+            .into_iter()
+            .map(|u| match context_egress(u) {
+                ContextEgress::Send(item, _) => item_cost(&item),
+                ContextEgress::Withhold(_) => 0,
+            })
+            .sum();
+        let code = batch
+            .tokens
+            .saturating_add(estimate_tokens(CONTEXT_HEADING));
+        if code.saturating_add(units) > limit {
+            return Err(ReviewError::TooLargeForBatch {
+                what: format!("batch {} with its containing units", batch.index),
+                tokens: code.saturating_add(units),
+                limit,
+            });
+        }
+    }
     let mut contexts = Vec::with_capacity(batches.len());
     for batch in batches {
         let assembled = rag.context_for(batch).await?;
