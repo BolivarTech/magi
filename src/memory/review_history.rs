@@ -34,7 +34,11 @@ use zeroize::Zeroizing;
 use crate::memory::error::MemoryError;
 use cryptovault::CryptoVault;
 use magi_rs::review::history::{HistoryEntry, HistoryStatus};
+use magi_rs::review::secrets::outward_text;
 use magi_rs::vault::MaskedDek;
+
+/// The tracing target of this module's WARNs (the review's).
+const LOG_TARGET: &str = "magi_rs::review";
 
 /// Files per `validated_on_files` query: one parameter each plus none fixed, well under the
 /// 999-parameter limit of older SQLite builds.
@@ -214,8 +218,29 @@ impl ReviewHistoryStore {
         self.corrupt.load(Ordering::SeqCst)
     }
 
+    /// The rows that decode; each one that does not (an unknown status, a line out of range, a
+    /// blob that does not decrypt) is skipped with one WARN and counted in
+    /// [`Self::corrupt_rows`], so one bad row never takes the whole read
+    /// (`corrupt_row_is_skipped`). O(rows) decryptions.
+    // MAGI FIX (MS3 §6 loop11): one corrupt row failed the whole read.
     fn decode_all(&self, rows: Vec<RawRow>) -> Result<Vec<HistoryEntry>, MemoryError> {
-        rows.into_iter().map(|r| self.decode(r)).collect()
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            match self.decode(row) {
+                Ok(entry) => out.push(entry),
+                Err(e) => {
+                    self.corrupt.fetch_add(1, Ordering::SeqCst);
+                    let error = outward_text(&e.to_string());
+                    tracing::event!(
+                        target: LOG_TARGET,
+                        tracing::Level::WARN,
+                        error = error.as_str(),
+                        "a code-review history row could not be decoded and was skipped"
+                    );
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// [`Self::apply_review`] of `entries` alone (tests).
@@ -855,15 +880,16 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_line_out_of_range_is_a_storage_error_naming_the_entry() {
+    fn out_of_range_line_is_skipped() {
         // [MAGI S6 MS3 loop4, R3 Melchior] The write path is u32-typed, so only a hand edit puts
         // a negative or too large line in the clear column. It read as "no line" and held the
         // entry pending forever; now it is reported, like an unknown status.
+        // MAGI FIX (MS3 §6 loop11): reported as a skipped, counted row (WARN), not a failed read.
         let (store, _tmp) = store_for_test();
         store
             .record(&[stored("bad", Some(3), "c1")])
             .expect("record");
-        for line in [-5_i64, i64::from(u32::MAX) + 1] {
+        for (n, line) in [(1, -5_i64), (2, i64::from(u32::MAX) + 1)] {
             store
                 .connection_for_test()
                 .lock()
@@ -873,12 +899,8 @@ mod tests {
                     [line],
                 )
                 .expect("edit");
-            let r = store.all();
-            assert!(
-                matches!(&r, Err(MemoryError::Storage(m)) if m.contains("bad") && m.contains("line")),
-                "{line}: {:?}",
-                r.as_ref().err()
-            );
+            assert!(store.all().expect("read").is_empty(), "{line}");
+            assert_eq!(store.corrupt_rows(), n, "{line}");
         }
     }
 
