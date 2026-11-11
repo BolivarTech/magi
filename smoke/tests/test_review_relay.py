@@ -266,6 +266,17 @@ class RelayScenarioTests(unittest.TestCase):
             r = _with(_result("R20", 0, {}), request_bodies=bodies)
             self.assertEqual(want, _judged("S56", r, rc.S56_ASSERTIONS), bodies)
 
+    def test_s56_tells_head_from_parent(self) -> None:
+        # MAGI FIX (MS3 §6 loop11, R7a Melchior): both setup commits wrote one doc comment, so
+        # documentation read from HEAD^ passed; the parent's differs now and must stay out.
+        self.assertNotEqual(runs.REVIEW_PARENT_DOC, runs.REVIEW_COMMITTED_DOC)
+        good, parent = _chunk(runs.REVIEW_COMMITTED_DOC.decode()), _chunk(runs.REVIEW_PARENT_DOC.decode())
+        r = _with(_result("R20", 0, {}), request_bodies=(good, parent))
+        self.assertEqual([P, P, F], _judged("S56", r, rc.S56_ASSERTIONS))
+        setup = runs.DEFINITIONS["R20"].setup
+        self.assertIn(runs.REVIEW_PARENT_DOC, setup[0].files[0][1])
+        self.assertIn(runs.REVIEW_COMMITTED_DOC, setup[-1].files[0][1])
+
     def test_s57_serves_validated_history(self) -> None:
         found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3,
                                                "title": "off by one"}]}}
