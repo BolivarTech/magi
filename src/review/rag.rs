@@ -1874,6 +1874,34 @@ mod tests {
     }
 
     #[test]
+    fn nested_methods_are_defs() {
+        // [MAGI S6 MS3 loop10, R2 Melchior] Only one level down a block was recorded, so a method
+        // of an impl inside a module (or a nested class) was no definition.
+        let files: Vec<(String, String)> = [
+            (
+                "a.rs",
+                "mod m {\n    impl T {\n        fn f() {}\n    }\n}\n",
+            ),
+            (
+                "A.java",
+                "class A {\n  class B {\n    void g() {}\n  }\n}\n",
+            ),
+            (
+                "c.py",
+                "class A:\n    class B:\n        def h(self):\n            pass\n",
+            ),
+        ]
+        .iter()
+        .map(|(p, t)| (p.to_string(), t.to_string()))
+        .collect();
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        for (name, file) in [("f", "a.rs"), ("g", "A.java"), ("h", "c.py")] {
+            let defs = index.definitions(name);
+            assert!(defs.iter().any(|d| d.0 == file), "{name}: {defs:?}");
+        }
+    }
+
+    #[test]
     fn a_referenced_type_reaches_the_definitions() {
         // [CP2 MS3 loop 10] RV07(2) names referenced types too: a `struct` is a top-level unit with
         // a name.
