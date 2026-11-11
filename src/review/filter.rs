@@ -559,7 +559,7 @@ fn kept_verdict(
 /// side shows its text verbatim (context and added lines on `new`, context and deleted on `old`),
 /// else its text becomes `<redacted: pattern>` after its marker. [`mask_secrets`] alone on the
 /// diff is not enough: a hunk can hold a secret's value without the key line that makes it one
-/// (`a_diff_alone_cannot_be_masked_safely_so_an_unrebuildable_one_is_left_out`), and every line
+/// (`diff_alone_is_unsafe_to_mask`), and every line
 /// holding a byte of a masked secret differs from its masked side. So masking, never omission, and
 /// no byte of the secret leaves (RV22's tie-break) (`unrebuilt_diff_is_masked`). O(diff + sides).
 fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>, pattern: &str) -> String {
@@ -2306,12 +2306,12 @@ mod tests {
     }
 
     #[test]
-    fn a_diff_alone_cannot_be_masked_safely_so_an_unrebuildable_one_is_left_out() {
-        // [MAGI S6 MS3 loop3, R6a Caspar; the tie-break of RV22] Masking the raw diff text as a
-        // fallback would follow "mask, do not omit", but a hunk shows only some lines, and a
-        // pattern may need lines the hunk leaves out: a YAML value on the line after its key.
-        // The side, read whole, masks it; the diff alone holds the value with no key, and a
-        // masked diff would carry it raw. "No byte of the secret leaves the process" wins.
+    fn diff_alone_is_unsafe_to_mask() {
+        // [MAGI S6 MS3 loop3, R6a Caspar; the tie-break of RV22] Masking the raw diff text alone
+        // is not enough: a hunk shows only some lines, and a pattern may need lines the hunk
+        // leaves out: a YAML value on the line after its key. The side, read whole, masks it; the
+        // diff alone holds the value with no key. So the fallback (`masked_raw_diff`, MS3 §6
+        // loop11) redacts every body line no masked side shows verbatim, never `mask_secrets` alone.
         let key = concat!("aws_secret", "_access_key");
         let value = concat!("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"); // allow-secret-scan
         let side = format!("{key}: |\n  {value}\n");
