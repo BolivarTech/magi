@@ -3145,7 +3145,7 @@ mod tests {
             .await
             .expect("runs");
         let text = out.to_string();
-        assert!(!text.contains("sk-ant-api03-"), "{text}");
+        assert!(!text.contains("sk-ant-api03-"), "{text}"); // allow-secret-scan
         assert!(
             !out["report"].as_str().unwrap_or("").contains('\u{1b}'),
             "{text}"
