@@ -720,7 +720,8 @@ impl ReviewDocStore {
     ///
     /// Complexity: O(stored sources), one pair of deletes per [`ALLOWED_PAIRS_PER_QUERY`] doomed
     /// sources; each delete by `(path, key)` scans `code_review_docs` (keyed `(key, chunk_hash)`),
-    /// milliseconds at [`magi_rs::review::docs::MAX_DOC_CHUNKS`], so no second index is kept.
+    /// milliseconds at [`magi_rs::review::docs::MAX_DOC_CHUNKS`], so no second index is kept;
+    /// raising that bound much needs a `(path, key)` index (declared).
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if a statement fails (nothing is deleted then).
