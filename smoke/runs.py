@@ -3250,6 +3250,7 @@ class _RelayHandler(_RecordingHandler):
         kind = http.client.HTTPSConnection if up.scheme == "https" else http.client.HTTPConnection
         conn = kind(up.hostname, up.port, timeout=RELAY_UPSTREAM_TIMEOUT_S)
         try:
+            # Authorization is forwarded (the upstream needs it): never log or print `headers`.
             headers = {k: v for k, v in self.headers.items() if k.lower() not in _RELAY_DROPPED_HEADERS}
             conn.request(self.command, self.path, body=body, headers=headers)
             reply = conn.getresponse()
