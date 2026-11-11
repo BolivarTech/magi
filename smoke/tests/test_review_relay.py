@@ -12,6 +12,7 @@ import tempfile
 import threading
 import unittest
 import unittest.mock
+import urllib.error
 import urllib.request
 
 from smoke import runs
@@ -41,7 +42,38 @@ def _chunk(text: str) -> tuple:
     return ("/v1/embeddings", json.dumps({"input": [text]}).encode())
 
 
+class _Redirect(http.server.BaseHTTPRequestHandler):
+    """An upstream that answers every request with a redirect off the relay."""
+
+    def do_POST(self) -> None:  # noqa: N802 - the http.server hook name
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(302)
+        self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args) -> None:
+        """Keep the test output quiet."""
+
+
 class RelayTests(unittest.TestCase):
+
+    def test_relay_never_forwards_a_3xx(self) -> None:
+        # MAGI FIX (MS3 §6 loop11, R7a Melchior): a redirect the product followed would leave
+        # the relay unrecorded; it is answered as an error and the record marked incomplete.
+        upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Redirect)
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        try:
+            with runs.recording_relay("http://127.0.0.1:%d/v1" % upstream.server_address[1]) as (url, rec):
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    opener.open(urllib.request.Request(url + "/embeddings", data=b"x"), timeout=5)
+                self.assertGreaterEqual(caught.exception.code, 500)
+                self.assertIsNone(caught.exception.headers.get("Location"))
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+        self.assertFalse(rec.complete)
 
     def test_the_relay_forwards_and_records_each_request(self) -> None:
         upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Echo)
