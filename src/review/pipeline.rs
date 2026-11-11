@@ -6443,6 +6443,59 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn given_start_counts_index_once() {
+        // MAGI FIX (MS3 §6 loop11): a start taken before the indexing counted it twice; a given
+        // start now covers everything before the call, and only a missing one adds `index_ms`.
+        struct Indexed;
+        #[async_trait::async_trait]
+        impl RagSource for Indexed {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Ok(assembled(vec![]))
+            }
+            fn index_ms(&self) -> u64 {
+                3_600_000
+            }
+        }
+        let dir = workspace(1);
+        let git = FakeGit::from(&[(
+            "ls-files --others --ignored --exclude-standard --directory -z -- .",
+            Ok(""),
+        )]);
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let (registry, client) = (LanguageRegistry::new(), MockDecisionClient::new());
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = run_review(
+            ReviewRequest {
+                input: ReviewInput::Directory(dir.path().to_path_buf()),
+                workspace: dir.path(),
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                approved_digest: None,
+                prep_started: Some(Instant::now()),
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+                rag: Some(&Indexed),
+            },
+        )
+        .await
+        .expect("runs");
+        assert!(out.summary.prep_ms < 3_600_000, "{}", out.summary.prep_ms);
+    }
+
+    #[tokio::test]
     async fn the_documentation_indexing_time_counts_in_the_preparation_duration() {
         // [CP2 MS3 loop 10] RV06: embeddings are preparation, reported apart from the clock; main.rs indexes them first.
         struct Indexed(Assembled);
