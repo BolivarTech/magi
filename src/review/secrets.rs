@@ -1879,6 +1879,20 @@ mod tests {
     }
 
     #[test]
+    fn outward_text_keeps_line_breaks() {
+        // [MAGI S6 MS3 loop13, R6a Melchior] when the control-stripped copy found a secret the
+        // first pass missed, it returned a text with every line break gone, joining a
+        // multi-line field into one line. Line breaks and tabs stay (as escapes).
+        let raw = format!(
+            "first\nsee sk-ant-api03-AAAAAAAAAA{}AAAAAAAAAA\nlast",
+            '\u{200b}'
+        ); // allow-secret-scan
+        let out = outward_text(&raw);
+        assert!(!out.contains("AAAAAAAAAA"), "{out}");
+        assert_eq!(out.matches("\\n").count(), 2, "{out}");
+    }
+
+    #[test]
     fn a_pem_private_key_of_any_single_type_word_is_a_secret() {
         // [MAGI S6 MS2 loop 4, A2 Melchior] the type word is not a closed list: `ECDSA` and
         // `ED25519` keys were kept and sent. Public keys and certificates stay ordinary text.
