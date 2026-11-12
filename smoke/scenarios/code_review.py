@@ -122,7 +122,10 @@ S49_SECRET = runs.review_skipped_files()[1][1].split(b"=", 1)[1].strip()
 #: every such substring. Shorter proves nothing: a toy body is two-digit counters
 #: and a letter (``00A01A…``), and five bytes or fewer of that alphabet (``1A02A``)
 #: also occur in ordinary output (line numbers, ids, digests), so finding one would
-#: fail a run that leaks nothing. MAGI FIX (MS3 §6 loop11): the floor was 8 bytes.
+#: fail a run that leaks nothing. MAGI FIX (MS3 §6 loop11): the floor was 8 bytes, now 6.
+#: MAGI FIX (MS3 §6 loop12): 6 is the one value every mention uses (the README, S53, S54, the
+#: tests): the toy alphabet's six-byte windows are unlikely in ordinary output (one in about
+#: 5e5 per 40-character hex run), while a real key's random body is far longer.
 MIN_LEAK_FRAGMENT = 6
 
 

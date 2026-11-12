@@ -3376,14 +3376,50 @@ def trio_bodies(request_bodies) -> tuple:
         request_bodies: ``(target, body)`` pairs, as :class:`RequestBodies` keeps them.
 
     Returns:
-        tuple: The bodies whose target's path ends in one of :data:`TRIO_PATH_SUFFIXES`.
+        tuple: The bodies whose target's path ends in one of :data:`TRIO_PATH_SUFFIXES`; never
+        a gate request (:func:`gate_bodies`), which ends in a different path, so a check on
+        "the trio's prompt" cannot be satisfied (or tripped) by the gate's state.
 
     Example:
-        >>> trio_bodies((("/api/chat", b"a"), ("/v1/embeddings", b"b")))
+        >>> trio_bodies((("/api/chat", b"a"), ("/v1/embeddings", b"b"), ("/v1/systemone", b"c")))
         (b'a',)
     """
+    return _bodies_ending(request_bodies, TRIO_PATH_SUFFIXES)
+
+
+#: The path ending of a gate request: the decision client's System One endpoint, which the
+#: ``[code_review]`` chain calls with the finding and its code as the ``state``.
+GATE_PATH_SUFFIXES = ("/systemone",)
+
+
+def gate_bodies(request_bodies) -> tuple:
+    """The bodies of the gate's requests among *request_bodies* (MAGI FIX, MS3 §6 loop12).
+
+    Args:
+        request_bodies: ``(target, body)`` pairs, as :class:`RequestBodies` keeps them.
+
+    Returns:
+        tuple: The bodies whose target's path ends in one of :data:`GATE_PATH_SUFFIXES`.
+
+    Example:
+        >>> gate_bodies((("/api/chat", b"a"), ("/v1/systemone?x=1", b"c")))
+        (b'c',)
+    """
+    return _bodies_ending(request_bodies, GATE_PATH_SUFFIXES)
+
+
+def _bodies_ending(request_bodies, suffixes) -> tuple:
+    """The bodies whose target, query dropped, ends in one of *suffixes*.
+
+    Args:
+        request_bodies: ``(target, body)`` pairs, or ``None`` for no record.
+        suffixes: The path endings to keep.
+
+    Returns:
+        tuple: The matching bodies, in order.
+    """
     return tuple(b for t, b in request_bodies or ()
-                 if t.split("?", 1)[0].endswith(TRIO_PATH_SUFFIXES))
+                 if t.split("?", 1)[0].endswith(suffixes))
 
 
 def relay_upstream(config_path, environ=None) -> str:

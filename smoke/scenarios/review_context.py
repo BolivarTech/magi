@@ -127,7 +127,9 @@ def a_review_without_an_embedder_runs_and_says_so(run):
     Yields:
         Finding: One per entry of :data:`S52_ASSERTIONS`, in that order.
     """
-    if run is None:
+    # MAGI FIX (MS3 §6 loop12): a result with no output is a missing capture, never an
+    # AttributeError (S57's guard, now S52's, S53's, S55's and S56's too).
+    if run is None or run.output is None:
         for index in range(len(S52_ASSERTIONS)):
             yield _finding(index, Outcome.CANNOT_TEST,
                            "run %s produced no capture to inspect" % RUN_ID)
@@ -180,12 +182,16 @@ def _embedded_texts(bodies):
     """
     texts = []
     for path, body in bodies:
-        if not path.endswith(EMBEDDINGS_PATH):
+        # MAGI FIX (MS3 §6 loop12): the relay records the target with its query (`…?x=1`); only
+        # the path decides, as in `runs.trio_bodies`.
+        if not path.split("?", 1)[0].endswith(EMBEDDINGS_PATH):
             continue
         try:
             items = json.loads(body).get(EMBEDDING_INPUT_KEY)
         except (ValueError, AttributeError):
             continue
+        # The OpenAI-compatible `input` is a string or a list of strings.
+        items = [items] if isinstance(items, str) else items
         texts += [t for t in items if isinstance(t, str)] if isinstance(items, list) else []
     return texts
 
@@ -202,6 +208,24 @@ def _chunk_sent(bodies, doc, code):
         bool: Whether some embedded text holds *doc* and not *code*.
     """
     return any(doc in t and code not in t for t in _embedded_texts(bodies))
+
+
+def _chunk_sent_any(bodies, doc):
+    """Whether *doc* is inside any text the relay saw sent to the embedder.
+
+    Args:
+        bodies: The run's ``(path, body)`` record.
+        doc: The doc comment's text.
+
+    Returns:
+        bool: Whether some embedded text holds *doc*.
+
+    Example:
+        >>> _chunk_sent_any((("/v1/embeddings", b'{"input": ["a doc b"]}'),), "doc")
+        True
+    """
+    return any(doc in t for t in _embedded_texts(bodies))
+
 
 #: The run S55 reads: a review with the environment's own embedder.
 S55_RUN_ID = "R18"
@@ -263,7 +287,7 @@ def a_review_with_its_embedder_up_is_not_degraded(run):
         Finding: One per entry of :data:`S55_ASSERTIONS`, in that order.
     """
     # MAGI FIX (S6 MS3 loop2): no scenario observed a working RAG; S52 only its degradation.
-    if run is None:
+    if run is None or run.output is None:
         for index in range(len(S55_ASSERTIONS)):
             yield _s55_finding(index, Outcome.CANNOT_TEST,
                                "run %s produced no capture to inspect" % S55_RUN_ID)
@@ -307,7 +331,8 @@ _TOKEN_CODE = "pub fn token"
 S56_ASSERTIONS = (
     "exit 0",
     "the embedder was sent the reviewed commit's doc comment as a chunk",
-    "no request the relay forwarded carries the working tree's or the parent commit's doc comment",
+    "no request the relay forwarded carries the working tree's doc comment, and no embedding "
+    "request carries the parent commit's",
 )
 
 #: S57 (R21, RV08): history validated across revisions reaches the trio.
@@ -363,7 +388,7 @@ def documentation_comes_from_the_reviewed_commit(run):
         Finding: One per entry of :data:`S56_ASSERTIONS`, in that order.
     """
     texts = S56_ASSERTIONS
-    if run is None:
+    if run is None or run.output is None:
         yield from _all(texts, "R20", Outcome.CANNOT_TEST, "run R20 produced no capture")
         return
     code = run.output.exit_code
@@ -374,9 +399,15 @@ def documentation_comes_from_the_reviewed_commit(run):
     yield _judged(texts, 1, "R20",
                   _chunk_sent(run.request_bodies, runs.REVIEW_COMMITTED_DOC.decode(), _ANSWER_CODE),
                   "no embedded text is the committed doc comment alone")
-    other = (runs.REVIEW_DIRTY_DOC, runs.REVIEW_PARENT_DOC)
-    dirty = [p for p, b in run.request_bodies if any(d in b for d in other)]
-    yield _judged(texts, 2, "R20", not dirty, "the working tree's or the parent's doc comment went to %s" % dirty)
+    # MAGI FIX (MS3 §6 loop12): RV21/RV22 forbid another revision's DOCUMENTATION, which reaches a
+    # model as an embedded chunk. The parent's doc comment may appear in a trio prompt as the
+    # REMOVED lines of the very diff under review (R20's fixture: parent commit, then HEAD), so
+    # it is looked for in embedding requests only; the dirty working-tree copy is in no diff.
+    dirty = [p for p, b in run.request_bodies if runs.REVIEW_DIRTY_DOC in b]
+    parent = _chunk_sent_any(run.request_bodies, runs.REVIEW_PARENT_DOC.decode())
+    yield _judged(texts, 2, "R20", not dirty and not parent,
+                  "the working tree's doc comment went to %s, or the parent's was embedded: %s"
+                  % (dirty, parent))
 
 
 @scenario("S57", assertions=S57_ASSERTIONS, run="R21", needs_backend=True)

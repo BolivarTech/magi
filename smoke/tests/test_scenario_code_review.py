@@ -482,7 +482,7 @@ class CodeReviewScenarioTests(unittest.TestCase):
         self.assertEqual(Outcome.FAIL, _outcomes("S49", r, log=b"x " + secret)[code_review.S49_ASSERTIONS[2]])
 
     def test_s49_fails_on_any_fragment_down_to_the_floor(self) -> None:
-        # [MAGI S6 MS3 loop9, R7a] the whole key only was probed; now every 8-byte window of it.
+        # [MAGI S6 MS3 loop9, R7a] the whole key only was probed; now every window of it (6 bytes, MIN_LEAK_FRAGMENT).
         # MAGI FIX (MS3 §6 loop11): every window of its random body down to MIN_LEAK_FRAGMENT (6).
         secret, n = code_review.S49_SECRET, code_review.MIN_LEAK_FRAGMENT
         self.assertEqual(6, n)

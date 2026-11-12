@@ -82,7 +82,7 @@ S53_EXPECTED_MASKED = [{"path": runs.REVIEW_MASKED_FILE, "cause": "secret",
 S54_EXPECTED_OMISSIONS = [(runs.REVIEW_KEYBLOCK_FILE, "secret")]
 
 #: The leak probe S49 shares (:func:`smoke.scenarios.code_review.with_slices`).
-#: MAGI FIX (MS3 §6 loop9): one definition for S49, S53 and S54; the floor is 8 bytes.
+#: MAGI FIX (MS3 §6 loop9): one definition for S49, S53 and S54; the floor is 6 bytes (loop12).
 MIN_LEAK_FRAGMENT = code_review.MIN_LEAK_FRAGMENT
 _with_slices = code_review.with_slices
 
@@ -208,7 +208,7 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
         Finding: One per entry of :data:`S53_ASSERTIONS`, in that order.
     """
     texts = S53_ASSERTIONS
-    if run is None:
+    if run is None or run.output is None:
         yield from _no_capture(texts, "R18")
         return
     code = run.output.exit_code

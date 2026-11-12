@@ -277,6 +277,46 @@ class RelayScenarioTests(unittest.TestCase):
         self.assertIn(runs.REVIEW_PARENT_DOC, setup[0].files[0][1])
         self.assertIn(runs.REVIEW_COMMITTED_DOC, setup[-1].files[0][1])
 
+    def test_s56_allows_the_parents_lines_in_the_reviewed_diff(self) -> None:
+        # MAGI FIX (MS3 §6 loop12, R7a Melchior): the parent's doc comment is the REMOVED line of
+        # the diff the trio reviews (RV21 reads the diff from the reviewed commit), so it may sit
+        # in a trio prompt; only an embedded chunk or the dirty copy is another revision's doc.
+        good = _chunk(runs.REVIEW_COMMITTED_DOC.decode())
+        diff = ("/api/chat", b"-    /// " + runs.REVIEW_PARENT_DOC)
+        self.assertEqual([P, P, P], _judged("S56", _with(_result("R20", 0, {}), request_bodies=(good, diff)),
+                                            rc.S56_ASSERTIONS))
+        gate = ("/v1/systemone", runs.REVIEW_DIRTY_DOC)
+        self.assertEqual([P, P, F], _judged("S56", _with(_result("R20", 0, {}), request_bodies=(good, gate)),
+                                            rc.S56_ASSERTIONS), "the dirty copy is in no request at all")
+
+    def test_trio_bodies_never_hold_gate_requests(self) -> None:
+        # MAGI FIX (MS3 §6 loop12, R7a Caspar/Melchior): the oracle of S53 and the history check
+        # of S57 read the trio's prompts; the gate's `state` (a finding with its code) goes to
+        # `/systemone` and must satisfy and trip neither.
+        record = (("/api/chat", b"t1"), ("/v1/chat/completions?x=1", b"t2"),
+                  ("/v1/systemone", b"g1"), ("/v1/systemone?m=1", b"g2"), ("/v1/embeddings", b"e"))
+        self.assertEqual((b"t1", b"t2"), runs.trio_bodies(record))
+        self.assertEqual((b"g1", b"g2"), runs.gate_bodies(record))
+        self.assertEqual((), runs.trio_bodies(None))
+        self.assertEqual((), runs.gate_bodies(None))
+
+    def test_embedded_texts_read_the_path_alone_and_a_single_string(self) -> None:
+        # MAGI FIX (MS3 §6 loop12, R7a): a recorded target carries its query, and the
+        # OpenAI-compatible `input` may be one string.
+        query = ("/v1/embeddings?encoding_format=float", json.dumps({"input": ["a"]}).encode())
+        single = ("/v1/embeddings", json.dumps({"input": "b"}).encode())
+        other = ("/v1/systemone", json.dumps({"input": ["c"]}).encode())
+        self.assertEqual(["a", "b"], rc._embedded_texts((query, single, other)))
+
+    def test_a_result_without_output_is_a_missing_capture_not_a_crash(self) -> None:
+        # MAGI FIX (MS3 §6 loop12, R7a Melchior): S52, S53, S55 and S56 read `run.output.*`
+        # unguarded; S57 alone had the guard.
+        for sid, run_id, texts in (("S52", "R17", rc.S52_ASSERTIONS), ("S53", "R18", rm.S53_ASSERTIONS),
+                                   ("S55", "R18", rc.S55_ASSERTIONS), ("S56", "R20", rc.S56_ASSERTIONS)):
+            with self.subTest(sid=sid):
+                r = _with(_result(run_id, 0, {}), output=None)
+                self.assertTrue(all(o is C for o in _judged(sid, r, texts)), sid)
+
     def test_s57_serves_validated_history(self) -> None:
         found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3,
                                                "title": "off by one"}]}}

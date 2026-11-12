@@ -480,8 +480,8 @@ S49 covers a secret in a file's NAME; these cover its CONTENT.
 The `<redacted: anthropic-key>` marker goes to the model only, so the harness reads the pattern name the
 product publishes instead. S53's leak check reads stdout, stderr, the run log and every request R18 sent
 through the recording relay (`runs.recording_relay`: a loopback server that keeps each request and forwards
-it to the workspace's endpoint); an incomplete record is `CANNOT_TEST`. It finds the key and every 8-byte
-window of it; a shorter or transformed echo is a declared limit. S54 reads the omission from stderr, not from a JSON `skipped` list, because a
+it to the workspace's endpoint); an incomplete record is `CANNOT_TEST`. It finds the key and every 6-byte
+window of it (`MIN_LEAK_FRAGMENT`: a shorter fragment of the toy alphabet also occurs in ordinary output); a shorter or transformed echo is a declared limit. S54 reads the omission from stderr, not from a JSON `skipped` list, because a
 refusal prints no JSON document. The toy key and the block are assembled from pieces in `smoke/runs.py`
 so no scanner sees a key-shaped literal in the source.
 
@@ -492,7 +492,7 @@ S55 adds two assertions (55 scenarios and 164 assertions when it was added) and 
 | Id | Invariant | Without its environment |
 |---|---|---|
 | S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key, or a `trimmed` entry without a string `label`, is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes; the relay saw the doc comment embedded as a chunk and the batch's query | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
-| S56 | R20 reviews `HEAD` of two commits whose doc comments differ, the file's working-tree copy dirty: exit 0, `HEAD`'s doc comment embedded as a chunk, neither the parent's nor the dirty one in any request (RV21) | `CANNOT_TEST` with no backend or an incomplete record |
+| S56 | R20 reviews `HEAD` of two commits whose doc comments differ, the file's working-tree copy dirty: exit 0, `HEAD`'s doc comment embedded as a chunk, the dirty one in no request and the parent's in no embedding request (RV21; the parent's lines may appear in a trio prompt as the removed lines of the diff under review) | `CANNOT_TEST` with no backend or an incomplete record |
 | S57 | R21 reviews a buggy commit, a commit rewriting it, and that commit again: every review exits 0, and a trio request of the third carries a `kind=history` item on `hist/calc.rs` with a first-review finding's title and `(attended)` (RV08; only the third review is relayed) | `CANNOT_TEST` with no backend, an incomplete record, or no located finding in the first review |
 
 Without S55 the suite could not tell a working RAG from one that degrades on every run: S52 expects the
