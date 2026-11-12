@@ -1161,8 +1161,9 @@ pub fn holds_key_block(text: &str) -> bool {
 /// [`PEM_MAX_TYPE_WORDS`] real words.
 const MAX_SPACELESS_HEADER_RUN: usize = 96;
 
-/// The characters [`spaceless_key_header`] drops before it reads a header: the spaces, and what
-/// joins two string literals on one line (quotes, comma, plus). Errs toward a block.
+/// The characters [`spaceless_key_header`] skips between `BEGIN` and the closing dashes: the
+/// spaces, and what joins two string literals on one line (quotes, comma, plus). Errs toward a
+/// block, inside the type words only.
 const HEADER_JOINERS: [char; 6] = [' ', '\t', '"', '\'', ',', '+'];
 
 /// Whether `line`, with its spaces and literal joiners ([`HEADER_JOINERS`]) removed, holds a
@@ -1173,30 +1174,38 @@ const HEADER_JOINERS: [char; 6] = [' ', '\t', '"', '\'', ',', '+'];
 /// (`spaceless_header_is_a_block`); upper case only, as [`holds_key_block`]. Errs toward a block,
 /// RV22's safe direction. O(bytes of `line`).
 fn spaceless_key_header(line: &str) -> bool {
-    // MAGI FIX (MS3 §6 loop12): the quotes, comma and plus of two joined literals go with the
-    // spaces (`"-----BEGIN " "RSA PRIVATE KEY-----"`, `concat!(…, …)`, `a + b`).
-    let line: String = line
-        .chars()
-        .filter(|c| !HEADER_JOINERS.contains(c))
-        .collect();
+    // MAGI FIX (MS3 §6 loop13): joiners are skipped only between `BEGIN` and the closing dashes,
+    // where a split literal puts them (`"-----BEGIN " "RSA PRIVATE KEY-----"`); the dashes before
+    // `BEGIN` and after the key words stay contiguous, so source that spells a header from
+    // constants (`concat!("-----", "BEGIN ", ..)`) is no block.
     line.match_indices("BEGIN").any(|(at, begin)| {
         let opened = at
             .checked_sub(SSH2_ARMOR_DASHES.len())
             .and_then(|from| line.get(from..at))
             .is_some_and(|d| d == SSH2_ARMOR_DASHES);
+        if !opened {
+            return false;
+        }
         let rest = line.get(at + begin.len()..).unwrap_or_default();
-        let run = rest
-            .bytes()
-            .take(MAX_SPACELESS_HEADER_RUN)
-            .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-            .count();
-        let (words, after) = (rest.get(..run).unwrap_or_default(), rest.get(run..));
-        opened
-            && (words.ends_with("PRIVATEKEY") || words.ends_with("PRIVATEKEYBLOCK"))
-            && after.is_some_and(|a| a.starts_with(SSH2_ARMOR_DASHES))
+        let mut words = String::new();
+        let mut end = 0;
+        for (i, c) in rest.char_indices() {
+            if HEADER_JOINERS.contains(&c) {
+                continue;
+            }
+            if !(c.is_ascii_uppercase() || c.is_ascii_digit())
+                || words.len() >= MAX_SPACELESS_HEADER_RUN
+            {
+                break;
+            }
+            words.push(c);
+            end = i + c.len_utf8();
+        }
+        let after = rest.get(end..).unwrap_or_default();
+        (words.ends_with("PRIVATEKEY") || words.ends_with("PRIVATEKEYBLOCK"))
+            && after.starts_with(SSH2_ARMOR_DASHES)
     })
 }
-
 /// `text` masked as [`mask_secrets`] masks it, but with every line break a masked span held
 /// written back right after its `<redacted: …>`, so each line after a secret keeps its number
 /// (an AWS secret key continued on the next line, say). O(n · s · (k + 1)), see
