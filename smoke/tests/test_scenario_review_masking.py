@@ -162,6 +162,16 @@ class S53Tests(unittest.TestCase):
         doc["code_review"]["masked"] = None
         self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, doc)))
 
+    def test_the_key_is_also_in_a_doc_comment(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7b): a key in a doc comment reaches the documentation index
+        # and its embedder; the leak check reads those requests too (relayed), so S53 exercises
+        # the doc-chunk path of RV22 as well as the batch's.
+        (_, body), = runs.review_masked_files()
+        doc_lines = [line for line in body.splitlines() if line.startswith(b"///")]
+        self.assertTrue(any(runs.REVIEW_MASKED_KEY in line for line in doc_lines))
+        # the plain doc comment S55 reads stays as it was
+        self.assertIn(b"/// " + runs.REVIEW_MASKED_DOC, doc_lines)
+
     def test_the_fixture_file_holds_the_key_but_its_name_does_not(self) -> None:
         (path, body), = runs.review_masked_files()
         self.assertIn(runs.REVIEW_MASKED_KEY, body)
