@@ -1312,10 +1312,12 @@ pub fn outward_text(text: &str) -> String {
     // MAGI FIX (MS3 §6 loop12): the detector reads contiguous text, so a control or format
     // character inside a secret hid it; escaping it afterwards left both halves readable. The
     // text without those characters is masked too, and when that finds a secret the first pass
-    // missed, the stripped, masked form leaves instead (one line, so nothing but the escapes lost).
+    // missed, the stripped, masked form leaves instead. MAGI FIX (MS3 §6 loop13): line breaks and
+    // tabs are not stripped (they become escapes), so a multi-line field keeps its lines. Limit,
+    // declared: a secret split by a raw line break is not read as one here.
     let plain: String = masked
         .chars()
-        .filter(|&c| !c.is_control() && !is_hidden_format_char(c))
+        .filter(|&c| matches!(c, '\n' | '\t') || (!c.is_control() && !is_hidden_format_char(c)))
         .collect();
     let masked_plain = mask_secrets(&plain);
     if masked_plain == plain {
