@@ -1838,6 +1838,25 @@ mod tests {
     }
 
     #[test]
+    fn joined_literals_open_a_block() {
+        // MAGI FIX (MS3 §6 loop12): a header split across two string literals on one line kept the
+        // quote and the comma between the halves, so the run of letters stopped and no block was
+        // seen; the joiners are dropped like the spaces.
+        let (b, k) = (PEM_BEGIN, PEM_PRIVATE_KEY);
+        for line in [
+            format!("concat!(\"{b}\", \"RSA {k}\")"),
+            format!("\"{b}\" \"RSA {k}\""),
+            format!("let h = \"{b}RSA \" + \"{k}\";"),
+            format!("'{b}' + 'EC {k}'"),
+        ] {
+            assert!(holds_key_block(&line), "{line}");
+        }
+        assert!(!holds_key_block(
+            "println!(\"BEGIN\", \"PRIVATE\", \"KEY\");"
+        ));
+    }
+
+    #[test]
     fn outward_text_sees_through_ctrl() {
         // MAGI FIX (MS3 §6 loop12): a control or format character inside a secret hid it from
         // the detector, then was escaped and left both halves readable.
