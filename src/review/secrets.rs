@@ -1161,14 +1161,24 @@ pub fn holds_key_block(text: &str) -> bool {
 /// [`PEM_MAX_TYPE_WORDS`] real words.
 const MAX_SPACELESS_HEADER_RUN: usize = 96;
 
-/// Whether `line`, every ASCII space removed, holds a private-key header: four or more dashes,
+/// The characters [`spaceless_key_header`] drops before it reads a header: the spaces, and what
+/// joins two string literals on one line (quotes, comma, plus). Errs toward a block.
+const HEADER_JOINERS: [char; 6] = [' ', '\t', '"', '\'', ',', '+'];
+
+/// Whether `line`, with its spaces and literal joiners ([`HEADER_JOINERS`]) removed, holds a
+/// private-key header: four or more dashes,
 /// `BEGIN`, upper-case letters or digits ending in `PRIVATEKEY` or `PRIVATEKEYBLOCK`, then four
 /// dashes. So a PEM, OpenPGP or SSH2 header split at a token boundary (`…RSA PRIVATE` +
 /// `KEY-----`, in a separator-free concatenation) still opens a block
 /// (`spaceless_header_is_a_block`); upper case only, as [`holds_key_block`]. Errs toward a block,
 /// RV22's safe direction. O(bytes of `line`).
 fn spaceless_key_header(line: &str) -> bool {
-    let line = line.replace(' ', "");
+    // MAGI FIX (MS3 §6 loop12): the quotes, comma and plus of two joined literals go with the
+    // spaces (`"-----BEGIN " "RSA PRIVATE KEY-----"`, `concat!(…, …)`, `a + b`).
+    let line: String = line
+        .chars()
+        .filter(|c| !HEADER_JOINERS.contains(c))
+        .collect();
     line.match_indices("BEGIN").any(|(at, begin)| {
         let opened = at
             .checked_sub(SSH2_ARMOR_DASHES.len())
