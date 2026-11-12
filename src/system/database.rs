@@ -383,6 +383,9 @@ fn open_connection(path: &Path) -> std::result::Result<Connection, VaultError> {
         .map_err(|e| VaultError::Storage(e.to_string()))?;
     // MAGI FIX (MS3 §6 loop13): an older (0.24.x) database is refused BEFORE the journal mode
     // is touched, so a refused file in any journal mode keeps its header byte for byte (RV19).
+    // MAGI FIX (MS3 §6 loop13): an older (0.24.x) database is refused BEFORE the journal mode
+    // is touched, so a refused file in any journal mode keeps its header byte for byte (RV19).
+    check_pre_0_25_tables(&conn, path)?;
     // `query_row` (not `execute`): `journal_mode` returns the new mode, which
     // `execute` rejects on some driver builds.
     let _: String = conn

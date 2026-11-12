@@ -529,7 +529,11 @@ pub fn entries_from_review(
             // line, not only by a header whole in one joined string.
             // MAGI FIX (MS3 §6 loop13): the END line is looked for over the joined (stored) forms
             // too: a footer opening the second text is at a line start only there.
-            if [&title, &detail].iter().any(|t| holds_key_block(t))
+            // MAGI FIX (MS3 §6 loop13): the END line is looked for over the joined (stored) forms
+            // too: a footer opening the second text is at a line start only there.
+            if [&title, &detail]
+                .iter()
+                .any(|t| holds_key_block(t) || holds_key_block_end(t))
                 || quotes_a_split_key_block(&f.titles, &f.details)
             {
                 return None;
