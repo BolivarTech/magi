@@ -3299,6 +3299,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_worktree_review_passes() {
+        // [MAGI S6 MS3 loop13, R4] The pass arm of `ensure_diff_current`, end to end: `captured`
+        // comes from `resolve_input` (not rebuilt with the guard's own parse), the working tree
+        // does not move, and the review succeeds. `moved_worktree_fails_closed` stays green in a
+        // world where the guard always fires; this one does not. The diff is taken `--relative`
+        // (workspace-relative paths), so the resolution and the re-diff never differ by a prefix.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.rs"), "y\n").expect("write");
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n";
+        let git = FakeGit::from(&[
+            ("rev-parse --is-inside-work-tree", Ok("true\n")),
+            ("rev-parse --verify --quiet HEAD^{commit}", Ok("abc\n")),
+            (
+                "diff --no-color --no-ext-diff --no-textconv --relative abc",
+                Ok(diff),
+            ),
+            ("ls-files --others --exclude-standard -z", Ok("")),
+            (
+                "ls-tree -z --end-of-options abc -- a.rs",
+                Ok("100644 blob 0000000000000000000000000000000000000000\ta.rs\0"),
+            ),
+            (
+                "show --no-ext-diff --no-textconv --end-of-options abc:./a.rs",
+                Ok("x\n"),
+            ),
+        ]);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let client = MockDecisionClient::new();
+        let guard = |p: &Path| -> Result<PathBuf, ReviewError> { Ok(p.to_path_buf()) };
+        let registry = LanguageRegistry::new();
+        let pool = vec![("m".to_string(), Some(POOL_WINDOW))];
+        let r = run_review(
+            ReviewRequest {
+                input: ReviewInput::Uncommitted,
+                workspace: dir.path(),
+                timeout_secs: None,
+                deadline: None,
+                max_rotations: 2,
+                retry_disabled: false,
+                agent_timeout_secs: 2_335,
+                approved_batches: None,
+                approved_digest: None,
+                prep_started: None,
+            },
+            ReviewDeps {
+                git: &git,
+                guard: &guard,
+                is_ignored: &|_| false,
+                registry: &registry,
+                pool: &pool,
+                consult: &consult,
+                gate: Gate::new(&client, chain(), 61_000),
+                clock: &FakeClock::default(),
+                rag: None,
+            },
+        )
+        .await;
+        assert!(r.is_ok(), "{:?}", r.err());
+        assert_eq!(consult.calls(), 1);
+    }
+    #[tokio::test]
     async fn a_finding_on_a_deleted_file_reaches_the_gate_with_old_side_code() {
         // [CP2 MS2 S2 loop 3] RV10 + RV21: a deleted file has no new side; the gate sees the old side, numbered as the old side.
         let dir = tempfile::tempdir().expect("tempdir");

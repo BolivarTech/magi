@@ -878,6 +878,11 @@ fn resolve_uncommitted(
 /// from this re-diff always, and the answer is the fail-closed error, never a false pass; the
 /// check cannot approve what it did not compare (`stale_diff_fails_closed` pins the failing side).
 ///
+/// The diff is taken `--relative`, so a workspace below the repository root gets workspace-relative
+/// paths from the resolution and from this re-diff alike: no prefix or filter ever separates them.
+/// The pass arm is pinned end to end by `current_worktree_review_passes` (pipeline), whose
+/// `captured` comes from `resolve_input`.
+///
 /// # Arguments
 /// * `git` - The workspace's git.
 /// * `head` - The pinned `HEAD` the diff is taken against.
