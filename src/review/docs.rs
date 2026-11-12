@@ -2133,15 +2133,15 @@ mod tests {
 
     #[test]
     fn an_unborn_head_contributes_nothing_and_is_not_an_error() {
-        // [CP2 MS3 loop 13] A repository with no commit yet: rev-parse fails, no refs, an empty live set.
+        // [CP2 MS3 loop 13] A repository with no commit yet: rev-parse fails, no refs.
+        // MAGI FIX (MS3 §6 loop13, R1 Caspar): that failure reads the same as a git that is
+        // broken, so it no longer yields an empty live set (which deletes every source): the
+        // clean-up is skipped, never an error. Cost: a repository with no commit never cleans.
         let git = TableGit(vec![(
             "for-each-ref --format=%(objectname) %(*objectname) refs/heads refs/tags",
             Vec::new(),
         )]);
-        assert_eq!(
-            live_doc_sources(&git, &|_: &str| true).expect("ok"),
-            Some(std::collections::BTreeSet::new())
-        );
+        assert_eq!(live_doc_sources(&git, &|_: &str| true).expect("ok"), None);
     }
 
     #[test]
