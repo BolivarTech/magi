@@ -1206,9 +1206,9 @@ pub fn revision_doc_sources(
 ///
 /// "Reaches" is the tree at each ref's tip, not its history: a version only in a branch's
 /// history is deleted and indexed again if needed (a cost, never a loss). An annotated tag
-/// peels to its tree. An unborn HEAD with no ref gives `Some(empty)`; `rev-parse` failing while
-/// refs exist, or `for-each-ref` failing, gives `Ok(None)`: a git that does not answer deletes
-/// nothing. O(refs x tree entries) local git calls.
+/// peels to its tree. `rev-parse` failing (an unborn HEAD included: it reads as a broken git),
+/// or `for-each-ref` failing, gives `Ok(None)`: a git that does not answer deletes nothing.
+/// O(refs x tree entries) local git calls.
 ///
 /// # Returns
 ///
@@ -1250,9 +1250,10 @@ pub fn live_doc_sources(
         return Ok(None);
     }
     let mut commits: BTreeSet<String> = ref_ids.into_iter().collect();
+    // MAGI FIX (MS3 §6 loop13): a HEAD that does not resolve skips the clean-up whether or not
+    // refs exist: an unborn HEAD and a broken git fail alike, and an empty live set deletes all.
     match head {
         Ok(bytes) => commits.extend(to_ids(&bytes)?),
-        Err(_) if commits.is_empty() => return Ok(Some(BTreeSet::new())),
         Err(_) => return Ok(None),
     }
     let mut live = BTreeSet::new();
