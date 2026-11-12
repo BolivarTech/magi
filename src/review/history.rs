@@ -898,6 +898,27 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_at_its_own_commit_is_not_served() {
+        // [MAGI S6 MS3 loop14, R3 Caspar] `merge-base --is-ancestor c c` succeeds, so an
+        // attended entry was served as validated while HEAD was the reviewed commit itself (a
+        // reset), with no commit after it to be the signal. HEAD an ancestor of the commit too
+        // means they are one commit.
+        let same = FakeGit::from(&[
+            ("merge-base --is-ancestor c1 HEAD", Ok("")),
+            ("merge-base --is-ancestor HEAD c1", Ok("")),
+        ]);
+        let mut done = entry(Some(5));
+        done.status = HistoryStatus::Attended;
+        assert!(!served_as_validated(&done, "HEAD", &same));
+        assert!(!on_heads_line("c1", "HEAD", &same));
+        let later = FakeGit::from(&[
+            ("merge-base --is-ancestor c1 HEAD", Ok("")),
+            ("merge-base --is-ancestor HEAD c1", Err("exit 1")),
+        ]);
+        assert!(served_as_validated(&done, "HEAD", &later));
+    }
+
+    #[test]
     fn pending_is_never_served() {
         // MAGI FIX (MS3 §6 loop11): `served_as_validated` read ancestry only, not the status.
         let on_line = FakeGit::from(&[("merge-base --is-ancestor c1 HEAD", Ok(""))]);
@@ -1013,6 +1034,23 @@ mod tests {
             "{}",
             entries[0].title
         );
+    }
+
+    #[test]
+    fn a_secret_across_title_and_detail_is_stored_masked() {
+        // [MAGI S6 MS3 loop14, R3 Caspar] Title and detail were masked apart, so a secret whose
+        // name ends the title and whose value opens the detail (a pattern that spans a line
+        // break) reached the encrypted row whole.
+        use crate::review::gate::GateState;
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let mut split = found("a.rs", 3, "aws_secret_key =");
+        split.details = vec![format!("\"{value}\"")];
+        let entries = entries_from_review(&[(split, judged(GateState::Kept))], "c1");
+        let [only] = entries.as_slice() else {
+            panic!("one entry expected: {entries:?}");
+        };
+        let stored = format!("{}\n{}", only.title, only.detail);
+        assert!(!stored.contains(value), "{stored}");
     }
 
     #[test]

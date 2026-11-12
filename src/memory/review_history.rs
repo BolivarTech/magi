@@ -988,6 +988,70 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_rows_never_starve_the_valid_ones() {
+        // [MAGI S6 MS3 loop14, R3 Caspar] A row that does not decode is never in the caller's
+        // `touched`, so it stayed first in the due queue and took a slot of every review. Reading
+        // it moves it behind the others, as a checked entry is.
+        let (store, _tmp) = store_for_test();
+        let entries = [
+            stored("bad1", Some(1), "c1"),
+            stored("bad2", Some(2), "c1"),
+            stored("good1", Some(3), "c1"),
+            stored("good2", Some(4), "c1"),
+        ];
+        store.record(&entries).expect("record");
+        for id in ["bad1", "bad2"] {
+            store
+                .locked_conn()
+                .execute(
+                    "UPDATE code_review_history SET finding_blob = x'00', created_at = 1 WHERE id = ?1",
+                    [id],
+                )
+                .expect("corrupt");
+        }
+        let first: Vec<String> = store
+            .due(2)
+            .expect("due")
+            .0
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert!(
+            first.is_empty(),
+            "both slots went to corrupt rows: {first:?}"
+        );
+        let second: Vec<String> = store
+            .due(2)
+            .expect("due")
+            .0
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(second.len(), 2, "the valid rows are reached: {second:?}");
+    }
+
+    #[test]
+    fn a_full_scan_of_validated_rows_is_declared_cut() {
+        // [MAGI S6 MS3 loop14, R3 Melchior] Rows past the scan are unread, so a file with more
+        // validated rows than the scan reads (none on the line here) still reports the cut.
+        let (store, _tmp) = store_for_test();
+        let entries: Vec<HistoryEntry> = (0..=MAX_HISTORY_SCAN)
+            .map(|i| stored(&format!("r{i:03}"), Some(1), "c2"))
+            .collect();
+        store.record(&entries).expect("record");
+        for e in &entries {
+            store
+                .update_status(&e.id, HistoryStatus::Attended)
+                .expect("attend");
+        }
+        let (got, cut) = store
+            .validated_on_line(&["src/a.rs".to_string()], &|_: &str| false)
+            .expect("read");
+        assert!(got.is_empty());
+        assert!(cut, "257 rows exceed the scan of 256");
+    }
+
+    #[test]
     fn off_line_never_starves() {
         // MAGI FIX (MS3 §6 loop11): the cap came before the ancestry filter, so newer entries of
         // another branch filled it and an older one on HEAD's line was never read.
