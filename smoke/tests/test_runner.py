@@ -32,6 +32,7 @@ class _TimedOut:
     run_id: str
     timed_out: bool = True
     model_requests: tuple[str, ...] = ()
+    not_runnable: str = ""
 
 
 class StampingTests(unittest.TestCase):
@@ -196,6 +197,14 @@ class ProductOutputBoundaryTests(unittest.TestCase):
         # [smoke review, Melchior] the label names what the run did, as the timeout and backend
         # labels do; it read "reached no model endpoint" on the finding that reports it reached one.
         self.assertEqual("the shared run reached a model endpoint", findings[0].assertion)
+
+    def test_unrunnable_is_cannot_test(self) -> None:
+        # MAGI FIX (MS3 §6 loop13): a run the environment could not stage is not a verdict.
+        findings = self._run_with(_TimedOut("R18", timed_out=False, not_runnable="two endpoints"),
+                                  inspects=True)
+        self.assertEqual([], self.invoked)
+        self.assertEqual([Outcome.CANNOT_TEST], [f.outcome for f in findings])
+        self.assertIn("two endpoints", findings[0].detail)
 
     def test_a_run_that_reached_no_model_runs_its_scenario(self) -> None:
         findings = self._run_with(_TimedOut("R13", timed_out=False), inspects=False)

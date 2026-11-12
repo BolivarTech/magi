@@ -226,6 +226,50 @@ class RelayTests(unittest.TestCase):
                                     capture_output=True, text=True).stdout.split()
         self.assertEqual(["a/b.rs"], listed)
 
+    def test_two_endpoints_are_unavailable(self) -> None:
+        # MAGI FIX (MS3 §6 loop13): a second endpoint is the environment's limit (CANNOT_TEST),
+        # not a harness defect (exit 3).
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "magi.toml"
+            path.write_text('base_url = "http://a/v1"\n[embedding]\nbase_url = "http://b/v1"\n', encoding="utf-8")
+            with self.assertRaises(runs.RelayUnavailable):
+                runs.relay_upstream(path, {})
+            path.write_text('base_url = "http://a/v1"\n', encoding="utf-8")
+            with self.assertRaises(runs.RelayUnavailable):
+                runs.relay_upstream(path, {"OPENAI_BASE_URL": "http://b/v1"})
+
+    def test_unrunnable_relay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = pathlib.Path(tmp)
+            (ws / ".magi").mkdir()
+            (ws / ".magi" / "magi.toml").write_text(
+                'base_url = "http://a/v1"\n[embedding]\nbase_url = "http://b/v1"\n', encoding="utf-8")
+            definition = runs.RunDefinition(
+                run_id="RX", stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+                records_requests=True, argv=("code-review",) + runs.REVIEW_FLAGS)
+            executor = runs.RunExecutor(None, None, None)
+            with executor._recorded_requests(definition, ws, []) as runnable:
+                self.assertIsNone(runnable)
+            self.assertIn("more than one endpoint", executor._unrunnable_cause)
+
+    def test_relay_keeps_no_credential(self) -> None:
+        # MAGI FIX (MS3 §6 loop13): the record scenarios read must not hold the operator's key.
+        upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Echo)
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        try:
+            with runs.recording_relay("http://127.0.0.1:%d/v1" % upstream.server_address[1]) as (url, rec):
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                request = urllib.request.Request(url + "/embeddings", data=b"x", headers={
+                    "Authorization": "Bearer REALCREDENTIAL", "X-Api-Key": "REALCREDENTIAL",
+                    "X-Trace": "visible"})
+                opener.open(request, timeout=5).read()
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+        kept = rec.headers[0]
+        self.assertNotIn(b"REALCREDENTIAL", kept)
+        self.assertIn(b"visible", kept)
+
 
 P, F, C = Outcome.PASS, Outcome.FAIL, Outcome.CANNOT_TEST
 # [MAGI S6 MS3 loop11, R7b Caspar] False positive: `scenario_result` has no `setup_outputs`
