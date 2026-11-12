@@ -278,3 +278,121 @@ mod counter {
         CONTEXT_VISITS.with(|c| c.set(c.get().saturating_add(n)));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review::secrets::mask_secrets_keeping_lines;
+
+    /// Deterministic generator (an LCG): the cases are fixed, and no dependency is added.
+    fn next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 33
+    }
+
+    /// A key-shaped token of the given kind (`n` even: AWS access key, odd: a `ghp_` token), built
+    /// at run time so no literal in the source looks like a secret.
+    fn secret_token(state: &mut u64, n: u64) -> String {
+        let (prefix, len) = if n.is_multiple_of(2) {
+            (["AK", "IA"].concat(), 16)
+        } else {
+            (["gh", "p_"].concat(), 36)
+        };
+        let alphabet: Vec<char> = ('A'..='Z').chain('0'..='9').collect();
+        let body: String = (0..len)
+            .filter_map(|_| alphabet.get(next(state) as usize % alphabet.len()))
+            .collect();
+        format!("{prefix}{body}")
+    }
+
+    /// A git-shaped one-hunk diff over `common` lines with `added` inserted at `p` and `removed`
+    /// deleted at `q`, plus the new and old sides it describes.
+    fn case(
+        common: &[String],
+        p: usize,
+        q: usize,
+        added: &str,
+        removed: &str,
+    ) -> (String, String, String) {
+        let (mut new, mut old, mut body) = (String::new(), String::new(), String::new());
+        for (i, line) in common.iter().enumerate() {
+            if i == p {
+                new.push_str(&format!("{added}\n"));
+                body.push_str(&format!("+{added}\n"));
+            }
+            if i == q {
+                old.push_str(&format!("{removed}\n"));
+                body.push_str(&format!("-{removed}\n"));
+            }
+            new.push_str(&format!("{line}\n"));
+            old.push_str(&format!("{line}\n"));
+            body.push_str(&format!(" {line}\n"));
+        }
+        let n = common.len() + 1;
+        (
+            format!("@@ -1,{n} +1,{n} @@ {}\n{body}", "fn f() {"),
+            new,
+            old,
+        )
+    }
+
+    #[test]
+    fn no_byte_of_a_secret_leaves() {
+        // Both masking paths, over generated cases (an added, a removed and a context line each
+        // holding a secret, at varying positions): no 8-byte window of any secret may appear in a
+        // produced diff, and the rebuilt path must actually produce one in most cases.
+        let mut state = 7u64;
+        let mut rebuilt_count = 0;
+        for n in 0..32u64 {
+            let (s_add, s_del, s_ctx) = (
+                secret_token(&mut state, n),
+                secret_token(&mut state, n + 1),
+                secret_token(&mut state, n + 2),
+            );
+            let size = 6 + (next(&mut state) as usize % 5);
+            let ctx_at = next(&mut state) as usize % size;
+            let common: Vec<String> = (0..size)
+                .map(|i| {
+                    if i == ctx_at {
+                        format!("let c = \"{s_ctx}\";")
+                    } else {
+                        format!("let v{i} = {i};")
+                    }
+                })
+                .collect();
+            let (p, q) = (
+                next(&mut state) as usize % size,
+                next(&mut state) as usize % size,
+            );
+            let (diff, new, old) = case(
+                &common,
+                p,
+                q,
+                &format!("let a = \"{s_add}\";"),
+                &format!("let d = \"{s_del}\";"),
+            );
+            let mask =
+                |s: &str| mask_secrets_keeping_lines(s).map_or_else(|| s.to_string(), |m| m.text);
+            let (new_m, old_m) = (mask(&new), mask(&old));
+            let rebuilt =
+                rebuilt_diff(&diff, Some(new_m.as_bytes()), Some(old_m.as_bytes())).map(|(d, _)| d);
+            rebuilt_count += usize::from(rebuilt.is_some());
+            let fallback =
+                masked_raw_diff(&diff, Some(new_m.as_bytes()), Some(old_m.as_bytes()), "x");
+            for out in rebuilt.iter().chain(std::iter::once(&fallback)) {
+                for s in [&s_add, &s_del, &s_ctx] {
+                    for window in s.as_bytes().windows(8) {
+                        let w = String::from_utf8_lossy(window);
+                        assert!(!out.contains(w.as_ref()), "case {n}: {w} leaked in {out}");
+                    }
+                }
+            }
+        }
+        assert!(
+            rebuilt_count > 16,
+            "the rebuilt path ran in only {rebuilt_count} of 32 cases"
+        );
+    }
+}
