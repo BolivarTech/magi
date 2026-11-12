@@ -2345,6 +2345,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         &magi_config,
         secret_store.as_ref(),
         section_keys.embedding(),
+        &mut startup_notices,
     );
     match memory_store {
         Some(concrete_store) => {
@@ -5247,12 +5248,15 @@ async fn run_code_review_subcommand(
         magi_config.effective_tool_result_cap(),
     );
     // `--no-memory` opens no review store either: no documentation, no history (RV07).
+    let mut setup_notices = Vec::new();
     let (review_memory, review_embedder) = review_context_of(
         memory.as_ref().filter(|_| !args.no_memory),
         &magi_config,
         secret_store.as_ref(),
         section_keys.embedding(),
+        &mut setup_notices,
     );
+    emit_notices(setup_notices);
     let runner = match crate::code_review_runner::build_code_review_runner(
         crate::code_review_runner::CodeReviewBuild {
             workspace: workdir.clone(),
@@ -5393,6 +5397,7 @@ fn review_context_of(
     magi_config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
     embedding_key: &SectionKey,
+    notices: &mut Vec<Notice>,
 ) -> (
     Option<Arc<crate::memory::review_rag::ReviewMemory>>,
     Option<Arc<dyn crate::memory::embedding::EmbeddingProvider>>,
@@ -5414,6 +5419,7 @@ fn review_context_of(
                 error = error.as_str(),
                 "the review stores could not be opened: reviews run without documentation and history"
             );
+            notices.push(review_setup_notice(REVIEW_STORES_FAILED, &e.to_string()));
             return (None, None);
         }
     };
@@ -5431,12 +5437,35 @@ fn review_context_of(
                 error = error.as_str(),
                 "the review embedder could not be built: reviews run without documentation and without history as context (the history is still recorded)"
             );
+            notices.push(review_setup_notice(REVIEW_EMBEDDER_FAILED, &e));
             None
         }
     };
     (Some(memory), embedder)
 }
 
+/// What a [`review_setup_notice`] says when the review stores could not be opened.
+const REVIEW_STORES_FAILED: &str =
+    "the review stores could not be opened: reviews run without documentation and history";
+
+/// What a [`review_setup_notice`] says when the review embedder could not be built.
+const REVIEW_EMBEDDER_FAILED: &str =
+    "the review embedder could not be built: reviews run without documentation and without history as context";
+
+/// The startup notice of a failed review-store or embedder setup: `what` and the cause as
+/// [`review_setup_cause`] gives it (credentials redacted, RV22 patterns masked), so the screen
+/// says why reviews run without context, as the run log already does.
+///
+/// # Arguments
+/// * `what` - [`REVIEW_STORES_FAILED`] or [`REVIEW_EMBEDDER_FAILED`].
+/// * `cause` - The error's text.
+///
+/// # Returns
+/// The warning notice.
+// MAGI FIX (MS3 §6 loop13): the failure was in the run log only; the TUI showed nothing.
+fn review_setup_notice(what: &str, cause: &str) -> Notice {
+    Notice::warn(format!("{what}: {}", review_setup_cause(cause)))
+}
 /// The cause of a failed review-store or embedder setup as the run log may hold it.
 ///
 /// # Arguments
@@ -7200,6 +7229,7 @@ async fn prepare_headless(
             &magi_config,
             secret_store.as_ref(),
             section_keys.embedding(),
+            &mut Vec::new(),
         );
         match optional_code_review_runner(crate::code_review_runner::CodeReviewBuild {
             workspace: workdir.clone(),
