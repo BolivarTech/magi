@@ -2583,6 +2583,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_state_carrying_a_mask_is_never_filtered() {
+        // [MAGI S6 MS3 loop13, R6b] a masked code window shows the gate less than the file holds
+        // (the secret is replaced), so a confident `false_positive` on it is not trusted: the
+        // finding stays in the main list as `low_confidence`.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.99));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let masked = format!(
+            "let k = \"{}github-token>\";\n",
+            crate::review::secrets::REDACTED_OPEN
+        );
+        let v = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some(masked.as_str()),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (v.state, v.cause),
+            (GateState::LowConfidence, Some("masked code"))
+        );
+        let plain = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("let k = 1;\n"),
+                None,
+            )
+            .await;
+        assert_eq!(plain.state, GateState::Filtered);
+    }
+
+    #[tokio::test]
     async fn an_ambiguous_side_turns_a_confident_false_positive_into_low_confidence() {
         // [MAGI S6 loop 9, C1-m2] RV10's replaced-line amendment, pinned at the gate: on a line
         // whose number also names a deleted line, a confident `false_positive` is never filtered.
