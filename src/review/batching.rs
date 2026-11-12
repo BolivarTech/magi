@@ -69,6 +69,12 @@ const LINE_NUMBER_WIDTH: usize = 6;
 const LINE_NUMBER_SEPARATOR: char = '|';
 
 /// The line that explains the prefix, written once at the top of a batch prompt.
+///
+/// Declared wording (MS3 §6 loop12): "each line" is short of true: a hunk's `@@` header, a
+/// `\ No newline` marker and a file-header line carry a blank prefix. They are not code lines, a
+/// model reads them from the diff's shape, and numbering them would show a number that points at
+/// no line, which is worse (`number_hunk` pins the blank prefix). The text is also part of the
+/// calibrated prompt, so it changes only with a reason that outweighs that.
 pub const LINE_NUMBER_LEGEND: &str = "Each line of the code below starts with its absolute \
 line number, right-aligned, then `|`. In a diff, a removed line (`-`) shows its number in the \
 old file and every other line shows its number in the new file. The containing unit of a change \
@@ -87,6 +93,11 @@ not count lines yourself.\n";
 /// # Returns
 ///
 /// The limit in tokens; 0 when the legend alone exceeds the batch limit.
+///
+/// Declared (MS3 §6 loop12): a zero limit surfaces as `TooLargeForBatch` naming the first item,
+/// not the window. It needs a measured window under about 25 tokens to a batch, far below any
+/// model's; the review still fails closed and honest about its size, which is what the error
+/// reports (`a_limit_of_zero_refuses_every_item`).
 // MAGI FIX (T3.7): the RAG budget used the raw limit and could overshoot it by the legend.
 pub fn prompt_limit_tokens(window: &PoolWindow) -> usize {
     batch_limit_tokens(window).saturating_sub(estimate_tokens(LINE_NUMBER_LEGEND))
@@ -347,11 +358,21 @@ fn line_prefix(number: Option<u32>) -> String {
     format!("{shown:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}")
 }
 
+/// The bytes `text` takes once every line carries its prefix (a number of up to
+/// [`LINE_NUMBER_WIDTH`] digits and the separator): one buffer, never regrown for a file of short
+/// lines. O(bytes).
+// MAGI FIX (MS3 §6 loop12): the hint was an eighth of the text; each line gains a whole prefix.
+fn numbered_capacity(text: &str) -> usize {
+    let lines = text.split_inclusive('\n').count();
+    text.len()
+        .saturating_add(lines.saturating_mul(LINE_NUMBER_WIDTH + LINE_NUMBER_SEPARATOR.len_utf8()))
+}
+
 /// `text` with its lines numbered consecutively from `first`; a last line without `'\n'` stays
 /// without it. O(bytes).
 // MAGI FIX (T3.7): the trio counted lines by hand from the `@@` header and reported wrong ones.
 pub(crate) fn number_lines(text: &str, first: u32) -> String {
-    let mut out = String::with_capacity(text.len().saturating_add(text.len() / 8));
+    let mut out = String::with_capacity(numbered_capacity(text));
     let mut number = first;
     for line in text.split_inclusive('\n') {
         out.push_str(&line_prefix(Some(number)));
@@ -369,7 +390,7 @@ pub(crate) fn number_lines(text: &str, first: u32) -> String {
 /// [`BatchItem::hunk_change`] does, so the numbers shown and the anchors agree. O(bytes).
 // MAGI FIX (MS3 §6 loop5): a headerless text was shown with no numbers at all.
 fn number_hunk(text: &str, start: (u32, u32)) -> String {
-    let mut out = String::with_capacity(text.len().saturating_add(text.len() / 8));
+    let mut out = String::with_capacity(numbered_capacity(text));
     for (line, read, _) in HunkLines::new(text, Some(start)) {
         let number = match read {
             HunkLine::Body(BodyLine::Removed(n) | BodyLine::Added(n) | BodyLine::Context(n)) => {
@@ -811,6 +832,10 @@ impl Fit<'_> {
     /// The tokens `item` takes in an empty batch: its text, its file's header and its companion,
     /// as [`Packer::add`] charges them.
     ///
+    /// A whole-file item is rendered here and again by [`Packer::add`] (declared, MS3 §6 loop12):
+    /// two O(bytes) passes over text the per-file cap bounds at 8 MiB, run once per file at
+    /// planning, against a cache field in every `BatchItem` variant for the same answer.
+    ///
     /// # Errors
     ///
     /// The companion's error, unchanged.
@@ -1020,6 +1045,21 @@ mod tests {
     use crate::review::window::estimate_tokens;
 
     use crate::review::test_support::MapSource;
+
+    #[test]
+    fn a_limit_of_zero_refuses_every_item() {
+        // MAGI FIX (MS3 §6 loop12): the declared case of `prompt_limit_tokens` = 0: fail closed,
+        // as an item too large for the (empty) batch.
+        let files = vec![ReviewFile {
+            path: "a.rs".to_string(),
+            diff: Some("@@ -1,1 +1,1 @@\n+x\n".to_string()),
+        }];
+        let src = MapSource::new(&[("a.rs", "x\n")], &[]);
+        match plan_batches(&files, &src, &LanguageRegistry::new(), 0) {
+            Err(ReviewError::TooLargeForBatch { limit, .. }) => assert_eq!(limit, 0),
+            other => panic!("expected TooLargeForBatch, got {other:?}"),
+        }
+    }
 
     #[test]
     fn numbering_never_regrows() {

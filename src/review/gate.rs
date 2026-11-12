@@ -284,6 +284,13 @@ const KEY_BLOCK_END_OPENERS: [(&str, &str); 2] = [(ARMOR_DASHES, "END "), (SSH2_
 /// ([`KEY_BLOCK_END_OPENERS`]), its dash run exactly that long. An END quoted inside a line (an
 /// OpenPGP `Comment:` header, a glued `x-----END`) or a five-dash ` END` never closes a block, so
 /// a block stays open over its body: the safe direction (`armor_end_must_open_its_line`). O(1).
+///
+/// Declared (MS3 §6 loop12): `secrets::mask_secrets` has its own notion of where a block ends
+/// (it masks a block whole for the report). The two are kept apart on purpose: that one decides
+/// what text is masked, this one only how far a withheld window reaches inside a file the filter
+/// has ALREADY left out for holding a block (RV22's file-level exception), a backstop. A drift
+/// loosens at most this backstop, never the file-level omission, and each side is pinned by its
+/// own tests (`armor_end_lines_close_a_block`, `armor_end_must_open_its_line`).
 // MAGI FIX (MS3 §6 loop10): any occurrence closed a block, `----- END` as an SSH2 footer.
 fn holds_armor_end(text: &str) -> bool {
     let line = text.trim_start();
