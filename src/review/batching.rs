@@ -351,11 +351,17 @@ impl BatchItem {
     }
 }
 
-/// The prefix of a reviewed line: its number right-aligned in [`LINE_NUMBER_WIDTH`] columns, or
-/// as many blanks for a line that has none, then [`LINE_NUMBER_SEPARATOR`].
-fn line_prefix(number: Option<u32>) -> String {
-    let shown = number.map_or_else(String::new, |n| n.to_string());
-    format!("{shown:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}")
+/// Appends the prefix of a reviewed line to out: its number right-aligned in
+/// [`LINE_NUMBER_WIDTH`] columns, or as many blanks for a line that has none, then
+/// [`LINE_NUMBER_SEPARATOR`]. O(1).
+fn push_line_prefix(out: &mut String, number: Option<u32>) {
+    use std::fmt::Write;
+    // Writing to a `String` cannot fail; the prefix goes straight into the output buffer, with no
+    // per-line temporary.
+    let _ = match number {
+        Some(n) => write!(out, "{n:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}"),
+        None => write!(out, "{:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}", ""),
+    };
 }
 
 /// The bytes `text` takes once every line carries its prefix (a number of up to
@@ -375,7 +381,7 @@ pub(crate) fn number_lines(text: &str, first: u32) -> String {
     let mut out = String::with_capacity(numbered_capacity(text));
     let mut number = first;
     for line in text.split_inclusive('\n') {
-        out.push_str(&line_prefix(Some(number)));
+        push_line_prefix(&mut out, Some(number));
         out.push_str(line);
         number = number.saturating_add(1);
     }
@@ -398,7 +404,7 @@ fn number_hunk(text: &str, start: (u32, u32)) -> String {
             }
             HunkLine::Body(BodyLine::Other) | HunkLine::Header(_) | HunkLine::Outside => None,
         };
-        out.push_str(&line_prefix(number));
+        push_line_prefix(&mut out, number);
         out.push_str(line);
     }
     out
@@ -1080,7 +1086,8 @@ mod tests {
     fn numbering_never_regrows() {
         // MAGI FIX (MS3 §6 loop12): the capacity hint added an eighth of the text, but each line
         // gains a whole prefix, so a file of short lines reallocated as it grew. The hint now
-        // counts the prefixes: the buffer ends exactly full, never regrown.
+        // counts the prefixes: the buffer ends exactly full, never regrown (for numbers within
+        // LINE_NUMBER_WIDTH digits: _number_past_the_width_widens_its_prefix).
         let short = "a\n".repeat(1_000);
         let numbered = number_lines(&short, 1);
         assert_eq!(numbered.capacity(), numbered.len());
@@ -1089,6 +1096,47 @@ mod tests {
         assert_eq!(shown.capacity(), shown.len());
     }
 
+    #[test]
+    fn only_the_planner_reads_the_raw_limit() {
+        // [MAGI S6 MS3 loop13, R6b] `prompt_limit_tokens` is the one place the legend is
+        // subtracted; a consumer going back to the raw batch limit (the T3.7 defect: the RAG
+        // budget overshot by the legend) would name `batch_limit_tokens` outside `window.rs` and
+        // this file. The needle is split so this test does not match itself.
+        fn walk(dir: &std::path::Path, hits: &mut Vec<String>, needle: &str) {
+            for entry in std::fs::read_dir(dir).expect("reads src") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    walk(&path, hits, needle);
+                } else if path.extension().is_some_and(|x| x == "rs")
+                    && !path.ends_with("window.rs")
+                    && !path.ends_with("batching.rs")
+                    && std::fs::read_to_string(&path)
+                        .expect("reads")
+                        .replace('\r', "")
+                        .contains(needle)
+                {
+                    hits.push(path.display().to_string());
+                }
+            }
+        }
+        let needle = ["batch_limit", "_tokens("].concat();
+        let mut hits = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut hits,
+            &needle,
+        );
+        assert!(hits.is_empty(), "the raw batch limit is read in {hits:?}");
+    }
+
+    #[test]
+    fn a_number_past_the_width_widens_its_prefix() {
+        // [MAGI S6 MS3 loop13, R6b] `LINE_NUMBER_WIDTH` columns hold six digits; a seventh widens
+        // the prefix (so the capacity hint of `numbering_never_regrows` holds below that number
+        // only), and the number is never truncated: the `|` still ends it.
+        let shown = number_lines("a\nb\n", 999_999);
+        assert_eq!(shown, "999999|a\n1000000|b\n");
+    }
     #[test]
     fn a_headerless_hunk_is_numbered_from_its_item_as_hunk_change_counts_it() {
         // [MAGI S6 MS3 loop5, R4 Melchior] `hunk_change` counts a text with no `@@` header from
