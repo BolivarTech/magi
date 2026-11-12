@@ -1331,7 +1331,8 @@ async fn run_batches(
             Err(ConsultFailure::Other(message)) => {
                 summary.batches.push(spent(batch.index, started.elapsed()));
                 // MAGI FIX (MS3 §6 loop13): redacted where it is stored, whatever the producer did.
-                let message = redact_foreign_text(&message).as_str().to_string();
+                // (URLs by edact_foreign_text, key-shaped text by mask_secrets.)
+                let message = mask_secrets(redact_foreign_text(&message).as_str());
                 summary.failed_batches.push((batch.index, message));
             }
         }
