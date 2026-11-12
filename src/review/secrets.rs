@@ -1920,9 +1920,9 @@ mod tests {
         // first pass missed, it returned a text with every line break gone, joining a
         // multi-line field into one line. Line breaks and tabs stay (as escapes).
         let raw = format!(
-            "first\nsee sk-ant-api03-AAAAAAAAAA{}AAAAAAAAAA\nlast",
+            "first\nsee sk-ant-api03-AAAAAAAAAA{}AAAAAAAAAA\nlast", // allow-secret-scan
             '\u{200b}'
-        ); // allow-secret-scan
+        );
         let out = outward_text(&raw);
         assert!(!out.contains("AAAAAAAAAA"), "{out}");
         assert_eq!(out.matches("\\n").count(), 2, "{out}");
