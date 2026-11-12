@@ -446,7 +446,7 @@ fn classify(
     // `content_verdict`'s `find_secret` over each side's bytes (defined below in this file) finds
     // the block's header pattern and returns `Skip(secret)`: the only way a key-block file is left
     // out here. Pinned by `a_real_later_stage_reading_a_left_out_key_block_file_fails_closed`,
-    // `a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review` and
+    // `a_key_block_file_listed_twice_is_skipped_once_never_a_failed_review` and
     // `a_pem_key_whose_header_is_outside_the_hunk_still_skips_the_file` (this file).
     if let Some(skip) = content_verdict(path, sides) {
         return Ok(skip);
@@ -1024,7 +1024,7 @@ enum Side {
 /// sides: the containing units and the lexical index read the kept files, where a refusal ends
 /// the review (failing closed is RV22's tie-break); a definition or caller read
 /// declares its item unreadable instead (`egress_secret_read_is_noted` in `rag`)
-/// (`a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review`,
+/// (`a_key_block_file_listed_twice_is_skipped_once_never_a_failed_review`,
 /// `after_the_filter_no_stage_is_served_a_key_block_it_never_classified`).
 ///
 /// # Arguments
@@ -1318,7 +1318,7 @@ mod tests {
         assert_eq!(f.kept.len(), 1);
     }
     #[test]
-    fn a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review() {
+    fn a_key_block_file_listed_twice_is_skipped_once_never_a_failed_review() {
         // [MAGI S6 MS3 loop5, R6a Caspar] The second read of the released side was refused by
         // the cache, and that refusal ended the whole review; inside the filter it is the skip
         // the first read already chose.
@@ -1342,7 +1342,8 @@ mod tests {
             path: "k.pem".into(),
             cause: SkipCause::Secret,
         };
-        assert_eq!(f.skipped, vec![secret.clone(), secret]);
+        // MAGI FIX (MS3 §6 loop13): a repeated listing is declared once, kept or skipped.
+        assert_eq!(f.skipped, vec![secret]);
         assert!(matches!(
             filter_files(
                 vec![file("k.pem")],
@@ -2437,6 +2438,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_path_listed_with_two_different_diffs_declares_the_dropped_section() {
+        // [MAGI S6 MS3 loop13, R6a Caspar] The first section won and the second vanished with
+        // nothing in the report; `input.rs` lists one section per path, so this is a guard.
+        let inner = MapSource::new(&[("a.rs", "fn f() {}\n")], &[]);
+        let src = CachedSource::new(&inner);
+        let sect = |d: &str| ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(format!("@@ -0,0 +1,1 @@\n+{d}\n")),
+        };
+        let f = filter_files(
+            vec![sect("fn f() {}"), sect("fn f() {}"), sect("fn g() {}")],
+            &src,
+            &LanguageRegistry::new(),
+            false,
+            &|_| false,
+        )
+        .expect("kept once");
+        assert_eq!(f.kept.len(), 1);
+        let dropped = Skipped {
+            path: "a.rs".into(),
+            cause: SkipCause::DuplicateSection,
+        };
+        assert_eq!(f.skipped, vec![dropped]);
+    }
     #[test]
     fn a_listed_twice_file_is_kept_once() {
         // MAGI FIX (MS3 §6 loop12): the second listing of a masked file read the cached masked
