@@ -1889,6 +1889,16 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_across_the_prefix_boundary_is_masked() {
+        // MAGI FIX (MS3 §6 loop13, R2 Caspar): prefix and text were masked apart, so a key
+        // opened by the prefix and finished by the text matched in neither and went out whole.
+        let body = "AAAAAAAAAAAAAAAAAAAA";
+        let q = doc_search_query("query: sk-ant-api03-", body).expect("q"); // allow-secret-scan
+        assert!(!q.contains(body), "{q}");
+        assert!(q.contains("<redacted: anthropic-key>"), "{q}");
+    }
+
+    #[test]
     fn a_query_prefix_longer_than_the_bound_is_cut_to_it_too() {
         // [MAGI S6 MS3 loop4, R2 Caspar] The bound is on the whole query, the prefix included.
         let q = doc_search_query(&"é".repeat(DOC_QUERY_MAX_BYTES), "fn a() {}").expect("q");
