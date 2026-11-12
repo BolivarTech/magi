@@ -2306,7 +2306,7 @@ mod tests {
             lines: None,
             old_side: false,
         };
-        let prompts = render_prompts(&[batch], &[vec![context]]).expect("renders");
+        let prompts = render_prompts(&[batch], &[vec![context]], usize::MAX).expect("renders");
         assert!(!prompts[0].contains("sk-ant-"), "{}", prompts[0]);
         assert!(prompts[0].contains("<redacted: anthropic-key>"));
     }
@@ -2383,7 +2383,7 @@ mod tests {
                 lines: 4,
             }],
         };
-        let r = render_prompts(&[batch], &[vec![]]);
+        let r = render_prompts(&[batch], &[vec![]], usize::MAX);
         assert!(matches!(
             r,
             Err(ReviewError::NotReviewable {
@@ -2393,6 +2393,49 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_prompt_grown_by_masks_is_refused() {
+        // [MAGI S6 MS3 loop13, R4] RV04 was enforced on the accounting of the items, never on the
+        // prompt sent: a mask is longer than many secrets, so a batch planned at the limit could
+        // outgrow it once masked. The rendered prompt is measured and a typed error names it.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let batch = || ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![BatchItem::WholeFile {
+                file: "a.rs".into(),
+                text: format!("let k = \"{key}\";\n").repeat(40),
+                lines: 40,
+            }],
+        };
+        let fits = render_prompts(&[batch()], &[vec![]], usize::MAX).expect("renders");
+        let size = estimate_tokens(fits[0].strip_prefix(LINE_NUMBER_LEGEND).unwrap_or(&fits[0]));
+        assert!(render_prompts(&[batch()], &[vec![]], size).is_ok());
+        let err = render_prompts(&[batch()], &[vec![]], size - 1).expect_err("over the limit");
+        assert!(
+            matches!(err, ReviewError::TooLargeForBatch { tokens, limit, .. } if tokens == size && limit == size - 1),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_frame_label_is_masked_too() {
+        // [MAGI S6 MS3 loop13, R4] The prompt is no longer masked as a whole after the escaping
+        // (that order wrote `<<<` from `<<` plus a mask), so the frame's own text is masked where
+        // it is written.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let mut item = ctx(
+            ContextKind::Documentation,
+            "README.md",
+            &format!("t {key}"),
+            None,
+        );
+        item.text = "plain\n".into();
+        let mut prompt = String::new();
+        write_context(&mut prompt, &[item]);
+        assert!(!prompt.contains("sk-ant-"), "{prompt}");
+    }
     #[test]
     fn backstop_masks_then_escapes() {
         // [MAGI S6 MS3 loop9, R4 Melchior] The whole-prompt mask ran after the escaping, so `<<`
@@ -2410,7 +2453,7 @@ mod tests {
         };
         let mut raw = ctx(ContextKind::Documentation, "README.md", "Setup", None);
         raw.text = format!("x <<{key}\n");
-        let prompts = render_prompts(&[batch], &[vec![raw]]).expect("renders");
+        let prompts = render_prompts(&[batch], &[vec![raw]], usize::MAX).expect("renders");
         assert_eq!(prompts[0].matches("<<<").count(), 2, "{}", prompts[0]);
         assert!(!prompts[0].contains("sk-ant-"));
     }
