@@ -36,6 +36,7 @@ _TRANSLATED_FAILURE = "the product's output could not be interpreted"
 _BACKEND_UNREACHABLE = "the backend was not reachable"
 _RUN_TIMED_OUT = "the shared run did not finish inside its timeout"
 _RUN_REACHED_A_MODEL = "the shared run reached a model endpoint"
+_RUN_NOT_RUNNABLE = "the shared run could not be staged"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -318,6 +319,18 @@ class Runner:
                         assertion=_RUN_TIMED_OUT,
                         outcome=Outcome.CANNOT_TEST,
                         detail=f"run {run_id} exceeded its timeout",
+                        run_id=run_id,
+                    )
+                ], True
+        for run_id, result in self._runs_for(entry).items():
+            # MAGI FIX (MS3 §6 loop13): a run the environment could not stage says nothing.
+            cause = getattr(result, "not_runnable", "") if result is not None else ""
+            if cause:
+                return [
+                    Finding(
+                        assertion=_RUN_NOT_RUNNABLE,
+                        outcome=Outcome.CANNOT_TEST,
+                        detail=f"run {run_id} could not be staged: {cause}",
                         run_id=run_id,
                     )
                 ], True

@@ -625,6 +625,9 @@ class RunResult:
     request_headers: tuple[bytes, ...] | None = None
     #: The output of each :class:`Invocation` setup step, in order.
     setup_outputs: tuple[ProductOutput, ...] = ()
+    #: Why the environment could not stage the run (it never started); ``""`` for a run that did.
+    #: The runner reports every scenario reading it as ``CANNOT_TEST`` with this cause.
+    not_runnable: str = ""
 
 
 #: Where the product writes its logs, relative to a workspace root. The one
@@ -3166,6 +3169,18 @@ HTTP_REDIRECT_FIRST, HTTP_REDIRECT_LAST = 300, 399
 RELAY_REDIRECT_REFUSED = 502
 
 
+class RelayUnavailable(HarnessError):
+    """The environment cannot be relayed (more than one endpoint): ``CANNOT_TEST``, never exit 3."""
+
+
+#: Header names whose values are credentials: kept as a marker, never as sent.
+_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "x-api-key", "api-key",
+                                 "cookie", "x-auth-token"})
+
+#: What stands in for a credential header's value in the record.
+CREDENTIAL_PLACEHOLDER = "<credential not kept>"
+
+
 class RequestBodies:
     """A bounded, thread-safe record of the requests :func:`recording_relay` forwarded.
 
@@ -3265,7 +3280,9 @@ class _RelayHandler(_RecordingHandler):
                 return
             self.connection.settimeout(RELAY_UPSTREAM_TIMEOUT_S)
             parts = urllib.parse.urlsplit(self.path)
-            sent = "".join("%s: %s\n" % kv for kv in self.headers.items())
+            # MAGI FIX (MS3 §6 loop13): the forwarded credential is never kept in the record.
+            sent = "".join("%s: %s\n" % (k, CREDENTIAL_PLACEHOLDER if k.lower() in _CREDENTIAL_HEADERS else v)
+                           for k, v in self.headers.items())
             rec.record(parts.path + ("?" + parts.query if parts.query else ""), body,
                        sent.encode("utf-8", "surrogateescape"))
             self._forward(body)
@@ -3436,9 +3453,10 @@ def relay_upstream(config_path, environ=None) -> str:
         str: The root ``base_url``, which every section inherits or repeats.
 
     Raises:
-        HarnessError: When the file has no root ``base_url``, a section names
-            another endpoint, or ``OPENAI_BASE_URL`` overrides it with another:
-            one relay stands in for one endpoint.
+        RelayUnavailable: When a section names another endpoint, or
+            ``OPENAI_BASE_URL`` overrides the root with another: one relay
+            stands in for one endpoint (the run is ``CANNOT_TEST``).
+        HarnessError: When the file has no root ``base_url``.
     """
     environ = os.environ if environ is None else environ
     document = _parsed_config(config_path)
@@ -3449,8 +3467,9 @@ def relay_upstream(config_path, environ=None) -> str:
               if path[-1] == _ENDPOINT_KEY and len(path) > 1}
     override = (environ.get(_BACKEND_URL_VARIABLE) or "").strip()
     if others - {root} or override not in ("", root):
-        raise HarnessError("%s reaches more than one endpoint; the relay stands in for one"
-                           % config_path)
+        # MAGI FIX (MS3 §6 loop13): the environment's limit, not a harness defect.
+        raise RelayUnavailable("%s reaches more than one endpoint; the relay stands in for one"
+                               % config_path)
     return root
 
 
@@ -3989,6 +4008,8 @@ class RunExecutor:
         #: timeout one of them hit, if any (:meth:`_run_setup`).
         self._setup_outputs: list[ProductOutput] = []
         self._setup_expired: TimedOut | None = None
+        #: Why the run in progress could not be staged (:meth:`_recorded_requests`), or ``""``.
+        self._unrunnable_cause = ""
 
     def execute(self, definition: RunDefinition) -> RunResult:
         """Run one definition and return everything it produced.
@@ -4017,6 +4038,7 @@ class RunExecutor:
         started = time.monotonic()
         self._setup_outputs = []
         self._setup_expired = None
+        self._unrunnable_cause = ""
         workspace = self._prepare_review_workspace(definition)
         # A second listing, after the run's files are written and before the
         # product starts: what the product's own enumeration will see.
@@ -4029,6 +4051,12 @@ class RunExecutor:
         with self._embedder_away(definition, workspace), \
                 self._counted_endpoints(definition, workspace, contacted) as counted, \
                 self._recorded_requests(counted, workspace, recorded) as runnable:
+            if runnable is None:
+                return RunResult(
+                    run_id=definition.run_id,
+                    output=ProductOutput(stdout=b"", stderr=b"", exit_code=0, command=()),
+                    duration_s=time.monotonic() - started, timed_out=False, planted=definition.planted,
+                    not_runnable=self._unrunnable_cause)
             try:
                 if self._setup_expired is not None:
                     # MAGI FIX (MS3 §6 loop9): a setup review that hung is the run's hang.
@@ -4089,7 +4117,9 @@ class RunExecutor:
 
         Yields:
             RunDefinition: *definition* itself for any other run, otherwise a
-            copy whose ``env`` reaches the relay.
+            copy whose ``env`` reaches the relay; ``None`` when the
+            configuration reaches more than one endpoint (the cause is kept in
+            ``_unrunnable_cause``, and the run must not start).
 
         Raises:
             HarnessError: When there is no workspace, or the rewritten
@@ -4106,7 +4136,14 @@ class RunExecutor:
             original = config.read_bytes()
         except OSError as exc:
             raise HarnessError("could not read %s to relay its requests: %s" % (config, exc)) from exc
-        with recording_relay(relay_upstream(config)) as (url, bodies):
+        try:
+            upstream = relay_upstream(config)
+        except RelayUnavailable as exc:
+            # MAGI FIX (MS3 §6 loop13): nothing runs unrelayed; the run is reported unrunnable.
+            self._unrunnable_cause = str(exc)
+            yield None
+            return
+        with recording_relay(upstream) as (url, bodies):
             try:
                 point_config_at(config, url)
                 off = (endpoints_off_the_counter(config, url)
