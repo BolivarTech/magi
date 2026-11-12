@@ -927,6 +927,14 @@ struct HeldSide {
 /// one once for the patterns' openings. The filter's `content_verdict` scans the served sides
 /// again, trusting no source to have masked: four passes for a masked file, a constant factor
 /// on bytes the review caps (`MAX_REVIEW_TOTAL_BYTES`).
+///
+/// Declared over-match (MS3 §6 loop12): a binary or non-UTF-8 side is judged by the patterns'
+/// openings with no left boundary (`sk-`, `://`, `ghp_`, `AKIA`, …), so a harmless binary that
+/// contains one is held raw and its file is left out. It stays fail-closed: a boundary rule could
+/// miss a token split by a NUL, which is the leak the opening check exists for
+/// (`a_binary_side_holding_a_secret_split_by_a_nul_is_held_as_raw_secret`); the cost is a binary
+/// file omitted as `secret` or `binary` instead of `binary` alone, pinned by
+/// `a_benign_binary_with_an_opening_is_held`.
 // MAGI FIX (MS3 §6 loop6): the count said one pass for a masked side (R6a Melchior).
 // MAGI FIX (MS3 §6 loop7): the key-block check ran after the mask was built and dropped.
 fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
@@ -1152,6 +1160,20 @@ mod tests {
         assert!(held_side(Some(split), MAX_MASKED_SIDE_BYTES).raw_secret);
         let clean = b"\x7fELF\0\0\x01plain bytes".to_vec();
         assert!(!held_side(Some(clean), MAX_MASKED_SIDE_BYTES).raw_secret);
+    }
+
+    #[test]
+    fn a_benign_binary_with_an_opening_is_held() {
+        // MAGI FIX (MS3 §6 loop12): the declared over-match of `held_side` for a binary side. An
+        // opening (`sk-`, `://`) with no left boundary marks a harmless binary as raw secret, so
+        // its file is left out and, once released, never served again: fail closed, chosen over
+        // a boundary rule that could miss a split token (the case above). Named, not hidden.
+        for opening in [
+            &b"\x89PNG\0\x01 task-list \x02"[..],
+            &b"\0\x01 http://x \x02"[..],
+        ] {
+            assert!(held_side(Some(opening.to_vec()), MAX_MASKED_SIDE_BYTES).raw_secret);
+        }
     }
 
     #[test]

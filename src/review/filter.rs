@@ -281,12 +281,18 @@ fn classify_files(
     };
     // The sides a kept file was scanned with: never released, whoever else names their path.
     let mut kept_sides: HashSet<(Face, String)> = HashSet::new();
+    let mut kept_paths: HashSet<String> = HashSet::new();
     for file in files {
         let sides = sides_of(&file);
         // MAGI FIX (MS3 §6 loop5): the diff moves into the verdict; it was copied for every file.
         let ReviewFile { path, diff } = file;
         match classify(&path, diff, source, is_ignored, explicit)? {
             Verdict::Keep(kept) => {
+                // MAGI FIX (MS3 §6 loop12): a path is kept once, whoever lists it again (the
+                // repeat reads the cached, masked side and would be reviewed and declared twice).
+                if !kept_paths.insert(path.clone()) {
+                    continue;
+                }
                 if registry.get(&path).is_none() {
                     filtered.no_extractor.push(display_path(&path));
                 }
@@ -689,6 +695,12 @@ fn rebuilt_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<(S
             // MAGI FIX (MS3 §6 loop6): a difference counts unless masking the diff's own line
             // gives the side's; a mask on the side's line no longer excused any difference.
             let shown = line.get(1..).unwrap_or_default();
+            // Declared (MS3 §6 loop12): the side was masked by `mask_secrets_keeping_lines`, this
+            // one line by `mask_secrets`. For a secret whose span crosses a line break the two
+            // differ (the side's later lines are blanked, the diff's line alone shows no key), so
+            // the count can be HIGH, never low: a counted line sends the file down the
+            // masked-by-line fallback (`masked_raw_diff`), the safe direction
+            // (`raw_diff_masks_hunk_context`, `diff_alone_is_unsafe_to_mask`).
             let differs = |side: &str| shown != side && mask_secrets(shown) != side;
             if differs(text) || old_context.is_some_and(differs) {
                 diverged = diverged.saturating_add(1);
