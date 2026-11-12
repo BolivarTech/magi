@@ -1722,6 +1722,23 @@ mod tests {
         assert!(!holds_armor_end("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC+/="));
     }
 
+    #[tokio::test]
+    async fn deadline_precedes_key_scan() {
+        // MAGI FIX (MS3 §6 loop12): the whole-code key-block scan ran before the deadline check, so
+        // a spent clock still paid for it (and said `secret`); the clock is read first.
+        let c = MockDecisionClient::new();
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let key = format!("{}\nQQQQ\n", concat!("-----", "BEGIN ", "PRIVATE KEY-----"));
+        let past = Instant::now();
+        let mut f = finding(Severity::Warning, Some(1));
+        f.file = Some("a.rs".into());
+        let out = g
+            .decide(&f, Some(key.as_str()), Some(past), None, &mut Vec::new())
+            .await;
+        assert_eq!(out.cause, Some(CAUSE_TIMEOUT), "{:?}", out.cause);
+        assert!(g.last_scan.is_none(), "no scan after the deadline");
+    }
+
     #[test]
     fn scan_memo_any_order() {
         // [MAGI S6 MS3 loop10, R6b Melchior] The memo is keyed by the code itself, so findings
