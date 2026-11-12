@@ -735,6 +735,10 @@ def one_occurrence(text: str, needle: str, where: str) -> re.Match:
 #: The product's secret detector, the source :func:`secret_openings` reads.
 SECRETS_SOURCE = "src/review/secrets.rs"
 
+#: The ``Matcher`` variants whose openings :func:`secret_openings` reads: ``Token`` through its
+#: ``prefixes``, the others through the fixed openings of ``NON_TOKEN_PREFIXES``.
+KNOWN_MATCHERS = frozenset({"Token", "PemPrivateKey", "Header", "AwsSecretKey", "UrlCredential"})
+
 
 def secret_openings(root: pathlib.Path) -> list:
     """Every opening of the product's secret patterns, lowercase, read from its source.
@@ -765,6 +769,12 @@ def secret_openings(root: pathlib.Path) -> list:
     # MAGI FIX (MS3 §6 loop13): an empty list matched nothing and dropped every fixed opening silently.
     if not any(e.strip() for e in fixed.split(",")):
         raise AssertionError("%s: NON_TOKEN_PREFIXES has no element" % SECRETS_SOURCE)
+    # MAGI FIX (MS3 §6 loop13): a matcher this reading does not know contributes no opening, so
+    # the table is refused (R7b): a new kind of pattern needs its opening read here on purpose.
+    unknown = sorted(set(re.findall(r"matcher:\s*Matcher::(\w+)", text)) - KNOWN_MATCHERS)
+    if unknown:
+        raise AssertionError("%s: matcher(s) %s are not read for their openings; teach secret_openings"
+                             % (SECRETS_SOURCE, ", ".join(unknown)))
     openings = list(tokens)
     for element in (e.strip() for e in fixed.split(",") if e.strip()):
         value = literal.fullmatch(element)
