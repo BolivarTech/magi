@@ -704,11 +704,13 @@ LARGE_CONSULT_CEILING_S = 20184
 #: four-line file and the gate, plus what R17 does not do: indexing that file's
 #: one doc comment and embedding the batch's query with the environment's
 #: embedder, seconds on a local one. Replace it at the first real run too.
-#: R20 and R21 carry R18's provisional figure too (R21 per review: its two
-#: setup reviews have their own wall clock each). Replace them at the first run.
+#: R20 carries R18's provisional figure too. R21 runs three reviews under ONE
+#: clock (MAGI FIX, MS3 §6 loop13): its figure is their sum, 3 x R18's, and its
+#: ``timeout_s`` is 3 x R20's, shared by the setup reviews and the measured one.
+#: Replace them at the first run.
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
                                         "R10": 67, "R12": 1500, "R17": 300,
-                                        "R18": 300, "R20": 300, "R21": 300}
+                                        "R18": 300, "R20": 300, "R21": 3 * 300}
 
 #: The factor a trio run's ``timeout_s`` must reach over its measurement in
 #: :data:`TRIO_RUNS_MEASURED_S`: at least this many times it, equality
@@ -3927,7 +3929,7 @@ DEFINITIONS: dict[str, RunDefinition] = {
         run_id="R21",
         argv=_REVIEW_HEAD_ARGV,
         stdin=b"",
-        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=900,
+        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=3 * 900,
         records_requests=True,
         setup=(Commit((("README.md", b"# smoke history\n"),)),
                Commit(((REVIEW_HISTORY_FILE, _HISTORY_BUGGY),)),
@@ -4010,6 +4012,9 @@ class RunExecutor:
         self._setup_expired: TimedOut | None = None
         #: Why the run in progress could not be staged (:meth:`_recorded_requests`), or ``""``.
         self._unrunnable_cause = ""
+        #: The monotonic instant the run in progress's one clock ends (its ``timeout_s`` from the
+        #: start); setup steps and the measured invocation share it (:meth:`_run_setup`).
+        self._clock_end: float | None = None
 
     def execute(self, definition: RunDefinition) -> RunResult:
         """Run one definition and return everything it produced.
@@ -4039,6 +4044,7 @@ class RunExecutor:
         self._setup_outputs = []
         self._setup_expired = None
         self._unrunnable_cause = ""
+        self._clock_end = started + definition.timeout_s
         workspace = self._prepare_review_workspace(definition)
         # A second listing, after the run's files are written and before the
         # product starts: what the product's own enumeration will see.
@@ -4057,6 +4063,10 @@ class RunExecutor:
                     output=ProductOutput(stdout=b"", stderr=b"", exit_code=0, command=()),
                     duration_s=time.monotonic() - started, timed_out=False, planted=definition.planted,
                     not_runnable=self._unrunnable_cause)
+            if definition.setup and self._setup_expired is None and self._clock_end is not None:
+                # MAGI FIX (MS3 §6 loop13): the measured review gets what the setup left of the clock.
+                runnable = dataclasses.replace(
+                    runnable, timeout_s=max(1, int(self._clock_end - time.monotonic())))
             try:
                 if self._setup_expired is not None:
                     # MAGI FIX (MS3 §6 loop9): a setup review that hung is the run's hang.
@@ -4182,10 +4192,15 @@ class RunExecutor:
             if isinstance(step, Commit):
                 commit_files(workspace, step)
                 continue
+            # MAGI FIX (MS3 §6 loop13): every step draws on the one run clock.
+            left = step.timeout_s if self._clock_end is None else int(self._clock_end - time.monotonic())
+            if left <= 0:
+                self._setup_expired = TimedOut("run %s used its whole clock in setup" % definition.run_id)
+                return
             # MAGI FIX (MS3 §6 loop11): every rewrite flag is cleared, not inherited from the run.
-            once = dataclasses.replace(definition, argv=step.argv, timeout_s=step.timeout_s,
+            once = dataclasses.replace(definition, argv=step.argv, timeout_s=min(step.timeout_s, left),
                                        setup=(), records_requests=False, files=(),
-                                       unreachable_embedder=False)
+                                       unreachable_embedder=False, forbids_model_calls=False)
             try:
                 self._setup_outputs.append(self._invoke(once, b""))
             except TimedOut as expired:

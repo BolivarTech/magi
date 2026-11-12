@@ -199,8 +199,8 @@ class RelayTests(unittest.TestCase):
         executor._clock_end = 100.0
         step = runs.Invocation(argv=("code-review",), timeout_s=60)
         definition = runs.RunDefinition(
-            run_id="RX", argv=("code-review",), stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL,
-            timeout_s=100, setup=(step, step, step))
+            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS, stdin=b"",
+            needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=100, setup=(step, step, step))
         with unittest.mock.patch.object(executor, "_invoke", invoke), \
                 unittest.mock.patch.object(runs.time, "monotonic", lambda: clock[0]):
             executor._run_setup(definition, pathlib.Path("."))

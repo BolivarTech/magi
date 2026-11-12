@@ -511,7 +511,8 @@ or a shape together with these scenarios.
 
 **Cost.** R18 is one batch by the real trio plus the gate over a four-line file, like R17: harness
 timeout 900 s, `TRIO_RUNS_MEASURED_S["R18"]` carries 300 s provisionally and has not been measured. R19
-never reaches a model. R20 is one batch like R18, R21 three (900 s each); both carry R18's 300 s.
+never reaches a model. R20 is one batch like R18 and carries its 300 s. R21 runs three reviews under one 2 700 s clock shared by its two
+setup reviews and the measured one, so a hung setup review leaves the last less time; its declared cost is the sum, 900 s.
 
 ## Out of scope
 
