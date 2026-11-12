@@ -351,33 +351,45 @@ const NON_TOKEN_PREFIXES: &[&str] = &[
 /// taken out, so a split opening counts
 /// (`a_pattern_opening_split_by_a_nul_or_an_invalid_byte_still_counts`). A short prefix
 /// over-matches plain words (`sk-` in `task-`, `risk-`), fail-closed by design: it only changes
-/// which refusal an already-skipped side gets. O(n · p), with up to three copies of a binary
-/// side (each at most `MAX_REVIEW_FILE_BYTES`).
+/// which refusal an already-skipped side gets. O(n · p): the side is lowercased once (the
+/// squeezed copy derives from it, ASCII case commuting with the squeeze) and the lowercase
+/// prefixes are built once per process, so a binary side costs two copies, each at most
+/// `MAX_REVIEW_FILE_BYTES`.
 // MAGI FIX (MS3 §6 loop7): `gh\0p_…` split the opening itself and matched nothing.
+// MAGI FIX (MS3 §6 loop13): the lowercase was taken up to three times and per prefix per call.
 pub(crate) fn holds_secret_prefix(text: &str) -> bool {
-    let squeezed: String = text
+    let lower = text.to_ascii_lowercase();
+    let squeezed: String = lower
         .chars()
         .filter(|c| !c.is_control() && *c != char::REPLACEMENT_CHARACTER)
         .collect();
-    opens_a_secret(text) || opens_a_secret(&squeezed)
+    opens_a_secret(&lower) || opens_a_secret(&squeezed)
 }
 
-/// Whether `text` holds the opening of any secret pattern, as [`holds_secret_prefix`] reads one
-/// text. O(n · p).
-fn opens_a_secret(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let mut tokens = SECRET_PATTERNS.iter().filter_map(|p| match p.matcher {
-        Matcher::Token { prefixes, .. } => Some(prefixes),
-        Matcher::PemPrivateKey | Matcher::Header(_) | Matcher::AwsSecretKey => None,
-        Matcher::UrlCredential => None,
-    });
-    tokens.any(|prefixes| {
-        prefixes
-            .iter()
-            .any(|p| lower.contains(p.to_ascii_lowercase().as_str()))
-    }) || NON_TOKEN_PREFIXES.iter().any(|p| lower.contains(p))
+/// Every opening of [`holds_secret_prefix`], lowercase, built once: the tokens' prefixes and
+/// [`NON_TOKEN_PREFIXES`].
+fn lowercase_openings() -> &'static [String] {
+    static OPENINGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    OPENINGS.get_or_init(|| {
+        let tokens = SECRET_PATTERNS.iter().filter_map(|p| match p.matcher {
+            Matcher::Token { prefixes, .. } => Some(prefixes),
+            _ => None,
+        });
+        tokens
+            .flat_map(|prefixes| prefixes.iter().copied())
+            .chain(NON_TOKEN_PREFIXES.iter().copied())
+            .map(str::to_ascii_lowercase)
+            .collect()
+    })
 }
 
+/// Whether `lower`, a text already lowercased, holds an opening of [`lowercase_openings`].
+/// O(n · p).
+fn opens_a_secret(lower: &str) -> bool {
+    lowercase_openings()
+        .iter()
+        .any(|p| lower.contains(p.as_str()))
+}
 /// `[A-Za-z0-9_-]`: the characters of a token, and the ones a left boundary may not be.
 fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
@@ -1041,7 +1053,8 @@ const MASK_FAILED: &str = "<redacted: masking failed>";
 /// * `text` - A text that may have been masked.
 ///
 /// # Returns
-/// The pattern's name, or `None` when `text` holds no mask.
+/// The name of the first mask in the text (text order, not table order), or `None` when
+/// `text` holds no mask.
 // MAGI FIX (MS3 §6 loop1): documentation and history are masked, not withheld, and the report
 // declares their file from the mask.
 // MAGI FIX (MS3 §6 loop6): one pass over the text for the masks it holds, then the table; a
@@ -1054,10 +1067,13 @@ pub fn masked_pattern(text: &str) -> Option<&'static str> {
             rest.get(..rest.find('>')?)
         })
         .collect();
-    SECRET_PATTERNS
-        .iter()
-        .map(|p| p.name)
-        .find(|name| named.contains(name))
+    // The first mask in the text names the pattern, not the first in the table.
+    named.iter().find_map(|n| {
+        SECRET_PATTERNS
+            .iter()
+            .map(|p| p.name)
+            .find(|name| name == n)
+    })
 }
 
 /// The masking loop of [`mask_secrets`] and [`mask_secrets_keeping_lines`].
@@ -2561,6 +2577,14 @@ mod tests {
         ] {
             assert_eq!(find_secret(&plain), None, "{plain:?}");
         }
+    }
+    #[test]
+    fn masked_pattern_names_first_mask() {
+        // [MAGI S6 MS3 loop13, R6a] The first mask in the text names the pattern, not the first
+        // pattern of the table: `aws-access-key` sorts before `gitlab-token` there.
+        let text = format!("{REDACTED_OPEN}gitlab-token> then {REDACTED_OPEN}aws-access-key>");
+        assert_eq!(masked_pattern(&text), Some("gitlab-token"));
+        assert_eq!(masked_pattern("no mask here"), None);
     }
     #[test]
     fn a_text_too_dense_in_secrets_is_refused_before_its_mask_passes_the_bound() {
