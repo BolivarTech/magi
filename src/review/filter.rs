@@ -9,7 +9,8 @@
 //! byte cap, a binary and a text that is not UTF-8 are left out with their cause; everything
 //! else is kept, and a kept file with no language extractor is declared.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use super::error::ReviewError;
@@ -102,6 +103,9 @@ pub enum SkipCause {
     Unreadable,
     /// A listed file removed between the listing and its read.
     Disappeared,
+    /// A second section for a path already listed, with a different diff: only the first is
+    /// reviewed, and this entry declares the one left out.
+    DuplicateSection,
 }
 
 impl serde::Serialize for SkipCause {
@@ -131,6 +135,7 @@ impl SkipCause {
             Self::HardLink => HARD_LINK_CAUSE,
             Self::Unreadable => "unreadable",
             Self::Disappeared => "disappeared",
+            Self::DuplicateSection => "repeated section",
         }
     }
 }
@@ -281,18 +286,30 @@ fn classify_files(
     };
     // The sides a kept file was scanned with: never released, whoever else names their path.
     let mut kept_sides: HashSet<(Face, String)> = HashSet::new();
-    let mut kept_paths: HashSet<String> = HashSet::new();
+    // The diff (by hash) a path was kept with, and the (path, diff) pairs already left out: a
+    // repeat is declared once, and a repeat with another diff is declared as a dropped section.
+    let mut kept_paths: HashMap<String, Option<u64>> = HashMap::new();
+    let mut skipped_seen: HashSet<(String, Option<u64>)> = HashSet::new();
     for file in files {
         let sides = sides_of(&file);
         // MAGI FIX (MS3 §6 loop5): the diff moves into the verdict; it was copied for every file.
         let ReviewFile { path, diff } = file;
+        let diff_key = diff.as_deref().map(diff_hash);
         match classify(&path, diff, source, is_ignored, explicit)? {
             Verdict::Keep(kept) => {
                 // MAGI FIX (MS3 §6 loop12): a path is kept once, whoever lists it again (the
                 // repeat reads the cached, masked side and would be reviewed and declared twice).
-                if !kept_paths.insert(path.clone()) {
+                // MAGI FIX (MS3 §6 loop13): a repeat with another diff is declared, not dropped.
+                if let Some(first) = kept_paths.get(&path) {
+                    if *first != diff_key {
+                        filtered.skipped.push(Skipped {
+                            path: display_path(&path),
+                            cause: SkipCause::DuplicateSection,
+                        });
+                    }
                     continue;
                 }
+                kept_paths.insert(path.clone(), diff_key);
                 if registry.get(&path).is_none() {
                     filtered.no_extractor.push(display_path(&path));
                 }
@@ -326,10 +343,12 @@ fn classify_files(
                 // MAGI FIX (S6 loop 13, A2-m2 / A2-b1): side by side, and never a side a kept file
                 // was scanned with: a rename's old path can be a kept file's path.
                 release_unkept(source, &kept_sides, sides);
-                filtered.skipped.push(Skipped {
-                    path: display_path(&path),
-                    cause,
-                });
+                if skipped_seen.insert((path.clone(), diff_key)) {
+                    filtered.skipped.push(Skipped {
+                        path: display_path(&path),
+                        cause,
+                    });
+                }
             }
         }
         // MAGI FIX (S6 loop 15, A2-3): the total is checked after the verdict and its releases,
@@ -337,6 +356,13 @@ fn classify_files(
         source.settle()?;
     }
     Ok(filtered)
+}
+
+/// A hash of one diff section, to tell a repeated listing from a different one. O(len).
+fn diff_hash(diff: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    diff.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Releases each of `sides` from `source`, except a side a kept file was scanned with
