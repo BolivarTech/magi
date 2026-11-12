@@ -435,6 +435,13 @@ fn classify(
         return Ok(Verdict::Skip(SkipCause::Disappeared));
     }
     let sides = [new.as_deref(), old.as_deref()];
+    // MAGI FIX (MS3 §6 loop12): what this call checks, in this file. The cached source answers a
+    // side holding a multi-line key block RAW (`held_side` -> `holds_key_block`), never masked, so
+    // `content_verdict`'s `find_secret` over each side's bytes (defined below in this file) finds
+    // the block's header pattern and returns `Skip(secret)`: the only way a key-block file is left
+    // out here. Pinned by `a_real_later_stage_reading_a_left_out_key_block_file_fails_closed`,
+    // `a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review` and
+    // `a_pem_key_whose_header_is_outside_the_hunk_still_skips_the_file` (this file).
     if let Some(skip) = content_verdict(path, sides) {
         return Ok(skip);
     }
@@ -2322,6 +2329,25 @@ mod tests {
             assert!(!sent.contains("sk-proj-"), "{sent}");
             assert!(sent.contains("<redacted: "), "{sent}");
         }
+    }
+
+    #[test]
+    fn a_listed_twice_file_is_kept_once() {
+        // MAGI FIX (MS3 §6 loop12): the second listing of a masked file read the cached masked
+        // side and was kept again, so the file was reviewed and declared twice.
+        let secret = "const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";\n"; // allow-secret-scan
+        let inner = MapSource::new(&[("a.rs", secret)], &[]);
+        let twice: Vec<ReviewFile> = (0..2)
+            .map(|_| ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            })
+            .collect();
+        let src = CachedSource::new(&inner);
+        let f = filter_files(twice, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("kept, masked");
+        assert_eq!(f.kept.len(), 1, "{:?}", f.kept);
+        assert_eq!(f.masked.len(), 1, "{:?}", f.masked);
     }
 
     #[test]

@@ -872,6 +872,12 @@ fn resolve_uncommitted(
 /// Declared limit: an edit made and exactly undone between the two diffs, with a read in between,
 /// is not seen; the sides read are still masked and whole-side checked by the filter.
 ///
+/// Capture assumption (MS3 §6 loop12): `captured` is what the resolution took from the same
+/// `worktree_diff(git, head)` call and parsed with `from_diff` (empty prefix, no filter), which is
+/// how the working-tree resolution above builds it. A capture made any other way would differ
+/// from this re-diff always, and the answer is the fail-closed error, never a false pass; the
+/// check cannot approve what it did not compare (`stale_diff_fails_closed` pins the failing side).
+///
 /// # Arguments
 /// * `git` - The workspace's git.
 /// * `head` - The pinned `HEAD` the diff is taken against.
