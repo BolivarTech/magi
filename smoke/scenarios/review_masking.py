@@ -143,7 +143,8 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodie
     if leaked:
         return code_review.finding(texts, index, Outcome.FAIL, run_id,
                                     "%s appears in %s" % (what, ", ".join(leaked)))
-    if relayed and run.request_bodies is None:
+    # MAGI FIX (MS3 §6 loop13): the headers are part of the record, pinned like the bodies.
+    if relayed and (run.request_bodies is None or run.request_headers is None):
         return code_review.finding(texts, index, Outcome.CANNOT_TEST, run_id,
                                     "the relay's record of the run is missing or incomplete")
     if run.review_log_unreadable:
