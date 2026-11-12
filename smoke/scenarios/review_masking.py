@@ -20,8 +20,9 @@ product treats in two ways:
   list, like S49's.
 
 Both measure what the product does with the bytes, never what a model answers.
-S54 needs no backend and declares ``inspects_timeouts``; S53 reaches the trio,
-so a timed-out R18 is reported as ``CANNOT_TEST`` by the runner.
+S54 needs no backend; both declare ``inspects_timeouts``. S53 reaches the trio, so a
+hung R18 is ``CANNOT_TEST`` for its body assertions, but its leak assertion still reads
+the bytes captured before the hang and ``FAIL``s on a key in them.
 
 R18 sends every request through the harness's recording relay
 (``runs.recording_relay``, MAGI §6 MS3 loop9), so S53's leak check reads the
@@ -146,10 +147,6 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodie
     if relayed and run.request_bodies is None:
         return code_review.finding(texts, index, Outcome.CANNOT_TEST, run_id,
                                     "the relay's record of the run is missing or incomplete")
-    if relayed and not any(all(n in b for n in S53_TRIO_NEEDLES) for b in runs.trio_bodies(run.request_bodies)):
-        # MAGI FIX (MS3 §6 loop10): a file declared masked but never sent passed (R7a Melchior).
-        return code_review.finding(texts, index, Outcome.FAIL, run_id,
-                                    "no trio prompt carries the file's code with the key masked")
     if run.review_log_unreadable:
         return code_review.finding(
             texts, index, Outcome.CANNOT_TEST, run_id,
@@ -197,7 +194,7 @@ def _normalized_masked(items):
             for item in items]
 
 
-@scenario("S53", assertions=S53_ASSERTIONS, run="R18", needs_backend=True)
+@scenario("S53", assertions=S53_ASSERTIONS, run="R18", needs_backend=True, inspects_timeouts=True)
 def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
     """Check that a single-line key in a file's content is masked, declared and never leaked.
 
@@ -210,6 +207,15 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
     texts = S53_ASSERTIONS
     if run is None or run.output is None:
         yield from _no_capture(texts, "R18")
+        return
+    if run.timed_out:
+        # MAGI FIX (MS3 §6 loop13): a hang is the backend's, but bytes already captured that hold
+        # the key are a leak; a clean capture of a hung run proves nothing, so it is CANNOT_TEST.
+        for index in range(3):
+            yield code_review.finding(texts, index, Outcome.CANNOT_TEST, "R18", "run R18 exceeded its timeout")
+        leak = _s53_leak(run)
+        yield leak if leak.outcome is Outcome.FAIL else code_review.finding(
+            texts, 3, Outcome.CANNOT_TEST, "R18", "run R18 exceeded its timeout; its capture holds no key")
         return
     code = run.output.exit_code
     yield code_review.verdict(texts, 0, "R18", code == EXIT_OK, "exited %d" % code)
@@ -228,8 +234,40 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
     else:
         yield _masked_finding(section)
         yield _skipped_finding(section)
-    yield _leak_finding(texts, 3, "R18", run, (runs.REVIEW_MASKED_KEY,), "the toy key", relayed=True,
-                        bodies=(code_review.key_body(runs.REVIEW_MASKED_KEY),))
+    leak = _s53_leak(run)
+    yield _with_masked_prompt(leak, run) if leak.outcome is Outcome.PASS else leak
+
+
+def _s53_leak(run):
+    """Judge S53's fourth assertion's leak half over everything R18 captured.
+
+    Args:
+        run: R18's ``RunResult`` with an output.
+
+    Returns:
+        Finding: See :func:`_leak_finding` (relayed, with the key's body fragments).
+    """
+    return _leak_finding(S53_ASSERTIONS, 3, "R18", run, (runs.REVIEW_MASKED_KEY,), "the toy key",
+                         relayed=True, bodies=(code_review.key_body(runs.REVIEW_MASKED_KEY),))
+
+
+def _with_masked_prompt(leak, run):
+    """Add S53's own claim to a clean leak finding: a trio prompt carries the masked code.
+
+    MAGI FIX (MS3 §6 loop10 and §6 loop13): a file declared masked but never sent passed (R7a
+    Melchior); the claim is S53's, so it lives here and not in the generic :func:`_leak_finding`.
+
+    Args:
+        leak: The ``PASS`` finding of :func:`_s53_leak`.
+        run: R18's ``RunResult`` with a complete relay record.
+
+    Returns:
+        Finding: *leak*, or a ``FAIL`` when no trio prompt carries the code with the key masked.
+    """
+    if any(all(n in b for n in S53_TRIO_NEEDLES) for b in runs.trio_bodies(run.request_bodies)):
+        return leak
+    return code_review.finding(S53_ASSERTIONS, 3, Outcome.FAIL, "R18",
+                               "no trio prompt carries the file's code with the key masked")
 
 
 def _masked_finding(section):
