@@ -400,6 +400,12 @@ impl StoreRag<'_> {
         }
         let bound = Duration::from_secs(EMBED_QUERY_TIMEOUT_SECS);
         // MAGI FIX (MS3 §6 loop11): a key block in the query prefix is withheld, never sent.
+        // MAGI FIX (MS3 §6 loop12): a key block in this BATCH's text withholds this query only;
+        // the embedder is not down and the next batch is served (the filter omits key-block
+        // files, so this is a backstop).
+        if !holds_key_block(embedder.query_prefix()) && holds_key_block(text) {
+            return None;
+        }
         let cause = match doc_search_query(embedder.query_prefix(), text) {
             None => QUERY_WITHHELD.to_string(),
             Some(query) => match tokio::time::timeout(bound, embedder.embed(&[query])).await {
@@ -607,7 +613,8 @@ impl StoreRag<'_> {
         let was_down = self.embedder_down.load(Ordering::SeqCst);
         let Some(vector) = self.query_vector(embedder, text).await else {
             // MAGI FIX (MS3 §6 loop2): a down embedder is said apart from a missing one.
-            if !was_down {
+            // MAGI FIX (MS3 §6 loop12): only when it is down now (a withheld batch is not).
+            if !was_down && self.embedder_down.load(Ordering::SeqCst) {
                 let layers = [
                     (self.docs.is_some(), ContextKind::Documentation),
                     (self.history.is_some(), ContextKind::History),
@@ -650,8 +657,11 @@ impl StoreRag<'_> {
             self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst) || embedder_down;
         let history_down = self.history_failed.load(Ordering::SeqCst) || embedder_down;
         [
+            // MAGI FIX (MS3 §6 loop12): a review that indexed no source has nothing to cut. The
+            // history layer is not checked the same way: its emptiness is a store read per batch,
+            // so its `no room` stays (the declaration says what the batch could not hold).
             (
-                self.docs.is_some() && !docs_down,
+                self.docs.is_some() && !docs_down && !self.doc_sources.is_empty(),
                 ContextKind::Documentation,
             ),
             (
@@ -4283,6 +4293,8 @@ mod tests {
         // also when nothing of (3) and (4) could enter and their query was never embedded.
         let f = RagFixture::new(&[("notes.txt", "plain\n")]).await;
         let mut rag = f.rag(true);
+        // MAGI FIX (MS3 §6 loop12): a source was indexed, so the cut layer is declared.
+        rag.doc_sources = BTreeSet::from([src("README.md", "k")]);
         let b = batch_on("notes.txt", "plain");
         rag.limit_tokens = b.tokens
             + magi_rs::review::window::estimate_tokens(magi_rs::review::pipeline::CONTEXT_HEADING);
