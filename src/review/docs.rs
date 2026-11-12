@@ -1654,6 +1654,22 @@ mod tests {
     }
 
     #[test]
+    fn an_item_on_its_attribute_line_is_named() {
+        // MAGI FIX (MS3 §6 loop12): `#[derive(Debug)] pub fn foo()` was consumed whole as an
+        // attribute, so its chunk had no section name.
+        for item in [
+            "#[inline] pub fn foo() {}",
+            "#[cfg(any(a, b))] pub fn foo() {}",
+            "#[doc = \"]\"] pub fn foo() {}",
+        ] {
+            let lines = ["/// Docs.", item];
+            let c = rust_doc_chunks("a.rs", &lines);
+            assert_eq!(c.len(), 1, "{item}: {c:?}");
+            assert!(c[0].section.contains("foo"), "{item}: {c:?}");
+        }
+    }
+
+    #[test]
     fn a_multi_line_attribute_before_the_item_is_skipped_whole() {
         // [MAGI S6 MS3 loop3, R1 Melchior] The attribute's continuation lines were read as the
         // item line, leaving the chunk without a section.
