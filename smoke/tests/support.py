@@ -339,8 +339,7 @@ R18_HEALTHY_REQUESTS = tuple(
 
 
 def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"",
-                    timed_out: bool = False, review_log=None, protected_visible=None,
-                    requests=None):
+                    timed_out: bool = False, protected_visible=None, requests=None):
     """A real ``RunResult`` for *run_id* whose stdout is *document* serialised.
 
     [MAGI S6 MS3 loop7, R7b Balthasar] Moved here from the code-review scenario
@@ -353,7 +352,6 @@ def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: byte
         document: What stdout carries, JSON-serialised; ``None`` for empty stdout.
         stderr: The product's stderr.
         timed_out: Whether the run was cut by its wall clock.
-        review_log: The captured run-log bodies, or ``None``.
         protected_visible: The protected paths git listed; defaults to
             :data:`R16_PROTECTED` for R16 and to nothing for every other run.
         requests: What the recording relay saw, ``(path, body)`` pairs; defaults to
@@ -371,8 +369,10 @@ def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: byte
     return RunResult(run_id=run_id,
                      output=ProductOutput(stdout=body, stderr=stderr, exit_code=exit_code,
                                           command=["magi-rs"]),
-                     duration_s=1.0, timed_out=timed_out, planted=(), review_log=review_log,
-                     protected_visible=protected_visible, request_bodies=requests)
+                     duration_s=1.0, timed_out=timed_out, planted=(),
+                     protected_visible=protected_visible, request_bodies=requests,
+                     # MAGI FIX (MS3 §6 loop13): one header record per request, as the relay keeps.
+                     request_headers=tuple(b"content-type: application/json\n" for _ in requests))
 
 
 def scenario_findings(scenario_id: str, result, log=b"") -> list:

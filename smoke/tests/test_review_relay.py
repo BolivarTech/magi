@@ -441,6 +441,29 @@ class RelayScenarioTests(unittest.TestCase):
                 r = _with(_result(run_id, 0, {}), output=None)
                 self.assertTrue(all(o is C for o in _judged(sid, r, texts)), sid)
 
+    def test_s53_needs_the_header_record(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7b): bodies without their headers is an incomplete record,
+        # pinned like missing bodies (CANNOT_TEST), never "the headers held no key".
+        doc = {"code_review": {"masked": rm.S53_EXPECTED_MASKED, "masked_unlisted": 0,
+                               "skipped": [], "skipped_unlisted": 0}}
+        run = _result("R18", 0, doc)
+        self.assertEqual([P], _judged("S53", run, rm.S53_ASSERTIONS[3:]))
+        self.assertEqual([C], _judged("S53", _with(run, request_headers=None), rm.S53_ASSERTIONS[3:]))
+
+    def test_the_setup_never_records(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7b): the record a scenario reads is the measured run's alone.
+        # S57's oracle looks for a history frame the setup reviews would also produce.
+        executor = runs.RunExecutor(binary=None, env={}, config=None)
+        step = runs.Invocation(argv=("code-review",), timeout_s=5)
+        definition = runs.RunDefinition(
+            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS, stdin=b"",
+            needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60, records_requests=True,
+            setup=(step,))
+        seen = []
+        with unittest.mock.patch.object(executor, "_invoke", lambda d, s: seen.append(d)):
+            executor._run_setup(definition, pathlib.Path("."))
+        self.assertEqual([False], [d.records_requests for d in seen])
+
     def test_s54_without_output_is_three_findings(self) -> None:
         # MAGI FIX (MS3 §6 loop13, R7a Melchior): the leak check read `run.output.*` on a result
         # that left no capture; S54 yields its three findings, as its five siblings do.
