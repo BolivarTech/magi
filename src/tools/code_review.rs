@@ -3344,15 +3344,59 @@ mod tests {
             started: Arc::default(),
         });
         let waiting = Arc::clone(&runner);
-        let surface =
-            tokio::spawn(async move { finish_after_delivered_report(waiting.as_ref()).await });
+        let surface = tokio::spawn(async move {
+            finish_after_delivered_report(waiting.as_ref(), &CancellationToken::new()).await
+        });
         tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(2 * RECLASSIFY_BUDGET_SECS + 1)).await;
+        // MAGI FIX (MS3 §6 loop13): the wait is the margin, not twice the sub-budget: a surface
+        // that is deaf while it waits (the TUI) is deaf for at most 30 s.
+        tokio::time::advance(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS + 1)).await;
         let note = surface.await.expect("the surface goes on");
         drop(tx);
         assert_eq!(note.as_deref(), Some(POST_REPORT_CUT));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_fired_token_ends_the_delivered_report_wait() {
+        // [MAGI S6 MS3 loop13, R5] `finish_after_delivered_report` ignored the run's token, so a
+        // cancelled run still waited out the post-report bound. A token that fired ends the
+        // wait at once, with the cut note, and the work stays on its blocking thread.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let runner = Arc::new(HangingFollowUpRunner {
+            release: std::sync::Mutex::new(Some(rx)),
+            started: Arc::default(),
+        });
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let note = finish_after_delivered_report(runner.as_ref(), &cancel).await;
+        drop(tx);
+        assert_eq!(note.as_deref(), Some(POST_REPORT_CUT));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tool_without_a_deadline_bounds_its_post_report_wait() {
+        // [MAGI S6 MS3 loop13, R5] With no run deadline (a TUI chat call) the tool waited for the
+        // post-report work with no bound but the work's own 120 s; the margin bounds it as it
+        // bounds a deadlined run (`post_report_wait_is_bounded`).
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let runner = Arc::new(HangingFollowUpRunner {
+            release: std::sync::Mutex::new(Some(rx)),
+            started: Arc::default(),
+        });
+        let tool = CodeReviewTool::new(runner, true);
+        let call = tokio::spawn(async move {
+            tool.execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS + 1)).await;
+        let out = call.await.expect("joins").expect("the tool goes on");
+        drop(tx);
+        assert!(out.to_string().contains("did not finish"), "{out}");
+    }
     #[tokio::test]
     async fn with_no_time_left_the_post_report_step_is_skipped_and_said() {
         let (_tx, rx) = std::sync::mpsc::channel::<()>();
