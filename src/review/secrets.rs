@@ -1383,9 +1383,8 @@ fn without_hidden_chars(text: &str) -> String {
 /// `true` when the stripped copy holds a secret, so the caller must hold the text back.
 // MAGI FIX (MS3 §6 loop14): the content path had no such pass (R6a2 Melchior, CRITICAL).
 pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
-    let hidden = |c: char| {
-        !matches!(c, '\n' | '\r' | '\t') && (c.is_control() || is_hidden_format_char(c))
-    };
+    let hidden =
+        |c: char| !matches!(c, '\n' | '\r' | '\t') && (c.is_control() || is_hidden_format_char(c));
     masked.chars().any(hidden) && find_secret(&without_hidden_chars(masked)).is_some()
 }
 
