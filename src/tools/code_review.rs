@@ -680,7 +680,8 @@ pub(crate) fn envelope_usage(r: &Rendered) -> magi_rs::headless::types::Usage {
 /// [`ToolError::InvalidArguments`] for a non-object, an unknown field, a value of the wrong
 /// type, a blank `path`, two forms at once, half a pair, or a hostile ref.
 pub(crate) fn parse_tool_input(args: &Value) -> Result<ReviewInput, ToolError> {
-    let invalid = |m: String| ToolError::InvalidArguments(egress_text(&m));
+    // MAGI FIX (MS3 §6 loop12): strip, then mask (a field name is model text).
+    let invalid = |m: String| ToolError::InvalidArguments(egress_text(&terminal_safe(&m)));
     let fields = args
         .as_object()
         .ok_or_else(|| invalid("the arguments must be a JSON object".into()))?;
@@ -1109,7 +1110,9 @@ fn post_report_limit(left: Duration) -> Duration {
 
 /// A review error as the tool's execution error, redacted.
 fn tool_error(e: &ReviewError) -> ToolError {
-    ToolError::ExecutionError(egress_text(&e.to_string()))
+    // MAGI FIX (MS3 §6 loop12): stripped first, as `egress_safe` does, so a control character
+    // inside a key cannot hide it from the detector.
+    ToolError::ExecutionError(egress_text(&terminal_safe(&e.to_string())))
 }
 
 #[async_trait]

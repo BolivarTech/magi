@@ -1298,7 +1298,21 @@ fn token_after_mask(pattern: &SecretPattern, lane: usize, rest: &str) -> Option<
 /// # Returns
 /// The masked, escaped text.
 pub fn outward_text(text: &str) -> String {
-    escape_controls(&mask_secrets(text))
+    let masked = mask_secrets(text);
+    // MAGI FIX (MS3 §6 loop12): the detector reads contiguous text, so a control or format
+    // character inside a secret hid it; escaping it afterwards left both halves readable. The
+    // text without those characters is masked too, and when that finds a secret the first pass
+    // missed, the stripped, masked form leaves instead (one line, so nothing but the escapes lost).
+    let plain: String = masked
+        .chars()
+        .filter(|&c| !c.is_control() && !is_hidden_format_char(c))
+        .collect();
+    let masked_plain = mask_secrets(&plain);
+    if masked_plain == plain {
+        escape_controls(&masked)
+    } else {
+        escape_controls(&masked_plain)
+    }
 }
 
 /// The characters that can break, reorder or hide text on a terminal or a log viewer: every
