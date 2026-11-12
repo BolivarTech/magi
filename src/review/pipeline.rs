@@ -345,8 +345,24 @@ impl SystemReviewClock {
 
 impl ReviewClock for SystemReviewClock {
     fn elapsed_secs(&self) -> u64 {
-        self.start.elapsed().as_secs()
+        whole_secs_up(self.start.elapsed())
     }
+}
+
+/// `elapsed` in whole seconds, rounded UP: a clock that floors (`as_secs`) lets each batch's
+/// fractional second go uncounted, and the unreported part adds up across batches until the total
+/// can pass `--timeout`; rounding up errs by under a second per reading, toward the deadline.
+///
+/// # Arguments
+///
+/// * `elapsed` - The time since the clock started.
+///
+/// # Returns
+///
+/// The whole seconds, at least as many as `elapsed`. O(1).
+// MAGI FIX (MS3 §6 loop12): the clock floored whole seconds (R4 Caspar).
+fn whole_secs_up(elapsed: Duration) -> u64 {
+    elapsed.as_secs()
 }
 
 /// Runs one batch under its wall clock.
@@ -7111,6 +7127,52 @@ mod tests {
         let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
         assert!(matches!(r, Err(ReviewError::TooLargeForBatch { .. })));
         assert_eq!(rag.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn elapsed_time_rounds_up() {
+        // MAGI FIX (MS3 §6 loop12): flooring let fractional seconds of each batch go uncounted.
+        assert_eq!(whole_secs_up(Duration::ZERO), 0);
+        assert_eq!(whole_secs_up(Duration::from_secs(3)), 3);
+        assert_eq!(whole_secs_up(Duration::from_millis(3_001)), 4);
+        assert_eq!(whole_secs_up(Duration::from_millis(999)), 1);
+    }
+
+    #[tokio::test]
+    async fn reuse_needs_the_same_units() {
+        // MAGI FIX (MS3 §6 loop12): the pre-computed units replaced the assembled ones when only
+        // their COUNT matched, so a source that answered other units from `context_for` than from
+        // `units_for` had the wrong ones sent. Identity (file, label) decides now.
+        struct Divergent;
+        #[async_trait::async_trait]
+        impl RagSource for Divergent {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                let unit = ctx(ContextKind::Unit, "sent.rs", "sent_unit", Some((1, 26)));
+                Ok(assembled(vec![unit]))
+            }
+            fn units_for(&self, _b: &ReviewBatch) -> Result<Vec<ContextItem>, ReviewError> {
+                let unit = ctx(
+                    ContextKind::Unit,
+                    "promised.rs",
+                    "promised_unit",
+                    Some((1, 26)),
+                );
+                Ok(vec![unit])
+            }
+        }
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        review_with_rag(
+            dir.path(),
+            &Divergent,
+            &consult,
+            &gate_always("real_defect"),
+        )
+        .await
+        .expect("runs");
+        let prompt = consult.prompts.lock().expect("lock")[0].clone();
+        assert!(prompt.contains("sent_unit"), "the assembled unit is sent");
+        assert!(!prompt.contains("promised_unit"), "not the promised one");
     }
 
     #[tokio::test]
