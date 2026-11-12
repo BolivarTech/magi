@@ -603,6 +603,21 @@ mod tests {
     }
 
     #[test]
+    fn tabs_in_a_footer_still_end_a_block() {
+        // MAGI FIX (MS3 §6 loop12): only ASCII spaces were removed before the END markers were
+        // compared, so a hand-edited footer with tabs between its words was no END line.
+        let (d, k) = (ARMOR_DASHES, PRIVATE_KEY);
+        for footer in [
+            format!("{d}END\tRSA\t{k}{d}"),
+            format!("{d}END \tRSA {k}\t{d}"),
+            format!("{SSH2_DASHES} END\tSSH2\tENCRYPTED\t{k} {SSH2_DASHES}"),
+        ] {
+            assert!(holds_key_block_end(&footer), "{footer:?}");
+        }
+        assert!(!holds_key_block_end("plain text\twith a tab"));
+    }
+
+    #[test]
     fn lines_changed_after_the_review_mean_attended() {
         // [CP2 MS3 loop 1] Anchored to the reviewed commit: `-4,3` covers lines 4..=6 of c1.
         let git = FakeGit::from(&[
