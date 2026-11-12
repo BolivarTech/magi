@@ -32,6 +32,7 @@ pub mod clock;
 pub mod config;
 pub mod consolidate;
 pub mod context;
+mod diffmask;
 pub mod docs;
 pub mod error;
 pub mod filter;

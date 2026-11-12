@@ -1,0 +1,269 @@
+// Author: Julian Bolivar
+// Version: 0.25.0
+// Date: 2026-11-08
+
+//! The diff of a masked file, rebuilt or masked by line so that no byte of a masked secret leaves.
+//!
+//! **Egress invariant.** Every diff text this module returns is built from the (masked) sides of
+//! the file or masked line by line, and its caller scans it with `find_secret` before it is
+//! served; a line that no masked side shows verbatim never travels. The two paths, [`rebuilt_diff`]
+//! (lines taken from the sides at the numbers the hunk headers give) and [`fallback_diff`] (the
+//! raw diff masked by line), are checked against each other by `no_byte_of_a_secret_leaves`.
+
+use std::collections::HashSet;
+
+use super::secrets::{find_secret, holds_key_block, mask_secrets, REDACTED_OPEN};
+
+/// The marker that opens and closes a hunk header line (`@@ -a,b +c,d @@`).
+pub(super) const HUNK_START: &str = "@@";
+
+/// [`masked_raw_diff`], scanned: `None` when its own output still holds a secret, so the caller
+/// leaves the file out as a `secret` skip instead of sending it. A body line that a clean side
+/// shows verbatim is kept as it is, so a secret that exists only across adjacent diff lines
+/// (a name and its quoted value on neighbouring context lines) survives the by-line masking; the
+/// re-scan is what keeps every egress text validated, as the rebuilt path already is. O(diff + sides).
+// MAGI FIX (MS3 §6 loop13): the fallback was the one egress text never re-scanned.
+pub(super) fn fallback_diff(
+    diff: &str,
+    new: Option<&[u8]>,
+    old: Option<&[u8]>,
+    pattern: &str,
+) -> Option<String> {
+    let masked = masked_raw_diff(diff, new, old, pattern);
+    find_secret(&masked).is_none().then_some(masked)
+}
+/// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it: a header line outside a hunk
+/// is masked with [`mask_secrets`]; an `@@` line keeps its ranges and its function context only
+/// when a masked side shows it ([`shown_by_a_side`]); a body line is kept only when a masked
+/// side shows its text verbatim (context and added lines on `new`, context and deleted on `old`),
+/// else its text becomes `<redacted: pattern>` after its marker. [`mask_secrets`] alone on the
+/// diff is not enough: a hunk can hold a secret's value without the key line that makes it one
+/// (`diff_alone_is_unsafe_to_mask`), and every line
+/// holding a byte of a masked secret differs from its masked side. So masking, never omission, and
+/// no byte of the secret leaves (RV22's tie-break) (`unrebuilt_diff_is_masked`). O(diff + sides).
+pub(super) fn masked_raw_diff(
+    diff: &str,
+    new: Option<&[u8]>,
+    old: Option<&[u8]>,
+    pattern: &str,
+) -> String {
+    let (new_vec, old_vec) = (
+        side_lines(new).unwrap_or_default(),
+        side_lines(old).unwrap_or_default(),
+    );
+    let new_lines: HashSet<&str> = new_vec.iter().copied().collect();
+    let old_lines: HashSet<&str> = old_vec.iter().copied().collect();
+    let redacted = format!("{REDACTED_OPEN}{pattern}>");
+    let mut index: Option<SideIndex<'_>> = None;
+    let mut in_hunk = false;
+    let mut out = String::with_capacity(diff.len());
+    for line in diff.split_inclusive('\n') {
+        let (body, end) = line.strip_suffix('\n').map_or((line, ""), |b| (b, "\n"));
+        if body.starts_with("@@") {
+            in_hunk = true;
+            // MAGI FIX (MS3 §6 loop12): the function context is a line of the file, so, as in
+            // `rebuilt_diff`, it stays only when a masked side shows it; masking the line alone
+            // would leave a value whose key sits on another line. A header that does not parse
+            // is redacted whole.
+            let kept = match hunk_header(body) {
+                Some((header, ..)) => {
+                    let context = body.get(header.len()..).unwrap_or_default();
+                    let idx = index.get_or_insert_with(|| SideIndex::new(&new_vec, &old_vec));
+                    if shown_by_a_side(context, idx) {
+                        body.to_string()
+                    } else {
+                        header.to_string()
+                    }
+                }
+                None => format!("@@ {redacted}"),
+            };
+            out.push_str(&kept);
+            out.push_str(end);
+            continue;
+        }
+        let marker = body.chars().next();
+        let text = body.get(1..).unwrap_or_default();
+        let kept = match (in_hunk, marker) {
+            (false, _) | (true, Some('\\')) => mask_secrets(body),
+            (true, Some(' ')) if new_lines.contains(text) && old_lines.contains(text) => {
+                body.into()
+            }
+            (true, Some('+')) if new_lines.contains(text) => body.into(),
+            (true, Some('-')) if old_lines.contains(text) => body.into(),
+            (true, Some(m @ (' ' | '+' | '-'))) => format!("{m}{redacted}"),
+            (true, _) => redacted.clone(),
+        };
+        out.push_str(&kept);
+        out.push_str(end);
+    }
+    out
+}
+
+/// `diff` with every content line taken from the (masked) side it shows: a context or added line
+/// from `new` (a context line compared with `old` too, never written from it), a deleted line
+/// from `old`, at the numbers its hunk header gives. Header lines and `\ No newline` markers are
+/// kept; a hunk header keeps its ranges, and its function context only when a masked side line
+/// shows it as it is ([`shown_by_a_side`]). `None` when a line names a side line that does not
+/// exist, a header does not parse or a body line has no marker. A body line that differs from
+/// its side's is replaced by the side's text, and counted unless masking the diff's line gives
+/// the side's; the caller logs the count (RV21) and checks the result for secrets again. Header
+/// lines are kept as they are: a secret-shaped path in one leaves the file out.
+///
+/// Subset of git's unified diff read: lines outside hunks verbatim; a hunk opens at
+/// `@@ -a[,b] +c[,d] @@` (`@@@` gives `None`); body lines start with ` `, `+`, `-` or `\`,
+/// anything else gives `None`, and the caller leaves the file out (`secret`).
+///
+/// O(diff + sides) plus O(n log n) to index the n side lines once and O(log n × 80) per hunk for
+/// the function context (masked files only).
+///
+/// # Returns
+///
+/// The rebuilt diff and the number of lines that diverged beyond a mask, or `None`.
+// MAGI FIX (MS3 §6 loop5): the divergence was replaced silently, and the parsed subset unstated.
+// MAGI FIX (MS3 §6 loop7): the bound left the per-hunk context scan out (R6a Melchior).
+pub(super) fn rebuilt_diff(
+    diff: &str,
+    new: Option<&[u8]>,
+    old: Option<&[u8]>,
+) -> Option<(String, usize)> {
+    let (new_lines, old_lines) = (side_lines(new)?, side_lines(old)?);
+    let (mut next_new, mut next_old) = (0usize, 0usize);
+    let mut in_hunk = false;
+    let mut diverged = 0usize;
+    let mut index: Option<SideIndex<'_>> = None;
+    let mut out = String::with_capacity(diff.len());
+    for raw in diff.split_inclusive('\n') {
+        let (line, eol) = match raw.strip_suffix('\n') {
+            Some(line) => (line, "\n"),
+            None => (raw, ""),
+        };
+        if line.starts_with(HUNK_START) {
+            let (header, old_start, new_start) = hunk_header(line)?;
+            out.push_str(header);
+            // MAGI FIX (MS3 §6 loop6): the function context is a line of the file; it was
+            // dropped (R6a Melchior). It is kept when a masked side line starts with it as it
+            // is, so it carries what the whole-file mask left there and nothing more; masking
+            // the context alone would be the diff-alone case (a YAML value with no key line).
+            let context = line.get(header.len()..).unwrap_or_default();
+            let index = index.get_or_insert_with(|| SideIndex::new(&new_lines, &old_lines));
+            if shown_by_a_side(context, index) {
+                out.push_str(context);
+            }
+            next_old = old_start.saturating_sub(1);
+            next_new = new_start.saturating_sub(1);
+            in_hunk = true;
+        } else if !in_hunk || line.starts_with('\\') {
+            out.push_str(line);
+        } else {
+            // MAGI FIX (MS3 §6 loop7): a context line is compared with the old side too (read,
+            // never written), so a stale old side counts (R6a Caspar).
+            let (marker, text, old_context) = match line.chars().next()? {
+                ' ' => {
+                    let old_text = take(&old_lines, &mut next_old)?;
+                    (' ', take(&new_lines, &mut next_new)?, Some(old_text))
+                }
+                '+' => ('+', take(&new_lines, &mut next_new)?, None),
+                '-' => ('-', take(&old_lines, &mut next_old)?, None),
+                _ => return None,
+            };
+            // MAGI FIX (MS3 §6 loop6): a difference counts unless masking the diff's own line
+            // gives the side's; a mask on the side's line no longer excused any difference.
+            let shown = line.get(1..).unwrap_or_default();
+            // Declared (MS3 §6 loop12): the side was masked by `mask_secrets_keeping_lines`, this
+            // one line by `mask_secrets`. For a secret whose span crosses a line break the two
+            // differ (the side's later lines are blanked, the diff's line alone shows no key), so
+            // the count can be HIGH, never low: a counted line sends the file down the
+            // masked-by-line fallback (`masked_raw_diff`), the safe direction
+            // (`raw_diff_masks_hunk_context`, `diff_alone_is_unsafe_to_mask`).
+            let differs = |side: &str| shown != side && mask_secrets(shown) != side;
+            if differs(text) || old_context.is_some_and(differs) {
+                diverged = diverged.saturating_add(1);
+            }
+            out.push(marker);
+            out.push_str(text);
+        }
+        out.push_str(eol);
+    }
+    Some((out, diverged))
+}
+
+/// Every line of both masked sides, sorted once per file, for [`shown_by_a_side`]: the lines
+/// that start with a text are contiguous there, right at the first line not less than it.
+struct SideIndex<'a>(Vec<&'a str>);
+
+impl<'a> SideIndex<'a> {
+    /// The sorted lines of `new` and `old`. O(n log n) for n lines.
+    fn new(new: &[&'a str], old: &[&'a str]) -> Self {
+        let mut lines: Vec<&str> = new.iter().chain(old).copied().collect();
+        visited(lines.len());
+        lines.sort_unstable();
+        Self(lines)
+    }
+}
+
+/// Whether a hunk header's function context (` <text>` after the closing `@@`, git cuts it to
+/// 80 bytes) is shown as it is by some line of the masked sides: the line starts with `<text>`.
+/// An empty context is shown. A context that carries a secret byte never matches, since the
+/// sides carry its mask there instead, and neither does one that opens a private-key block
+/// (such sides never reach here). O(log lines · context) on `index`: a line starting with
+/// `text` sorts at or after it and before any other line that does not
+/// (`many_hunks_stay_near_linear`). Any line counts, not the one git took it from: a context
+/// shared by two lines is kept either way (cosmetic; the text is the masked side's, declared).
+// MAGI FIX (MS3 §6 loop10): each hunk scanned both whole sides, quadratic in the hunks.
+fn shown_by_a_side(context: &str, index: &SideIndex<'_>) -> bool {
+    let Some(text) = context.strip_prefix(' ').filter(|t| !t.is_empty()) else {
+        return context.is_empty();
+    };
+    let at = index.0.partition_point(|line| *line < text);
+    visited(index.0.len().max(2).ilog2() as usize);
+    !holds_key_block(text) && index.0.get(at).is_some_and(|line| line.starts_with(text))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Side lines the function-context lookup examined on this thread (`many_hunks_stay_near_linear`).
+    pub(super) static CONTEXT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts `n` side-line visits of the function-context lookup. Test builds only: release
+/// builds compile the no-op below, so no test concern sits in the hot loop.
+#[cfg(test)]
+fn visited(n: usize) {
+    CONTEXT_VISITS.with(|c| c.set(c.get().saturating_add(n)));
+}
+
+/// The release build's [`visited`]: nothing.
+#[cfg(not(test))]
+fn visited(_n: usize) {}
+
+/// The lines of a side, each without its `\n` (a `\r` stays, as git shows it); none for an
+/// absent side; `None` when the side is not UTF-8. O(side).
+fn side_lines(side: Option<&[u8]>) -> Option<Vec<&str>> {
+    match side {
+        Some(bytes) => Some(std::str::from_utf8(bytes).ok()?.split('\n').collect()),
+        None => Some(Vec::new()),
+    }
+}
+
+/// The line at `*next` of `lines`, advancing `*next`. O(1).
+fn take<'a>(lines: &[&'a str], next: &mut usize) -> Option<&'a str> {
+    let line = lines.get(*next).copied()?;
+    *next = next.saturating_add(1);
+    Some(line)
+}
+
+/// A hunk header `@@ -a[,b] +c[,d] @@[ context]`: the header up to its closing `@@`, and the
+/// first old and new line numbers. `None` when it does not parse. O(line).
+fn hunk_header(line: &str) -> Option<(&str, usize, usize)> {
+    let rest = line.get(HUNK_START.len()..)?;
+    let close = rest.find(HUNK_START)?;
+    let header = line.get(..HUNK_START.len() + close + HUNK_START.len())?;
+    let mut parts = rest.get(..close)?.split_whitespace();
+    let start = |part: Option<&str>, sign: char| -> Option<usize> {
+        let side = part?.strip_prefix(sign)?;
+        side.split(',').next()?.parse().ok()
+    };
+    let old = start(parts.next(), '-')?;
+    let new = start(parts.next(), '+')?;
+    Some((header, old, new))
+}
