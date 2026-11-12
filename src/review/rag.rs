@@ -880,16 +880,18 @@ fn cut_on_char(text: &str, max: usize) -> &str {
 // MAGI FIX (MS3 §6 loop3): the query left raw, and the bound did not count the prefix.
 // MAGI FIX (MS3 §6 loop11): a key block in the prefix was only masked, never withheld.
 pub fn doc_search_query(prefix: &str, text: &str) -> Option<String> {
-    if holds_key_block(prefix) || holds_key_block(text) {
+    // MAGI FIX (MS3 §6 loop13): the pieces are masked JOINED, as they leave: a secret opened by
+    // the prefix and finished by the text matches in neither alone.
+    let joined = format!("{prefix}{text}");
+    if holds_key_block(prefix) || holds_key_block(text) || holds_key_block(&joined) {
         return None;
     }
     // MAGI FIX (MS3 §6 loop4): an oversized prefix passed whole, over the bound.
     // MAGI FIX (MS3 §6 loop5): the prefix is operator text that leaves too: masked, then cut.
-    let masked_prefix = mask_secrets(prefix);
-    let prefix = cut_on_char(&masked_prefix, DOC_QUERY_MAX_BYTES);
-    let masked = mask_secrets(text);
-    let room = DOC_QUERY_MAX_BYTES.saturating_sub(prefix.len());
-    Some(format!("{prefix}{}", cut_on_char(&masked, room)))
+    // The cut comes last (a cut through a raw secret could leave a fragment that no longer
+    // matches), over the whole masked query, the prefix included.
+    let masked = mask_secrets(&joined);
+    Some(cut_on_char(&masked, DOC_QUERY_MAX_BYTES).to_string())
 }
 
 #[cfg(test)]
