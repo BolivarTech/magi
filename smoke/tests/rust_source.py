@@ -762,6 +762,9 @@ def secret_openings(root: pathlib.Path) -> list:
                            SECRETS_SOURCE, re.S).group(1)
     # MAGI FIX (MS3 §6 loop10): each element is a literal or a `const` named in the file, resolved
     # here; an element that is neither fails, so a new opening is never dropped (R7b Caspar).
+    # MAGI FIX (MS3 §6 loop13): an empty list matched nothing and dropped every fixed opening silently.
+    if not any(e.strip() for e in fixed.split(",")):
+        raise AssertionError("%s: NON_TOKEN_PREFIXES has no element" % SECRETS_SOURCE)
     openings = list(tokens)
     for element in (e.strip() for e in fixed.split(",") if e.strip()):
         value = literal.fullmatch(element)
