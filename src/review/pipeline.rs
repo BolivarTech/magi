@@ -2972,6 +2972,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failure_message_is_redacted_where_stored() {
+        // [MAGI S6 MS3 loop13, R4] A batch failure's text comes from the trio's error; it is
+        // redacted where the summary stores it, whatever the producer did.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Err(ConsultFailure::Other(format!(
+            "401 for key {key}"
+        )))]);
+        let out = review(
+            dir.path(),
+            None,
+            &consult,
+            &gate_always("real_defect"),
+            &FakeClock::default(),
+        )
+        .await
+        .expect("reports");
+        let stored = format!("{:?}", out.summary.failed_batches);
+        assert!(!stored.contains("sk-ant-"), "{stored}");
+        assert_eq!(out.summary.failed_batches.len(), 1);
+    }
+    #[tokio::test]
     async fn a_finding_on_a_file_only_in_a_failed_batch_is_not_reviewed() {
         // [CP2 MS2 S1 loop 2] batch 0 (f0.rs) answers and talks about f1.rs; batch 1 (f1.rs) fails, so nobody saw f1.rs.
         let dir = workspace(2);
