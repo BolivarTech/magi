@@ -4921,6 +4921,23 @@ mod tests {
     }
 
     #[test]
+    fn envelope_backstop_masks() {
+        // MAGI FIX (MS3 §6 loop12): the CLI envelope's backstop redacted URL credentials only; a
+        // runner that skipped `egress_safe` would have let a key through it.
+        let key = concat!("sk-ant-api03-", "BBBBBBBBBBBBBBBBBBBB"); // allow-secret-scan
+        let r = Rendered {
+            text: format!("see {key}"),
+            json: serde_json::json!({"a": [key]}),
+            consult: serde_json::json!({"b": key}),
+            failure: None,
+        };
+        let (text, consult, json) = envelope_fields(&r);
+        for seen in [text, consult.to_string(), json.to_string()] {
+            assert!(!seen.contains("BBBBBBBBBB"), "{seen}");
+        }
+    }
+
+    #[test]
     fn tool_errors_strip_then_mask() {
         // MAGI FIX (MS3 §6 loop12): the two error builders masked without stripping, so a control
         // character inside a key hid it from the detector (and reached the model). Strip first,
