@@ -1162,6 +1162,76 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_fallback_is_a_secret_skip() {
+        // [MAGI S6 MS3 loop14, R6a1 Caspar] The fallback's refusal is not a third omission
+        // class: it is RV22's own `secret` cause, and this input really reaches it (a two-line
+        // secret whose lines both sit verbatim in a clean old and new side).
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let side = format!("aws_secret_key =\nfn f() {{}}\n\"{value}\"\n");
+        let diff = format!(
+            "@@ -1,5 +1,5 @@\n aws_secret_key =\n \"{value}\"\n fn f() {{}}\n fn f() {{}}\n fn f() {{}}\n"
+        );
+        let inner = MapSource::new(
+            &[("a.rs", side.as_str()), ("b.rs", "fn b() {}\n")],
+            &[("a.rs", side.as_str())],
+        );
+        let src = CachedSource::new(&inner);
+        let files = vec![
+            ReviewFile {
+                path: "a.rs".into(),
+                diff: Some(diff),
+            },
+            ReviewFile {
+                path: "b.rs".into(),
+                diff: None,
+            },
+        ];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false);
+        let f = f.expect("a skip, not an error");
+        assert_eq!(f.kept.len(), 1, "{f:?}");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "a.rs".into(),
+                cause: SkipCause::Secret
+            }]
+        );
+    }
+
+    #[test]
+    fn a_repeated_path_is_never_kept_and_skipped() {
+        // [MAGI S6 MS3 loop14, R6a1 Caspar] A second listing of a kept path, with a diff that
+        // would be left out as `secret`, was reported as skipped while the path stayed kept.
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let side = format!("aws_secret_key =\nfn f() {{}}\n\"{value}\"\n");
+        let diff = format!(
+            "@@ -1,5 +1,5 @@\n aws_secret_key =\n \"{value}\"\n fn f() {{}}\n fn f() {{}}\n fn f() {{}}\n"
+        );
+        let inner = MapSource::new(&[("a.rs", side.as_str())], &[("a.rs", side.as_str())]);
+        let src = CachedSource::new(&inner);
+        let file = |diff: Option<String>| ReviewFile {
+            path: "a.rs".into(),
+            diff,
+        };
+        let f = filter_files(
+            vec![file(None), file(Some(diff))],
+            &src,
+            &LanguageRegistry::new(),
+            false,
+            &|_| false,
+        )
+        .expect("kept once");
+        assert_eq!(f.kept.len(), 1, "{f:?}");
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "a.rs".into(),
+                cause: SkipCause::DuplicateSection
+            }]
+        );
+    }
+
+    #[test]
     fn a_source_that_does_not_mask_still_never_lets_a_secret_through() {
         // [T3.7] the fallback: a source with no mask (no production path builds one) hands the
         // filter raw content, so a file that holds a secret is left out as before, and an

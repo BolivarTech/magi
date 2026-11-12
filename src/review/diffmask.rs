@@ -397,4 +397,59 @@ mod tests {
             "the rebuilt path ran in only {rebuilt_count} of 32 cases"
         );
     }
+
+    #[test]
+    fn fallback_marks_each_span_by_its_own_pattern() {
+        // [MAGI S6 MS3 loop14, R6a1 Caspar] Every redacted line carried the file's first
+        // pattern, so a clean line that merely drifted from its side was shown to the model as
+        // a credential. A line holding a secret names its own pattern; any other redacted
+        // line is declared as drift.
+        let token = ["gh", "p_", &"A".repeat(36)].concat(); // allow-secret-scan
+        let named = find_secret(&token).expect("premise: a token is a secret");
+        let diff =
+            format!("@@ -1,1 +1,3 @@\n fn f() {{}}\n+let t = \"{token}\";\n+let drifted = 1;\n");
+        let out = masked_raw_diff(
+            &diff,
+            Some(b"fn f() {}\n"),
+            Some(b"fn f() {}\n"),
+            "aws-secret-key",
+        );
+        assert!(!out.contains(&token), "{out}");
+        assert!(out.contains(&format!("+{REDACTED_OPEN}{named}>")), "{out}");
+        assert!(
+            out.contains(&format!("+{REDACTED_OPEN}diff-drift>")),
+            "{out}"
+        );
+        assert!(!out.contains("aws-secret-key"), "{out}");
+    }
+
+    #[test]
+    fn fallback_refusal_is_reachable() {
+        // [MAGI S6 MS3 loop14, R6a1 Caspar] The `None` arm was pinned by a test whose input never
+        // reached it. A two-line secret whose lines both sit verbatim in a clean old and new
+        // side survives by-line masking as context, and the re-scan refuses it.
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let side = format!("aws_secret_key =\nfn f() {{}}\n\"{value}\"\n");
+        let diff =
+            "@@ -1,5 +1,5 @@\n aws_secret_key =\n \"VALUE\"\n fn f() {}\n fn f() {}\n fn f() {}\n"
+                .replace("VALUE", value);
+        assert_eq!(find_secret(&side), None, "premise: each side is clean");
+        assert!(find_secret(&diff).is_some(), "premise: the diff is not");
+        assert_eq!(
+            fallback_diff(&diff, Some(side.as_bytes()), Some(side.as_bytes()), "x"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_new_file_header_ends_the_hunk() {
+        // [MAGI S6 MS3 loop14, R6a1 Balthasar] `in_hunk` was never reset: a header line after a
+        // hunk was read as a body line and redacted whole instead of masked as a header.
+        let diff = "@@ -1,1 +1,1 @@\n fn f() {}\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n";
+        let out = masked_raw_diff(diff, Some(b"fn f() {}\n"), Some(b"fn f() {}\n"), "x");
+        assert!(
+            out.contains("diff --git a/b.rs b/b.rs\n--- a/b.rs\n"),
+            "{out}"
+        );
+    }
 }
