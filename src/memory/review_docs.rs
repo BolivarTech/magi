@@ -326,7 +326,7 @@ impl ReviewDocStore {
         let (safe, refused) = without_secret_sources(sources);
         let plan = self.plan(&safe)?;
         let fresh = embed_all(&plan.to_embed, embedder).await?;
-        let rows = self.encode_rows(&plan, &fresh)?;
+        let rows = self.encode_rows(&plan, &fresh, embedder.dim())?;
         let rebuilt = self.write(&plan, &rows)?;
         Ok(ReindexStats {
             embedded: plan.to_embed.len(),
@@ -407,13 +407,23 @@ impl ReviewDocStore {
         &self,
         plan: &Plan<'a>,
         fresh: &[Vec<f32>],
+        dim: usize,
     ) -> Result<Vec<DocRow<'a>>, MemoryError> {
         let mut vectors: BTreeMap<&str, Vec<f32>> = BTreeMap::new();
         for (chunk, vector) in plan.to_embed.iter().zip(fresh) {
             vectors.insert(chunk.hash.as_str(), vector.clone());
         }
         for (hash, blob) in &plan.reusable {
-            vectors.insert(hash.as_str(), self.unseal_vector(blob)?);
+            let vector = self.unseal_vector(blob)?;
+            // MAGI FIX (MS3 §6 loop13): a reused vector is held to the declared dimension, as the
+            // fresh ones are (`embed_all`): a damaged row is never written forward.
+            if vector.len() != dim {
+                return Err(MemoryError::Storage(format!(
+                    "a stored vector has {} dimensions, the index declares {dim}",
+                    vector.len()
+                )));
+            }
+            vectors.insert(hash.as_str(), vector);
         }
         let mut rows = Vec::new();
         for entry in plan.new_sources.iter().copied() {
