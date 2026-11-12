@@ -202,6 +202,23 @@ class SecretOpeningsTests(unittest.TestCase):
                 secret_openings(pathlib.Path(tmp))
 
 
+    def test_a_matcher_it_cannot_read_is_refused(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7b): a pattern whose opening is not a literal prefix
+        # contributed zero openings and no assertion fired.
+        import tempfile
+        table = ('const NON_TOKEN_PREFIXES: &[&str] = &["aws_secret"];\n'
+                 'fn f() { let p = Pattern { prefixes: &["sk-", "ghp_"] }; }\n'
+                 'const P: &[SecretPattern] = &[SecretPattern { name: "x", matcher: Matcher::%s }];\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            src = pathlib.Path(tmp, "src", "review")
+            src.mkdir(parents=True)
+            (src / "secrets.rs").write_text(table % "UrlCredential", encoding="utf-8")
+            self.assertIn("sk-", secret_openings(pathlib.Path(tmp)))
+            (src / "secrets.rs").write_text(table % "Novel(1)", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "Novel"):
+                secret_openings(pathlib.Path(tmp))
+
+
 class S54Tests(unittest.TestCase):
     """S54 (R19): a private-key block file is left out as secret and its body never printed."""
 
