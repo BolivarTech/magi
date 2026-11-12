@@ -554,8 +554,9 @@ fn kept_verdict(
     })
 }
 
-/// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it: a header line (outside a
-/// hunk, or an `@@` line) is masked with [`mask_secrets`]; a body line is kept only when a masked
+/// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it: a header line outside a hunk
+/// is masked with [`mask_secrets`]; an `@@` line keeps its ranges and its function context only
+/// when a masked side shows it ([`shown_by_a_side`]); a body line is kept only when a masked
 /// side shows its text verbatim (context and added lines on `new`, context and deleted on `old`),
 /// else its text becomes `<redacted: pattern>` after its marker. [`mask_secrets`] alone on the
 /// diff is not enough: a hunk can hold a secret's value without the key line that makes it one
@@ -563,25 +564,43 @@ fn kept_verdict(
 /// holding a byte of a masked secret differs from its masked side. So masking, never omission, and
 /// no byte of the secret leaves (RV22's tie-break) (`unrebuilt_diff_is_masked`). O(diff + sides).
 fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>, pattern: &str) -> String {
-    let set = |side: Option<&[u8]>| -> HashSet<String> {
-        side_lines(side)
-            .unwrap_or_default()
-            .into_iter()
-            .map(str::to_string)
-            .collect()
-    };
-    let (new_lines, old_lines) = (set(new), set(old));
+    let (new_vec, old_vec) = (
+        side_lines(new).unwrap_or_default(),
+        side_lines(old).unwrap_or_default(),
+    );
+    let new_lines: HashSet<&str> = new_vec.iter().copied().collect();
+    let old_lines: HashSet<&str> = old_vec.iter().copied().collect();
     let redacted = format!("{REDACTED_OPEN}{pattern}>");
+    let mut index: Option<SideIndex<'_>> = None;
     let mut in_hunk = false;
     let mut out = String::with_capacity(diff.len());
     for line in diff.split_inclusive('\n') {
         let (body, end) = line.strip_suffix('\n').map_or((line, ""), |b| (b, "\n"));
         if body.starts_with("@@") {
             in_hunk = true;
+            // MAGI FIX (MS3 §6 loop12): the function context is a line of the file, so, as in
+            // `rebuilt_diff`, it stays only when a masked side shows it; masking the line alone
+            // would leave a value whose key sits on another line. A header that does not parse
+            // is redacted whole.
+            let kept = match hunk_header(body) {
+                Some((header, ..)) => {
+                    let context = body.get(header.len()..).unwrap_or_default();
+                    let idx = index.get_or_insert_with(|| SideIndex::new(&new_vec, &old_vec));
+                    if shown_by_a_side(context, idx) {
+                        body.to_string()
+                    } else {
+                        header.to_string()
+                    }
+                }
+                None => format!("@@ {redacted}"),
+            };
+            out.push_str(&kept);
+            out.push_str(end);
+            continue;
         }
         let marker = body.chars().next();
         let text = body.get(1..).unwrap_or_default();
-        let kept = match (in_hunk && !body.starts_with("@@"), marker) {
+        let kept = match (in_hunk, marker) {
             (false, _) | (true, Some('\\')) => mask_secrets(body),
             (true, Some(' ')) if new_lines.contains(text) && old_lines.contains(text) => {
                 body.into()
