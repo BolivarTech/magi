@@ -1113,6 +1113,28 @@ mod tests {
     }
 
     #[test]
+    fn headerless_shape_is_refused() {
+        // [MAGI S6 MS3 loop13, R6b] A headerless text led by anything but the `---`/`+++` pair
+        // (here a `diff --git` preamble, as `git show` prints one) is not a shape `parse_hunks`
+        // writes: no counter runs, so no line is numbered by position and no anchor is made up.
+        let item = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "diff --git a/a.rs b/a.rs\nindex 1..2\n--- a/a.rs\n+++ b/a.rs\n a\n-b\n".into(),
+            first_line: 7,
+            last_line: 7,
+            old_first_line: 7,
+            old_last_line: 8,
+        };
+        let blank = format!("{}|", " ".repeat(LINE_NUMBER_WIDTH));
+        assert!(
+            item.rendered().lines().all(|l| l.starts_with(&blank)),
+            "{}",
+            item.rendered()
+        );
+        let c = item.hunk_change().expect("a change");
+        assert_eq!((c.added, c.removed), (vec![7], vec![]));
+    }
+    #[test]
     fn an_empty_crlf_context_line_is_numbered_as_hunk_change_counts_it() {
         // [MAGI S6 MS3 loop3, R4 Melchior, Balthasar] `number_hunk` split lines on '\n' alone, so
         // an empty context line of a CRLF hunk ("\r") was no line and moved no counter, while
