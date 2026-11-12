@@ -16,6 +16,12 @@
 //! cause `secret` while the review goes on (REQ-RV22, RV-S30), so the egress scan here is a
 //! backstop, never the omission itself.
 //!
+//! Declared (MS3 §6 loop13): this module also owns the diff-coordinate readers (`HunkLines`,
+//! `BodyLine`, `BatchItem::hunk_change`, `BatchItem::new_line_of_old`) that the pipeline and
+//! the validator use. Moving them to a `diff_coords` module is a named, non-behavioural item: the
+//! invariant that keeps it safe is that `HunkLines` is the only walker, so no reader numbers a
+//! line differently (`a_headerless_hunk_is_numbered_from_its_item_as_hunk_change_counts_it`).
+//!
 //! The filter and this module see the same bytes, by construction: the pipeline wraps the
 //! review's content source once in a `CachedSource` (`review::source`) and hands that one value
 //! to the filter and to [`plan_batches_with`]; the cache keeps each side's first read, so a file
@@ -721,6 +727,10 @@ pub fn plan_batches(
 /// * [`ReviewError::Git`] when a hunk header cannot be parsed or is a combined (merge) diff's.
 /// * [`ReviewError::NothingToReview`] when no file produces an item.
 /// * Any error of `source` or `companion`, unchanged.
+///
+/// `companion` must be pure: it is called for a whole-file item once while the item is sized
+/// (`Fit::alone`) and again when it is packed, so a closure that counts or accumulates would
+/// count twice. A cache (`UnitCache`) is fine; a ledger is not.
 ///
 /// See [`plan_batches`] for an example; it is this function with no companion.
 pub fn plan_batches_with(

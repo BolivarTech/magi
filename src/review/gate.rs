@@ -672,7 +672,10 @@ impl<'a> Gate<'a> {
     ///
     /// # Arguments
     /// * `finding` - the consolidated finding.
-    /// * `code` - the file it points into, if it was read.
+    /// * `code` - the file it points into, if it was read: the side the finding's line lies on
+    ///   (the caller's `gate_code` reads a removed line from the old side, RV21; a line it cannot
+    ///   place gives `None`, which is `no location` and never a call). The gate cannot tell the
+    ///   sides apart and must not be handed the other one.
     /// * `remaining` - what is left of the review clock, if there is one; a deadline is taken at
     ///   entry, so each call of the chain gets only what is still left.
     ///

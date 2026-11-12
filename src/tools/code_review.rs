@@ -3455,7 +3455,11 @@ mod tests {
         let mut removed = live.clone();
         removed.0.line = Some(9);
         summary.findings = vec![live, removed];
-        summary.off_revision.insert(("a.rs".to_string(), 9));
+        summary
+            .off_revision
+            .entry("a.rs".to_string())
+            .or_default()
+            .insert(9);
         let follow = FollowUp::of_review(&summary, Some("HEAD".into()), None, None, true);
         let (_db, _mem, memory) = review_memory();
         assert!(follow_up_work(&memory, &ShaGit, follow).is_none());

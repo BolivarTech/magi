@@ -774,7 +774,11 @@ pub async fn run_review(
         // so history would check it against an unrelated one.
         if let (Some(c), Some(file), Some(line)) = (&code, &finding.file, finding.line) {
             if !c.names_a_revision_line() {
-                summary.off_revision.insert((file.clone(), line));
+                summary
+                    .off_revision
+                    .entry(file.clone())
+                    .or_default()
+                    .insert(line);
             }
         }
         let verdict = match code {

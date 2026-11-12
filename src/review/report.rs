@@ -142,7 +142,7 @@ pub struct ReviewSummary {
     /// An item holding a one-line secret is not counted here, even when its mask is longer than
     /// what the budget charged: it is sent masked, and its file (the item's path, as
     /// [`display_path`](crate::review::secrets::display_path) shows it) is declared in
-    /// [`Self::masked`], which lists files, not context items; the batch
+    /// [`Self::masked`] (the pipeline's `declare_masked` adds a documentation or history source`n    /// there as it does a reviewed file, so no masked egress goes undeclared); the batch
     /// pays for the growth with trimmed optional context, listed in [`Self::trimmed`] (RV22
     /// amended; pipeline tests `a_context_item_quoting_a_one_line_secret_reaches_the_prompt_masked`
     /// and `the_growth_of_a_mask_is_paid_by_trimming_optional_context_never_by_omitting_the_item`).
@@ -158,7 +158,7 @@ pub struct ReviewSummary {
     /// A spelling that ever differed would keep the finding among the candidates (it is never
     /// dropped): the git check of RV08 then judges it, the safe direction (declared).
     #[serde(skip)]
-    pub off_revision: BTreeSet<(String, u32)>,
+    pub off_revision: BTreeMap<String, BTreeSet<u32>>,
 }
 
 impl ReviewSummary {
@@ -172,16 +172,17 @@ impl ReviewSummary {
     ///
     /// A copy of those findings, in order: owned on purpose, since its one caller hands them to
     /// the post-report work, which runs on a blocking thread after this summary was rendered and
-    /// dropped, so indices or borrows would not outlive it. O(findings · log off_revision). Each lookup builds a
-    /// `(path, line)` key, one short path copy per finding beside the copy of the finding itself
-    /// that the result holds anyway; a linear scan of `off_revision` would save it and lose the
-    /// logarithm when the removed-line findings are many.
+    /// dropped, so indices or borrows would not outlive it. O(findings · log off_revision): the lookup borrows the path (a
+    /// map of path to lines), so no key is built per finding.
     // MAGI FIX (Loop1 r1, M2): removed-line findings were anchored with their old-file number.
     pub fn anchored_findings(&self) -> Vec<(ConsolidatedFinding, GateVerdict)> {
         self.findings
             .iter()
             .filter(|(f, _)| match (&f.file, f.line) {
-                (Some(file), Some(line)) => !self.off_revision.contains(&(file.clone(), line)),
+                (Some(file), Some(line)) => !self
+                    .off_revision
+                    .get(file)
+                    .is_some_and(|lines| lines.contains(&line)),
                 _ => true,
             })
             .cloned()
@@ -232,7 +233,7 @@ impl Default for ReviewSummary {
             without_embedder: false,
             without_memory: false,
             context_withheld: 0,
-            off_revision: BTreeSet::new(),
+            off_revision: BTreeMap::new(),
         }
     }
 }
@@ -1356,7 +1357,10 @@ mod tests {
             ],
             ..ReviewSummary::default()
         };
-        s.off_revision.insert(("a.rs".to_string(), 9));
+        s.off_revision
+            .entry("a.rs".to_string())
+            .or_default()
+            .insert(9);
         let kept: Vec<(Option<String>, Option<u32>)> = s
             .anchored_findings()
             .into_iter()
@@ -1405,7 +1409,7 @@ mod tests {
         };
         let s = |off: &str| ReviewSummary {
             findings: vec![f("a.rs"), f("./a.rs")],
-            off_revision: BTreeSet::from([(off.to_string(), 9)]),
+            off_revision: BTreeMap::from([(off.to_string(), BTreeSet::from([9]))]),
             ..ReviewSummary::default()
         };
         let files = |s: ReviewSummary| -> Vec<Option<String>> {
