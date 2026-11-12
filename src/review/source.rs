@@ -15,8 +15,8 @@ use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
 use super::secrets::{
-    display_path, holds_key_block, holds_secret_prefix, mask_secrets_keeping_lines,
-    mask_secrets_keeping_lines_within, BoundedMask,
+    display_path, hides_secret_behind_hidden_chars, holds_key_block, holds_secret_prefix,
+    mask_secrets_keeping_lines, mask_secrets_keeping_lines_within, BoundedMask,
 };
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
@@ -965,7 +965,17 @@ fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
                 .is_some_and(|bytes| holds_secret_prefix(&String::from_utf8_lossy(bytes))),
         ),
     };
+    // MAGI FIX (MS3 §6 loop14): a control or format character inside a secret hid it from the
+    // contiguous pass; the text as it would be served is scanned once more without them, and a
+    // secret found there holds the side raw, so the filter leaves its file out (cause `secret`).
+    let served = masked.as_ref().map(|m| m.text.as_str()).or(text);
+    let raw_secret = raw_secret || served.is_some_and(hides_secret_behind_hidden_chars);
     match masked {
+        Some(_) if raw_secret => HeldSide {
+            bytes: read,
+            mask: None,
+            raw_secret,
+        },
         Some(m) => HeldSide {
             bytes: Some(m.text.into_bytes()),
             mask: Some(SideMask { pattern: m.pattern }),
@@ -1160,6 +1170,38 @@ mod tests {
         assert!(held_side(Some(split), MAX_MASKED_SIDE_BYTES).raw_secret);
         let clean = b"\x7fELF\0\0\x01plain bytes".to_vec();
         assert!(!held_side(Some(clean), MAX_MASKED_SIDE_BYTES).raw_secret);
+    }
+
+    #[test]
+    fn hidden_chars_in_a_secret_hold_it() {
+        // [MAGI S6 MS3 loop14, R6a2 Melchior CRITICAL] A control or format character inside a
+        // token ended its tail, so the contiguous pass masked nothing and the text was served
+        // with both halves readable. Each class below used to leave as it was; now the side is
+        // held raw with a secret, so the filter leaves its file out.
+        let tail = "A".repeat(40);
+        for hidden in ["\u{200b}", "\u{202e}", "\u{feff}", "\u{7}", "\u{1b}"] {
+            let text = format!("let t = \"ghp_AAAA{hidden}{tail}\";\n"); // allow-secret-scan
+            assert!(
+                crate::review::secrets::find_secret(&text).is_none(),
+                "precondition: the contiguous pass finds nothing: {hidden:?}"
+            );
+            let held = held_side(Some(text.into_bytes()), MAX_MASKED_SIDE_BYTES);
+            assert!(held.raw_secret, "{hidden:?}");
+            assert!(held.mask.is_none(), "held as read: {hidden:?}");
+        }
+    }
+
+    #[test]
+    fn hidden_chars_beside_a_mask() {
+        // [MAGI S6 MS3 loop14] A secret the contiguous pass masks keeps its mask; a stray
+        // format character (an emoji joiner) elsewhere in the file does not make it a raw secret.
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let text = format!("// \u{1f468}\u{200d}\u{1f469}\nlet t = \"{token}\";\n");
+        let held = held_side(Some(text.into_bytes()), MAX_MASKED_SIDE_BYTES);
+        assert!(!held.raw_secret, "a masked secret is not held raw");
+        assert!(held.mask.is_some());
+        let plain = "fn f() {}\u{200b}\n".as_bytes().to_vec();
+        assert!(!held_side(Some(plain), MAX_MASKED_SIDE_BYTES).raw_secret);
     }
 
     #[test]

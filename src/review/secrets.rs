@@ -359,9 +359,12 @@ const NON_TOKEN_PREFIXES: &[&str] = &[
 // MAGI FIX (MS3 §6 loop13): the lowercase was taken up to three times and per prefix per call.
 pub(crate) fn holds_secret_prefix(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
+    // MAGI FIX (MS3 §6 loop14): format characters (ZWSP, directional marks) split an opening too.
     let squeezed: String = lower
         .chars()
-        .filter(|c| !c.is_control() && *c != char::REPLACEMENT_CHARACTER)
+        .filter(|c| {
+            !c.is_control() && *c != char::REPLACEMENT_CHARACTER && !is_hidden_format_char(*c)
+        })
         .collect();
     opens_a_secret(&lower) || opens_a_secret(&squeezed)
 }
@@ -1340,16 +1343,50 @@ pub fn outward_text(text: &str) -> String {
     // missed, the stripped, masked form leaves instead. MAGI FIX (MS3 §6 loop13): line breaks and
     // tabs are not stripped (they become escapes), so a multi-line field keeps its lines. Limit,
     // declared: a secret split by a raw line break is not read as one here.
-    let plain: String = masked
-        .chars()
-        .filter(|&c| matches!(c, '\n' | '\t') || (!c.is_control() && !is_hidden_format_char(c)))
-        .collect();
+    let plain = without_hidden_chars(&masked);
     let masked_plain = mask_secrets(&plain);
     if masked_plain == plain {
         escape_controls(&masked)
     } else {
         escape_controls(&masked_plain)
     }
+}
+
+/// `text` without its control characters and its [`HIDDEN_FORMAT_CHARS`]; the line breaks and
+/// tabs (`\n`, `\r`, `\t`) stay, so a multi-line text keeps its lines. O(n · r).
+///
+/// # Arguments
+/// * `text` - Any text.
+///
+/// # Returns
+/// The text as a detector sees it once nothing can split a token.
+// MAGI FIX (MS3 §6 loop14): shared by `outward_text` and the content path's second pass; the
+// stripped pass of `outward_text` dropped `\r`, against its own comment (R6a2 Caspar/Melchior).
+fn without_hidden_chars(text: &str) -> String {
+    text.chars()
+        .filter(|&c| {
+            matches!(c, '\n' | '\r' | '\t') || (!c.is_control() && !is_hidden_format_char(c))
+        })
+        .collect()
+}
+
+/// Whether `masked`, a text [`mask_secrets`] already went over, still holds a secret once its
+/// control and format characters are taken out: a token such a character split (`ghp_AAAA`,
+/// ZWSP, `AAAA…`) was read as two short runs and masked nothing, though every byte of it would
+/// leave. A text with none of those characters is not scanned again. O(n · p).
+///
+/// # Arguments
+/// * `masked` - A text already masked (a secret the contiguous pass found is a mask by now, so
+///   an emoji joiner beside an ordinary secret does not count).
+///
+/// # Returns
+/// `true` when the stripped copy holds a secret, so the caller must hold the text back.
+// MAGI FIX (MS3 §6 loop14): the content path had no such pass (R6a2 Melchior, CRITICAL).
+pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
+    let hidden = |c: char| {
+        !matches!(c, '\n' | '\r' | '\t') && (c.is_control() || is_hidden_format_char(c))
+    };
+    masked.chars().any(hidden) && find_secret(&without_hidden_chars(masked)).is_some()
 }
 
 /// The characters that can break, reorder or hide text on a terminal or a log viewer: every
@@ -1826,6 +1863,17 @@ mod tests {
         assert_eq!(m.text, mask_secrets(text));
         assert!(!m.text.contains("S3cr3t"));
         assert_eq!(mask_secrets_keeping_lines("fn f() {}\n"), None);
+    }
+
+    #[test]
+    fn squeeze_drops_format_chars() {
+        // [MAGI S6 MS3 loop14, R6a2 Melchior] A binary side whose opening a ZWSP or a
+        // directional mark split was not counted; the squeeze drops format characters too.
+        for hidden in ["\u{200b}", "\u{202e}", "\u{2066}", "\u{feff}"] {
+            let text = format!("\u{0}gh{hidden}p_AAAA");
+            assert!(holds_secret_prefix(&text), "{hidden:?}");
+        }
+        assert!(!holds_secret_prefix("\u{0}plain\u{200b}bytes"));
     }
 
     #[test]
