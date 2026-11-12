@@ -1042,6 +1042,19 @@ mod tests {
     }
 
     #[test]
+    fn odd_file_paths_are_not_stored() {
+        // MAGI FIX (MS3 §6 loop13, R3 Caspar): an empty path has no line to classify, and a
+        // secret-shaped one would be stored in the clear `file` column (the read side withholds
+        // it, but the backstop is here too: RV22, no byte of a secret leaves).
+        use crate::review::gate::GateState;
+        let shaped = "src/sk-ant-api03-AAAAAAAAAAAAAAAAAAAA.rs"; // allow-secret-scan
+        for (case, file) in [("empty", ""), ("secret", shaped)] {
+            let main = vec![(found(file, 3, "a finding"), judged(GateState::Kept))];
+            assert!(entries_from_review(&main, "c1").is_empty(), "{case}");
+        }
+    }
+
+    #[test]
     fn joined_end_line_is_not_stored() {
         // MAGI FIX (MS3 §6 loop13, R3 Melchior): a footer that opens the second of two texts is
         // at a line start only in the stored (joined) form, never in the separator-free
