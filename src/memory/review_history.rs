@@ -391,8 +391,10 @@ impl ReviewHistoryStore {
     /// context trims is the same on every run), at most [`MAX_HISTORY_PER_BATCH`], and whether
     /// more existed. Only the returned rows are decrypted. This is the context read, once per
     /// batch. The files go in batches of [`FILES_PER_QUERY`] so no query passes SQLite's
-    /// parameter limit (a mass rename touches thousands); each batch reads at most one row past
-    /// the bound, raw.
+    /// parameter limit (a mass rename touches thousands); each batch reads at most
+    /// [`MAX_HISTORY_SCAN`] raw rows, not decrypted, and keeps the newest bound + 1 of the ones
+    /// `on_line` accepts (MAGI FIX, MS3 §6 loop13: the earlier text said "one row past the bound",
+    /// from before the scan cap).
     ///
     /// The text comes back decrypted, as it was stored: already masked
     /// (`entries_from_review` masks it before it is recorded,
@@ -423,8 +425,10 @@ impl ReviewHistoryStore {
     /// accepts (the context read passes its `HEAD` ancestry check), applied to the raw rows
     /// **before** the bound, so entries of another branch never fill it
     /// (`off_line_never_starves`). Each file batch reads at most [`MAX_HISTORY_SCAN`] raw rows
-    /// (no decryption); when one reaches it with fewer than the bound kept, more may lie past it
-    /// and the cut is declared. O(scan) `on_line` calls (the caller memoizes them per commit).
+    /// (no decryption); when one reaches it, rows past it are unread, so the cut is declared
+    /// even if every row read was off the line: a conservative cut (declared, MAGI FIX MS3 §6
+    /// loop13, R3 Caspar), since what lies past the scan is unknown and a false "nothing more"
+    /// would hide history. O(scan) `on_line` calls (the caller memoizes them per commit).
     ///
     /// # Errors
     /// As [`Self::validated_on_files`].
