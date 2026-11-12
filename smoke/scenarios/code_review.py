@@ -386,7 +386,8 @@ def _refusal(texts, run_id, run, stderr_ok, stderr_detail):
     Yields:
         Finding: ``exit 2`` first, then the stderr assertion.
     """
-    if run is None:
+    # MAGI FIX (MS3 §6 loop13): a result with no output is no capture, not a crash.
+    if run is None or run.output is None:
         yield from _all_cannot_test(
             texts, run_id, "run %s produced no capture to inspect" % run_id)
         return

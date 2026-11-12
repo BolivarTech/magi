@@ -475,11 +475,18 @@ def _history_served(request_bodies, located) -> bool:
     Returns:
         bool: Whether one such item reached the trio.
     """
-    frame = b"<<<context kind=history file=" + runs.REVIEW_HISTORY_FILE.encode() + b">>>"
-    titles = [json.dumps(f["title"])[1:-1].encode() for f in located if isinstance(f.get("title"), str)]
+    # MAGI FIX (MS3 §6 loop13, R7a): the product's JSON keeps non-ASCII characters (serde_json
+    # escapes none), so the titles are escaped without ensure_ascii and sent as UTF-8; the path
+    # may be written with either separator, bare or JSON-escaped.
+    path = runs.REVIEW_HISTORY_FILE
+    frames = [b"<<<context kind=history file=" + shown.encode("utf-8") + b">>>"
+              for shown in (path, path.replace("/", "\\"), path.replace("/", "\\\\"))]
+    titles = [json.dumps(f["title"], ensure_ascii=False)[1:-1].encode("utf-8")
+              for f in located if isinstance(f.get("title"), str)]
     for body in runs.trio_bodies(request_bodies):
-        _, _, after = body.partition(frame)
-        item = after.split(b"<<<", 1)[0]
-        if any(title and title + b" (attended)" in item for title in titles):
-            return True
+        for frame in frames:
+            _, _, after = body.partition(frame)
+            item = after.split(b"<<<", 1)[0]
+            if any(title and title + b" (attended)" in item for title in titles):
+                return True
     return False
