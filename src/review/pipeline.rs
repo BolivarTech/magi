@@ -707,7 +707,7 @@ pub async fn run_review(
 
     let completed: BTreeSet<usize> = finished.iter().map(|f| f.batch).collect();
     let mut reviewed = reviewed_of(&batches, &completed, &source);
-    record_shown_context(&mut reviewed, &contexts, &completed);
+    record_shown_context(&mut reviewed, &batches, &contexts, &completed);
     let workspace = without_verbatim_prefix(req.workspace);
     let old_paths = renamed_old_paths(&filtered.kept);
     let renames: HashMap<String, String> = old_paths
@@ -1747,35 +1747,50 @@ async fn prepare_contexts(
 }
 
 /// What the completed batches showed as context (U24, RV09): a containing unit's lines count as
-/// reviewed, every other item's file as context only. Containing units come only from hunk
-/// items, each anchored on a changed line, so each has a gate face (`unit_split_line_reaches_gate`).
-/// O(items · log r).
+/// reviewed when [`explained_unit`] says a hunk of its batch explains it, every other item's file
+/// (and an unexplained unit's) as context only. The same predicate gives the unit its gate face
+/// ([`add_unit_faces`]), so a line is never reviewed without code for the gate
+/// (`unexplained_unit_is_context_only`). O(items · changed lines).
 ///
 /// An old-side unit's numbers join the same set as the new side's, on purpose: a finding names a
 /// file and a line, no side, so a number shown on either side is reviewed (as a hunk's deleted
 /// lines are). The side is kept where it decides something, the gate's faces
 /// ([`add_unit_faces`]): an old-only line is judged on the old side, a number on both sides is
 /// `ambiguous diff side` and never filtered (`old_unit_lines_keep_their_side`).
+// MAGI FIX (MS3 §6 loop13): the reviewed lines took every unit; the faces only explained ones.
 fn record_shown_context(
     reviewed: &mut Reviewed,
+    batches: &[ReviewBatch],
     contexts: &[Vec<ContextItem>],
     completed: &BTreeSet<usize>,
 ) {
-    for (batch, items) in contexts.iter().enumerate() {
-        if !completed.contains(&batch) {
+    for (batch, items) in batches.iter().zip(contexts) {
+        if !completed.contains(&batch.index) {
             continue;
         }
+        let changes = hunk_changes(batch);
         for item in items {
-            match (&item.kind, item.lines) {
-                (ContextKind::Unit, Some((first, last))) => {
-                    reviewed.add_lines(&item.file, first, last);
-                }
-                _ => reviewed.add_context_file(&item.file),
+            match explained_unit(&changes, item) {
+                Some((first, last)) => reviewed.add_lines(&item.file, first, last),
+                None => reviewed.add_context_file(&item.file),
             }
         }
     }
 }
 
+/// The range of `item` when it is a containing unit that a hunk of its batch explains
+/// ([`explains_unit`]); `None` for any other item or an unexplained unit. The one predicate behind
+/// both the reviewed lines ([`record_shown_context`]) and the gate faces ([`add_unit_faces`]).
+fn explained_unit(changes: &[(&str, HunkChange)], item: &ContextItem) -> Option<(u32, u32)> {
+    match (&item.kind, item.lines) {
+        (ContextKind::Unit, Some(range))
+            if explains_unit(changes, &item.file, range, item.old_side) =>
+        {
+            Some(range)
+        }
+        _ => None,
+    }
+}
 /// Each hunk of `batch` with its file and changed lines ([`BatchItem::hunk_change`], the anchors
 /// `containing_units` used): parsed once per batch. O(bytes of the hunks).
 fn hunk_changes(batch: &ReviewBatch) -> Vec<(&str, HunkChange)> {
@@ -1829,12 +1844,9 @@ fn add_unit_faces<'b>(
         }
         let changes = hunk_changes(batch);
         for item in items {
-            let (ContextKind::Unit, Some(range)) = (&item.kind, item.lines) else {
+            let Some(range) = explained_unit(&changes, item) else {
                 continue;
             };
-            if !explains_unit(&changes, &item.file, range, item.old_side) {
-                continue;
-            }
             let face = faces.entry(item.file.as_str()).or_default();
             if item.old_side {
                 face.old.push(range);
