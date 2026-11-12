@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use magi_core::schema::Severity;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::decision::{
     Answer, AttemptOutcome, Cause, Decision, DecisionClient, DecisionError, DecisionRequest,
@@ -556,11 +557,16 @@ pub struct Gate<'a> {
     stopped: Option<&'static str>,
     per_model: BTreeMap<String, usize>,
     questions: usize,
-    /// The last code scanned for private-key blocks, and what the scan found: the findings of
-    /// one file come together, so its whole-code scans run once, not once per finding. Reused
-    /// only for byte-equal code, so it can never answer for another file; it holds one copy of
-    /// one file (at most `MAX_REVIEW_FILE_BYTES`), the price of a comparison that cannot collide.
-    last_scan: Option<(String, KeyBlockScan)>,
+    /// The SHA-256 of the last code scanned for private-key blocks, and what the scan found: the
+    /// findings of one file come together, so its whole-code scans run once, not once per
+    /// finding. Keyed by the digest, so no copy of a file (up to `MAX_REVIEW_FILE_BYTES`) is
+    /// held and no full comparison is paid; a digest that matches is the same code, since SHA-256
+    /// does not collide in practice (a miss only rescans).
+    // MAGI FIX (MS3 §6 loop12): it kept a copy of the file and compared it whole (R6b Balthasar).
+    last_scan: Option<([u8; 32], KeyBlockScan)>,
+    /// Whole-code scans done (tests count them: `scan_memo_is_keyed_by_digest`).
+    #[cfg(test)]
+    scans: usize,
 }
 
 impl<'a> Gate<'a> {
@@ -590,24 +596,32 @@ impl<'a> Gate<'a> {
             per_model: BTreeMap::new(),
             questions: 0,
             last_scan: None,
+            #[cfg(test)]
+            scans: 0,
         }
     }
 
     /// The [`KeyBlockScan`] of `code`, from [`Self::last_scan`] when `code` is the code scanned
-    /// last. O(bytes of `code`): a comparison, or the scans and one copy when the file changed.
+    /// last (same SHA-256). O(bytes of `code`): one digest, plus the scans when the file changed;
+    /// no copy of the file is kept.
     /// Correct in any order (`scan_memo_any_order`); O(files) scans only for findings grouped
     /// by file, as the pipeline hands them.
     // MAGI FIX (MS3 §6 loop7): the whole-code scan ran once per finding (R6b Melchior).
     fn key_block_scan(&mut self, code: &str) -> KeyBlockScan {
+        let digest: [u8; 32] = Sha256::digest(code.as_bytes()).into();
         if let Some((last, scan)) = &self.last_scan {
-            if last == code {
+            if *last == digest {
                 return *scan;
             }
+        }
+        #[cfg(test)]
+        {
+            self.scans += 1;
         }
         let holds = holds_key_block(code);
         let untracked = holds && untracked_block(code, &holds_key_block);
         let scan = KeyBlockScan { holds, untracked };
-        self.last_scan = Some((code.to_string(), scan));
+        self.last_scan = Some((digest, scan));
         scan
     }
 
@@ -816,6 +830,11 @@ impl<'a> Gate<'a> {
         if let Some(cause) = self.stopped {
             return Outcome::unfiltered(cause);
         }
+        // MAGI FIX (MS3 §6 loop12): the clock first, so a spent review does no scan work; nothing
+        // is sent either way (the timeout stops the gate before any call).
+        if deadline.is_some_and(|d| d <= Instant::now()) {
+            return self.stop(CAUSE_TIMEOUT);
+        }
         // MAGI FIX (MS3 §6 loop5): the block is looked for in the whole code, before the window
         // clips it: a window inside a longer block holds body lines only, which no pattern
         // names, so [`Self::sendable`]'s check on the state could not see it.
@@ -823,9 +842,6 @@ impl<'a> Gate<'a> {
         // withheld; one far from it is judged (R6b).
         if window_overlaps_key_block(code, line, self.key_block_scan(code)) {
             return Outcome::unfiltered(CAUSE_SECRET);
-        }
-        if deadline.is_some_and(|d| d <= Instant::now()) {
-            return self.stop(CAUSE_TIMEOUT);
         }
         let pairs = constituents(finding).len();
         let asked = pairs.min(MAX_GATE_QUESTIONS_PER_FINDING);
@@ -1737,6 +1753,24 @@ mod tests {
             .await;
         assert_eq!(out.cause, Some(CAUSE_TIMEOUT), "{:?}", out.cause);
         assert!(g.last_scan.is_none(), "no scan after the deadline");
+    }
+
+    #[test]
+    fn scan_memo_is_keyed_by_digest() {
+        // MAGI FIX (MS3 §6 loop12): the memo compared (and held a copy of) the whole file. Equal
+        // code scans once however many findings ask; another file scans again; the copy is gone.
+        let c = MockDecisionClient::new();
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let (a, b) = ("fn a() {}\n".repeat(1_000), "fn b() {}\n".repeat(1_000));
+        for _ in 0..3 {
+            g.key_block_scan(&a);
+        }
+        assert_eq!(g.scans, 1, "one scan for one file");
+        g.key_block_scan(&b);
+        g.key_block_scan(&b);
+        assert_eq!(g.scans, 2, "another file scans once");
+        // Type-level pin: the memo is a 32-byte digest and a scan, never a copy of the file.
+        let _: &Option<([u8; 32], KeyBlockScan)> = &g.last_scan;
     }
 
     #[test]
