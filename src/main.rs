@@ -7224,13 +7224,17 @@ async fn prepare_headless(
     // Only `query` offers the review as a tool; `consult` would build it for nothing.
     let code_review = if command == "query" {
         // `--no-memory` opens no review store either: no documentation, no history (RV07).
+        // MAGI FIX (MS3 §6 loop14): the setup notices went to a throwaway `Vec`, so a store or
+        // embedder that failed to open was silent on `query`; every surface announces them now.
+        let mut review_notices = Vec::new();
         let (review_memory, review_embedder) = review_context_of(
             memory.as_ref().filter(|_| !h.no_memory),
             &magi_config,
             secret_store.as_ref(),
             section_keys.embedding(),
-            &mut Vec::new(),
+            &mut review_notices,
         );
+        emit_notices(review_notices);
         match optional_code_review_runner(crate::code_review_runner::CodeReviewBuild {
             workspace: workdir.clone(),
             cfg: magi_config.clone(),
@@ -10309,6 +10313,31 @@ mod tests {
     /// rustfmt wrap breaks: the guard then panics on a tree with no defect in it. Naming the
     /// call and its arguments as separate tokens inside ONE statement is the same claim and
     /// survives any wrapping.
+    /// [MAGI S6 MS3 loop14, R5b Caspar/Melchior/Balthasar] The review setup notices of the
+    /// `query` path were collected into a throwaway `Vec`; each call site of `review_context_of`
+    /// must hand it a named list and announce it with `emit_notices`.
+    #[test]
+    fn review_setup_notices_are_emitted() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once(FIRST_TEST_MODULE)
+            .expect("this file has a test module");
+        let calls: Vec<&str> = production.split("= review_context_of(").skip(1).collect();
+        assert_eq!(calls.len(), 3, "the TUI, the subcommand and the query path");
+        for call in calls {
+            let statement = call.split(';').next().unwrap_or("");
+            assert!(
+                !statement.contains("Vec::new()"),
+                "a throwaway list: {statement}"
+            );
+            let after = call.split(';').nth(1).unwrap_or("");
+            assert!(
+                statement.contains("startup_notices") || after.contains("emit_notices("),
+                "announced with the call: {statement}"
+            );
+        }
+    }
+
     #[test]
     fn the_headless_config_notices_are_announced_at_both_mouths() {
         let source = include_str!("main.rs").replace('\r', "");
