@@ -219,23 +219,33 @@ fn shown_by_a_side(context: &str, index: &SideIndex<'_>) -> bool {
     !holds_key_block(text) && index.0.get(at).is_some_and(|line| line.starts_with(text))
 }
 
+// The side-line visit counter of the function-context lookup: a no-op outside test builds, so
+// no test concern sits in the hot loop (counter).
+use counter::visited;
 #[cfg(test)]
-thread_local! {
-    /// Side lines the function-context lookup examined on this thread (`many_hunks_stay_near_linear`).
-    pub(super) static CONTEXT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Counts `n` side-line visits of the function-context lookup. Test builds only: release
-/// builds compile the no-op below, so no test concern sits in the hot loop.
-#[cfg(test)]
-fn visited(n: usize) {
-    CONTEXT_VISITS.with(|c| c.set(c.get().saturating_add(n)));
-}
+pub(super) use counter::CONTEXT_VISITS;
 
 /// The release build's [`visited`]: nothing.
 #[cfg(not(test))]
-fn visited(_n: usize) {}
+mod counter {
+    /// Counts nothing.
+    pub(super) fn visited(_n: usize) {}
+}
 
+/// The test build's counter, read by `many_hunks_stay_near_linear`.
+#[cfg(test)]
+mod counter {
+    thread_local! {
+        /// Side lines the function-context lookup examined on this thread.
+        pub(in crate::review) static CONTEXT_VISITS: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    /// Counts `n` side-line visits of the function-context lookup.
+    pub(super) fn visited(n: usize) {
+        CONTEXT_VISITS.with(|c| c.set(c.get().saturating_add(n)));
+    }
+}
 /// The lines of a side, each without its `\n` (a `\r` stays, as git shows it); none for an
 /// absent side; `None` when the side is not UTF-8. O(side).
 fn side_lines(side: Option<&[u8]>) -> Option<Vec<&str>> {
