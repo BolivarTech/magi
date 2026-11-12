@@ -1821,6 +1821,31 @@ mod tests {
     }
 
     #[test]
+    fn joiners_count_only_inside_the_header_type_words() {
+        // [MAGI S6 MS3 loop13, R6a Melchior/Caspar] loop 12 dropped the joiners from the whole
+        // line, so source that spells a header from constants (`concat!("-----", "BEGIN ", ..)`)
+        // was left out as a key block. Joiners now count between BEGIN and the closing dashes
+        // only; the opening dashes and the closing dashes stay contiguous.
+        let d = ARMOR_DASHES;
+        for held in [
+            format!("let h = \"{d}BEGIN \" \"RSA PRIVATE KEY{d}\";"),
+            format!("concat!(\"{d}BEGIN \", \"RSA PRIVATE\", \" KEY{d}\")"),
+            format!("{d}BEGIN \" + \"PGP PRIVATE KEY BLOCK{d}"),
+        ] {
+            assert!(
+                holds_key_block(&held),
+                "split literal still a block: {held}"
+            );
+        }
+        for free in [
+            format!("let h = concat!(\"{d}\", \"BEGIN \", \"PRIVATE KEY{d}\");"),
+            "docs: the BEGIN marker and a PRIVATE KEY are named apart".to_string(),
+        ] {
+            assert!(!holds_key_block(&free), "not a header: {free}");
+        }
+    }
+
+    #[test]
     fn a_key_block_is_told_from_a_one_line_secret() {
         // [T3.7 fix round 3] RV22's exception keys on this: PEM, SSH2 and OpenPGP private-key
         // blocks are blocks; a URL password, a token or an AWS key is not.
