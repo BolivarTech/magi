@@ -793,6 +793,11 @@ pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
 /// without every v0.25.0 table, so a fresh database is never refused as an older one (RV19).
 /// The doc tables' keys leave `index_id` out on purpose: one identity holds the index at a time
 /// (a rebuild wipes, a race is a conflict; `ReviewDocStore`), enforced there, not by the schema.
+///
+/// Adding a table means updating three lists together: this DDL, [`PRE_0_25_MISSING_TABLES`] (a
+/// table a 0.24.x file lacks) and [`DATA_TABLES`] (the never-delete row counts). The
+/// `every_ddl_table_is_classified` test fails when they drift, naming the table; the
+/// 0.25 databases' tables are pinned by it, so a new one cannot be forgotten in silence.
 const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             chunk_hash TEXT NOT NULL,
@@ -2674,7 +2679,8 @@ mod tests {
         // The purge is the README's SQL (no purge command exists); every table is seeded, so a
         // purge that forgets one of them stays red, and the reopen proves DELETE (never DROP)
         // keeps the schema.
-        const PURGE: &str = "DELETE FROM code_review_docs; DELETE FROM code_review_doc_sources; DELETE FROM code_review_history;";
+        // MAGI FIX (MS3 §6 loop12): one statement per line in the README (a copy-paste hazard on one).
+        const PURGE: &str = "DELETE FROM code_review_docs;\nDELETE FROM code_review_doc_sources;\nDELETE FROM code_review_history;";
         let readme = include_str!("../../README.md").replace('\r', "");
         assert!(
             readme.contains(PURGE),

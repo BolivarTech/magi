@@ -222,6 +222,12 @@ impl ReviewHistoryStore {
     /// blob that does not decrypt) is skipped with one WARN and counted in
     /// [`Self::corrupt_rows`], so one bad row never takes the whole read
     /// (`corrupt_row_is_skipped`). O(rows) decryptions.
+    ///
+    /// Declared (MS3 §6 loop12): the skipped row is never in the caller's `touched`, so it stays
+    /// first in the due queue, is read and WARNed again each review and takes one of the 200 slots
+    /// of that review. Rows come only from this store's own atomic writes under the never-delete
+    /// open, so a row that fails to decode means a damaged file or a foreign key, and the WARN
+    /// per review is the signal; rotating it away would hide it.
     // MAGI FIX (MS3 §6 loop11): one corrupt row failed the whole read.
     fn decode_all(&self, rows: Vec<RawRow>) -> Result<Vec<HistoryEntry>, MemoryError> {
         let mut out = Vec::with_capacity(rows.len());
@@ -261,7 +267,9 @@ impl ReviewHistoryStore {
 /// The one exception is an `attended` entry: the code it pointed at has changed, so a new
 /// finding on the same `file:line` (the same id) is a new finding. It replaces the old row whole
 /// (text, commit, status) and is due first; otherwise it would be dropped while the old text kept
-/// being served as validated context. O(entries). Returns the rows inserted or replaced.
+/// being served as validated context. O(entries). Returns the rows inserted or replaced, which
+/// can be fewer than `entries.len()`: an id already stored and not `attended` is kept as it is
+/// (first sighting wins), so callers must not read the count as the input's length.
 fn record_in(
     tx: &Connection,
     entries: &[HistoryEntry],
@@ -397,6 +405,10 @@ impl ReviewHistoryStore {
     /// such rows; at most 2 x (bound + 1) raw rows held at once (the newest are kept after each
     /// file batch), O(bound) decryptions.
     ///
+    /// Test-only wrapper (MS3 §6 loop12): it accepts every reviewed commit. The production
+    /// context read is [`Self::validated_on_line`], which adds the `HEAD` ancestry filter
+    /// (`on_heads_line`) before the bound; this one is NOT the production read.
+    ///
     /// # Errors
     /// [`MemoryError::Storage`] or [`MemoryError::Crypto`].
     #[cfg(test)]
@@ -469,6 +481,13 @@ impl ReviewHistoryStore {
     ///
     /// # Returns
     /// The rows `entries` inserted or replaced.
+    ///
+    /// Declared (MS3 §6 loop12): between `due` and this call another process may delete or replace
+    /// a row; the unknown id then fails typed and the whole review's history update rolls back
+    /// (`apply_review_is_atomic`), so a lost write is a review that records nothing, never a
+    /// half-applied one, and the next review reclassifies the same queue. It matters only when two
+    /// reviews of one database run at once, which the shared TUI runner and `magi query` do not
+    /// do in the same process.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] naming an unknown id or a failing statement (nothing written);

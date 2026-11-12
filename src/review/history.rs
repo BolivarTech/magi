@@ -427,6 +427,19 @@ fn weak_reject_if_later(commit: &str, head: &str, git: &dyn GitCommand) -> Signa
 ///
 /// Complexity: O(min(existing, [`MAX_RECLASSIFY_PER_REVIEW`])) classifications.
 ///
+/// Declared limits (MS3 §6 loop12). (1) An entry past the cap keeps the status it had until a
+/// later review reaches it (the backlog is reported); if `HEAD` is reset to its reviewed commit
+/// meanwhile, an `attended` entry can be served once more as validated, on a line that is
+/// ancestor-correct (`on_heads_line`) though no commit follows it. The cost is one stale label on
+/// a reference item the trio reads as data, bounded by the cap's queue; a cheap guard would add a
+/// `rev-parse` per memoized commit to every context read. (2) Each entry costs up to five local
+/// git calls and entries that share a `(reviewed commit, head)` pair repeat the ancestry call; the
+/// bound is the cap (200) times those calls inside the 60 s sub-budget, nothing leaves the
+/// process, and a per-pair memo would add state to a pure function for that. (3) The diff and
+/// hunk-header parse reads git's unified output as git 2.x writes it (this module's tests feed
+/// it git's literal output, `lines_changed_after_the_review_mean_attended` and its neighbours);
+/// a line it does not understand gives `Unknown`, never `attended`.
+///
 /// # Arguments
 /// * `existing` - entries already stored, least recently checked first.
 /// * `new` - entries of this review, not stored yet.
@@ -572,8 +585,13 @@ fn quotes_a_split_key_block(titles: &[String], details: &[String]) -> bool {
 /// boundary without its space (`…PRIVATE` + `KEY-----`) or an SSH2 one written without spaces is
 /// still one (`split_footers_are_recognized`); END closes only at the line's start. O(n).
 // MAGI FIX (MS3 §6 loop11): the exact spacing let a split footer through.
+// MAGI FIX (MS3 §6 loop12): every ASCII whitespace goes, not the space alone (a tab evaded it).
 fn holds_key_block_end(text: &str) -> bool {
-    let spaceless = |s: &str| s.replace(' ', "");
+    let spaceless = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>()
+    };
     text.lines().any(|line| {
         let line = spaceless(line.trim()).to_ascii_uppercase();
         KEY_BLOCK_END_MARKERS.iter().any(|(dashes, word, holds)| {
