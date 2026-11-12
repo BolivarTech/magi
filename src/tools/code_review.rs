@@ -1212,6 +1212,9 @@ impl Tool for CodeReviewTool {
         })
     }
 
+    /// The post-report work is awaited before the result is built, not after: its warning opens
+    /// the report (the output cap cuts a report from its end), so the result needs it first.
+    ///
     /// Runs one review: arguments, then the run's deadline, then the plan (the path guard, no
     /// model), then the runner, which reads what is left of the deadline when its batches start
     /// (the preparation is never charged twice). No step that validates calls a model.
@@ -1632,6 +1635,12 @@ impl ProductionReviewRunner {
     /// For a named file the set may hold that file: the plan then refuses it as `ignored`
     /// (`ReviewError::NotReviewable`), it never drops it in silence (README, "What it never
     /// sends"; REQ-RV22).
+    ///
+    /// Declared cost (MS3 §6 loop13): one review asks for this set up to four times (the approval's
+    /// plan, the digest re-check, the run, and the plan the re-check derives), each one `git
+    /// ls-files` bounded per call. It is not memoized on purpose: the set is part of what the digest
+    /// pins, and a cache would let the plan and the run read different `.gitignore` states without
+    /// either noticing (the re-check exists to catch exactly that).
     // MAGI FIX (S6 loop 9, D2-c1): refuted, not changed; pinned end to end by
     // `a_named_file_that_gitignore_matches_is_refused_never_silently_omitted`.
     fn ignored(&self, input: &ReviewInput) -> Result<HashSet<String>, ReviewError> {
