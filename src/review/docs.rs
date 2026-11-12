@@ -807,6 +807,12 @@ fn py_def_name(line: &str) -> Option<String> {
 /// The code of a Python line, without its `#` comment, and the change in bracket depth it makes.
 /// A `#` or a bracket inside a one-line string literal (`'…'`, `"…"`, with `\` escapes) is text.
 /// O(line).
+///
+/// Declared (MS3 §6 loop12): the quote state resets at each line, so a string that spans lines
+/// inside a `def` header (a triple-quoted default) can leave the depth unbalanced; the header then
+/// ends at the last line the lookahead reads and the docstrings after it are not indexed. It is
+/// this module's line-based extraction limit (no parse of the source): the effect is a missing
+/// chunk, never a wrong one, and what is indexed is masked and secret-checked like every chunk.
 fn py_code(line: &str) -> (&str, i64) {
     let mut depth = 0i64;
     let mut quote: Option<char> = None;

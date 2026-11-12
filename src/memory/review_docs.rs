@@ -14,6 +14,9 @@
 //!
 //! The connection lock is never held across an `.await` and never taken while the data-key lock
 //! is held (R-V08): the embedder runs first, the database after, in short synchronous calls.
+//! The first half is asserted, not only written: `the_database_lock_is_free_while_the_embedder_runs`
+//! probes the connection lock from inside the embedder (MS3 §6 loop12); the second half is
+//! structural (the key lives in a `MaskedDek` read only through `with_dek`, which never calls out).
 //!
 //! # Examples
 //!
@@ -389,6 +392,17 @@ impl ReviewDocStore {
     }
 
     /// Encrypts every row of the new sources (off the connection lock).
+    ///
+    /// A reused vector is decrypted and sealed again, not copied as a blob (declared, MS3 §6
+    /// loop12): O(reused) decrypt plus seal, at most [`magi_rs::review::docs::MAX_DOC_CHUNKS`]. The
+    /// round trip is where a stored blob is validated (`unseal_vector` checks its shape and
+    /// dimension) before it is written under a new row, so a damaged blob fails here and is never
+    /// copied forward; a verbatim copy would skip the check for a saving the bound makes small.
+    ///
+    /// Peak memory is declared too: the call holds every sealed row at once (about 240 MB of
+    /// embedding blobs at the cap and 768 dimensions, plus the decrypted vectors and the 32 MiB
+    /// text bound), because the transaction needs them all before it locks; a streaming write
+    /// would hold the connection across embedding batches, which R-V08 forbids.
     fn encode_rows<'a>(
         &self,
         plan: &Plan<'a>,
@@ -681,7 +695,10 @@ impl ReviewDocStore {
     /// still exists, read under one lock and decrypted by the caller off it (R-V08). A pair whose
     /// row was deleted is simply absent. No `index_id` filter, and none is needed: `chunk_hash`
     /// is injective over path, section and text, so a row of any identity with that pair holds
-    /// the same bytes, and the vector scored is this review's own.
+    /// the same bytes, and the vector scored is this review's own. The invariant is on the
+    /// PLAINTEXT (MS3 §6 loop12): each blob is decrypted on its own with the store's key, so
+    /// nothing relies on deterministic ciphertext (every seal draws a fresh nonce), and one
+    /// shared key per database is what lets a row of another identity decrypt at all.
     ///
     /// Complexity: one query per [`ALLOWED_PAIRS_PER_QUERY`] pairs.
     fn load_chunks(
