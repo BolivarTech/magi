@@ -261,8 +261,10 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                 runs.point_embedding_at(path, url)
                 self.assertEqual(url, tomllib.loads(path.read_text(encoding="utf-8"))["embedding"]["base_url"])
 
-    def test_the_rewrite_keeps_the_config_s_permissions(self) -> None:
+    def test_rewrite_passes_the_stat_mode(self) -> None:
         # [MAGI S6 MS3 loop9, R7a Caspar] the umask's mode replaced 0600; observed on the calls (Windows has none).
+        # MAGI FIX (MS3 §6 loop13, R7b): named for what it asserts: the rewrite hands the temporary
+        # file the mode `os.stat` reported. It reads no permission bit itself (declared).
         # MAGI FIX (MS3 §6 loop12, R7b Balthasar): no Windows skip on purpose. `os.stat` and `os.chmod`
         # are both mocked, so the test reads no permission bit and passes on Windows (run there,
         # the platform CI covers); a skip would drop its only run on that platform.

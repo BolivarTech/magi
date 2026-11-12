@@ -2040,20 +2040,21 @@ class ReviewMaskingSyncTests(unittest.TestCase):
     from the schema: either could drift with every test still green.
     """
 
-    def test_the_s53_fixture_path_holds_no_opening_of_any_product_pattern(self) -> None:
-        (path, _), = runs.review_masked_files()
+    def _assert_no_opening_in(self, path: str) -> None:
+        """Fail for each product opening (lowercase) that *path* holds, in any case."""
         lowered = path.lower()
         for opening in _secret_openings():
             with self.subTest(opening=opening):
                 self.assertNotIn(opening, lowered)
 
+    def test_the_s53_fixture_path_holds_no_opening_of_any_product_pattern(self) -> None:
+        (path, _), = runs.review_masked_files()
+        self._assert_no_opening_in(path)
+
     def test_the_s54_keyblock_path_holds_no_opening_of_any_product_pattern(self) -> None:
         # MAGI FIX (MS3 §6 loop12, R7b Melchior): a path that matched would leave the file out for
         # its path, and S54 would stop exercising the key block's content while still listing `secret`.
-        lowered = runs.REVIEW_KEYBLOCK_FILE.lower()
-        for opening in _secret_openings():
-            with self.subTest(opening=opening):
-                self.assertNotIn(opening, lowered)
+        self._assert_no_opening_in(runs.REVIEW_KEYBLOCK_FILE)
 
     def test_the_openings_parse_includes_every_github_token_prefix(self) -> None:
         self.assertTrue({"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "://"} <= set(_secret_openings()))

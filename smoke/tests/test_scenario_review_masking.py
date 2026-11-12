@@ -3,6 +3,7 @@
 # Date: 2026-11-08
 """Unit tests for S53-S54 (REQ-RV22: a secret in a file's content never leaves the process)."""
 
+import copy
 import pathlib
 import unittest
 
@@ -23,7 +24,9 @@ _REFUSAL = (b"error: nothing to review: no reviewable file in the input; left ou
 def _doc(masked=None, masked_unlisted=0, skipped=None, skipped_unlisted=0) -> dict:
     """The review JSON S53 reads, defaulting to what the product must publish."""
     return {"code_review": {
-        "masked": rm.S53_EXPECTED_MASKED if masked is None else masked,
+        # MAGI FIX (MS3 §6 loop13, R7b): a copy, so a test that edits its document cannot edit the
+        # scenario's expected value.
+        "masked": copy.deepcopy(rm.S53_EXPECTED_MASKED) if masked is None else masked,
         "masked_unlisted": masked_unlisted,
         "skipped": [] if skipped is None else skipped,
         "skipped_unlisted": skipped_unlisted}}
@@ -168,12 +171,8 @@ class S53Tests(unittest.TestCase):
         # key: no opening of a pattern may appear in it, in any case.
         # [MAGI S6 MS3 loop7, R7b] The openings are read from the product's table now, not
         # copied here: `test_rust_sync.ReviewMaskingSyncTests`
-        # (`test_the_s53_fixture_path_holds_no_opening_of_any_product_pattern`).
-        root = pathlib.Path(__file__).resolve().parent.parent.parent
-        lowered = path.lower()
-        for opening in secret_openings(root):
-            with self.subTest(opening=opening):
-                self.assertNotIn(opening, lowered)
+        # (`test_the_s53_fixture_path_holds_no_opening_of_any_product_pattern`). MAGI FIX (MS3 §6
+        # loop13, R7b): the guard lives there once, not here too.
 
 
 class SecretOpeningsTests(unittest.TestCase):

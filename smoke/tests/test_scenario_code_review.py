@@ -92,6 +92,9 @@ def _review(batches: int = 3, findings=None, discarded=None) -> dict:
 #: ``.magi`` and R14's two skipped files (measured 2026-10-29; the secret entry rewritten on
 #: 2026-11-06, ``29f316b3``, when T3.7 renamed R14's secret file to the key itself and the product
 #: redacts such a path: the rest of the line is the 2026-10-29 measurement).
+#: MAGI FIX (MS3 §6 loop13, R7b): the scenarios compare the omission list as an unordered set of exact
+#: ``(path, cause)`` pairs (``_skipped_as_expected`` sorts both sides; ``test_s49_omissions_any_order``),
+#: so the hand-edited entry's position cannot make these fixtures disagree with a real run.
 _ROOT_STDERR = (
     b"error: nothing to review: no reviewable file in the input; left out: "
     b".magi/.magi-rs-memory.db (ignored), .magi/logs/magi-2026-10-29.log (ignored), "
@@ -493,6 +496,20 @@ class CodeReviewScenarioTests(unittest.TestCase):
             self.assertEqual(Outcome.FAIL, outcome[code_review.S49_ASSERTIONS[2]], i)
         windows = set(code_review.with_slices((secret,), (body,)))
         self.assertEqual(len(windows), len(body) - n + 2, "non-uniform")
+
+    def test_no_window_of_a_toy_body_is_product_vocabulary(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7b): at 6 bytes a window of a toy body that also occurs in
+        # ordinary output would fail a run that leaks nothing. No window of either toy body occurs
+        # in the measured refusals, the healthy relay record, the fixtures' own paths or text.
+        n = code_review.MIN_LEAK_FRAGMENT
+        corpus = (_ROOT_STDERR + _SKIPPED_STDERR + b"".join(b for _, b in support.R18_HEALTHY_REQUESTS)
+                  + b"".join(p.encode() for p, _ in runs.review_masked_files())
+                  + runs.REVIEW_MASKED_DOC + b"".join(runs.REVIEW_KEYBLOCK_LINES))
+        # The key's own prefix and the masked marker are the product's output by design.
+        for key in (code_review.S49_SECRET, runs.REVIEW_MASKED_KEY):
+            body = code_review.key_body(key)
+            for i in range(len(body) - n + 1):
+                self.assertNotIn(body[i:i + n], corpus.replace(key, b""), (key[:6], i))
 
     def test_s49_passes_the_secret_assertion_with_no_log_directory(self) -> None:
         # A refusal may stop before any log is written; an absent log carries no secret.
