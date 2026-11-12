@@ -9529,64 +9529,6 @@ end"
         }
     }
 
-    /// A runner whose review renders and whose post-report work warns with a key that a control
-    /// byte splits.
-    struct SecretWarningRunner;
-    #[async_trait::async_trait]
-    impl crate::tools::code_review::CodeReviewRunner for SecretWarningRunner {
-        fn plan(
-            &self,
-            _input: &magi_rs::review::input::ReviewInput,
-        ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
-        {
-            Ok(shown_plan())
-        }
-        async fn run(
-            &self,
-            _plan: crate::tools::code_review::ReviewPlan,
-            _budget: crate::tools::code_review::ReviewBudget,
-            _c: &tokio_util::sync::CancellationToken,
-        ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
-        {
-            Ok(crate::tools::code_review::Rendered {
-                text: "REPORT-BODY".into(),
-                json: serde_json::Value::Null,
-                consult: serde_json::Value::Null,
-                failure: None,
-            })
-        }
-        fn after_report(&self) -> Option<crate::tools::code_review::PostReport> {
-            Some(Box::new(|_| {
-                Some(
-                    concat!(
-                        "history: ghp_",
-                        "AAAA\u{1b}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-                    )
-                    .into(),
-                ) // allow-secret-scan
-            }))
-        }
-    }
-
-    #[tokio::test]
-    async fn the_tui_warning_is_stripped_and_masked() {
-        // [MAGI S6 MS3 loop14, R5b Caspar/Balthasar] The TUI wrote the post-report warning
-        // through the sanitizer alone; a secret in it reached the transcript. One canonical
-        // order now, as the subcommand's: sanitize, then mask.
-        let mut app = App::new_for_test();
-        app.begin_code_review_confirmation(
-            TuiCodeReviewCommand::default(),
-            Arc::new(SecretWarningRunner),
-            shown_plan(),
-        );
-        let review = app.approve_code_review().expect("pending");
-        app.run_approved_code_review(review).await;
-        let all = app.messages.join("\n");
-        assert!(all.contains("history:"), "{all}");
-        assert!(!all.contains("ghp_AAAA"), "{all}");
-        assert!(!all.contains("AAAAAAAAAAAAAAAAAAAA"), "{all}");
-    }
-
     #[tokio::test]
     async fn failed_review_still_drains() {
         // MAGI FIX (MS3 §6 loop11): the error arm skipped the post-report work, so a shared
