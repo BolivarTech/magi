@@ -824,6 +824,13 @@ fn optional<T>(r: rusqlite::Result<T>) -> Result<Option<T>, MemoryError> {
 /// matches a secret pattern (a private-key block's headers included). A left-out source is never
 /// embedded or written, and only it (`a_refused_source_spares_others`); `prepare_docs` nets first
 /// and declares any refusal withheld. O(bytes of the chunks).
+///
+/// Limit, declared (MAGI FIX, MS3 loop13, R1 Caspar): a *path* that matches is left out, not
+/// masked. The path is the source's identity and travels in clear with every chunk, so a masked
+/// path would alias different files (and different secrets) to one source; "mask, do not omit"
+/// (RV22 as amended) is about a file's content, which is masked before it reaches here. The
+/// omission of a secret-shaped path is the documented behaviour end to end (smoke S49) and is
+/// tested by `a_secret_in_a_source_path_is_refused_before_anything_is_embedded_or_written`.
 // MAGI FIX (MS3 §6 loop3): a source path is stored in clear and travels with each chunk.
 // MAGI FIX (MS3 §6 loop8): one match refused the whole reindex.
 fn without_secret_sources(
