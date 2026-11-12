@@ -292,6 +292,12 @@ const POST_REPORT_CUT: &str = concat!(
 ///
 /// # Returns
 /// The work's warning, a note that it was skipped or cut, or `None`.
+///
+/// Declared limit (MS3 §6 loop12): the zero-limit check (`has_after_report`) and the take
+/// (`after_report`) are two calls, so when two surfaces drain one runner at once the "skipped"
+/// note can describe work the other surface took. The work is never lost (it is taken by exactly
+/// one of them or stays queued) and the note is advisory; a lock across both would hold the
+/// queue while a blocking task runs, for a note.
 pub(crate) async fn finish_after_report(
     runner: &dyn CodeReviewRunner,
     limit: Option<Duration>,
@@ -645,10 +651,12 @@ fn map_json_text(value: Value, f: &dyn Fn(&str) -> String, keys: bool) -> Value 
 /// `(response, consult, code_review)`: the text, the `consult` object, the summary, each with
 /// every string redacted (a backstop over the runner's own redaction, whatever runner it was).
 pub(crate) fn envelope_fields(r: &Rendered) -> (String, Value, Value) {
+    // MAGI FIX (MS3 §6 loop12): the RV22 mask too (strip, then mask), so a runner that skipped
+    // `egress_safe` cannot leak a key through the backstop.
     (
-        redact_foreign_text(&r.text).as_str().to_string(),
-        redacted_json(r.consult.clone()),
-        redacted_json(r.json.clone()),
+        mask_secrets(&terminal_safe(redact_foreign_text(&r.text).as_str())),
+        masked_json(redacted_json(r.consult.clone())),
+        masked_json(redacted_json(r.json.clone())),
     )
 }
 
@@ -940,6 +948,12 @@ impl CodeReviewTool {
 
     /// The review's budget: the calling run's deadline less the margin, which the review reads
     /// when its batches start; [`ReviewBudget::Unbounded`] without a run deadline.
+    ///
+    /// Declared limit (MS3 §6 loop12): the deadline is read before the local plan runs
+    /// (`plan_for`: git and the filesystem, no model or endpoint), so the plan's own time is spent
+    /// from the run's clock but not part of the reported `prep_ms`, which starts when the
+    /// documentation preparation does. The margin ([`REVIEW_DEADLINE_MARGIN_SECS`]) is what
+    /// absorbs it; the budget check then runs with the clock as it stands.
     ///
     /// # Errors
     /// [`ToolError::ExecutionError`] when nothing is left after the margin.
