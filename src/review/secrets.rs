@@ -1830,7 +1830,7 @@ mod tests {
     }
 
     #[test]
-    fn joiners_count_only_inside_the_header_type_words() {
+    fn joiners_only_in_type_words() {
         // [MAGI S6 MS3 loop13, R6a Melchior/Caspar] loop 12 dropped the joiners from the whole
         // line, so source that spells a header from constants (`concat!("-----", "BEGIN ", ..)`)
         // was left out as a key block. Joiners now count between BEGIN and the closing dashes

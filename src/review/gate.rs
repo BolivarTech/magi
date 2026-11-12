@@ -2596,7 +2596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_state_carrying_a_mask_is_never_filtered() {
+    async fn masked_state_is_never_filtered() {
         // [MAGI S6 MS3 loop13, R6b] a masked code window shows the gate less than the file holds
         // (the secret is replaced), so a confident `false_positive` on it is not trusted: the
         // finding stays in the main list as `low_confidence`.

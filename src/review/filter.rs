@@ -472,7 +472,7 @@ fn classify(
     // `content_verdict`'s `find_secret` over each side's bytes (defined below in this file) finds
     // the block's header pattern and returns `Skip(secret)`: the only way a key-block file is left
     // out here. Pinned by `a_real_later_stage_reading_a_left_out_key_block_file_fails_closed`,
-    // `a_key_block_file_listed_twice_is_skipped_once_never_a_failed_review` and
+    // `key_file_listed_twice_skips_once` and
     // `a_pem_key_whose_header_is_outside_the_hunk_still_skips_the_file` (this file).
     if let Some(skip) = content_verdict(path, sides) {
         return Ok(skip);
@@ -1050,7 +1050,7 @@ enum Side {
 /// sides: the containing units and the lexical index read the kept files, where a refusal ends
 /// the review (failing closed is RV22's tie-break); a definition or caller read
 /// declares its item unreadable instead (`egress_secret_read_is_noted` in `rag`)
-/// (`a_key_block_file_listed_twice_is_skipped_once_never_a_failed_review`,
+/// (`key_file_listed_twice_skips_once`,
 /// `after_the_filter_no_stage_is_served_a_key_block_it_never_classified`).
 ///
 /// # Arguments
@@ -1278,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fallback_diff_that_still_holds_a_secret_is_refused() {
+    fn fallback_secret_is_refused() {
         // [MAGI S6 MS3 loop13, R6a Melchior] The by-line fallback was the one egress text never
         // re-scanned: a secret that exists only across adjacent diff lines (each line verbatim
         // on a clean side) survived it. `fallback_diff` scans its own output.
@@ -1302,7 +1302,7 @@ mod tests {
         assert!(fallback_diff(clean, Some(b"fn f() {}\n"), None, "x").is_some());
     }
     #[test]
-    fn a_joined_literal_key_header_is_left_out_not_held_raw() {
+    fn joined_key_header_is_omitted() {
         // [MAGI S6 MS3 loop13, R6a Caspar, critical] `holds_key_block` (the hold decision)
         // saw a header joined across two literals that `find_secret` (the omission decision)
         // missed: the file was kept and its body went out raw. The filter now omits any file
@@ -1344,7 +1344,7 @@ mod tests {
         assert_eq!(f.kept.len(), 1);
     }
     #[test]
-    fn a_key_block_file_listed_twice_is_skipped_once_never_a_failed_review() {
+    fn key_file_listed_twice_skips_once() {
         // [MAGI S6 MS3 loop5, R6a Caspar] The second read of the released side was refused by
         // the cache, and that refusal ended the whole review; inside the filter it is the skip
         // the first read already chose.
@@ -2465,7 +2465,7 @@ mod tests {
     }
 
     #[test]
-    fn a_path_listed_with_two_different_diffs_declares_the_dropped_section() {
+    fn second_diff_section_is_declared() {
         // [MAGI S6 MS3 loop13, R6a Caspar] The first section won and the second vanished with
         // nothing in the report; `input.rs` lists one section per path, so this is a guard.
         let inner = MapSource::new(&[("a.rs", "fn f() {}\n")], &[]);
