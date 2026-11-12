@@ -375,6 +375,16 @@ pub fn declare_lexical(a: &mut Assembled, index: &LexicalIndex) {
             ),
         ));
     }
+    // MAGI FIX (MS3 §6 loop13): the identifier cap leaves the definitions incomplete as well.
+    if !index.is_complete() {
+        a.trimmed.push((
+            ContextKind::Definition,
+            format!(
+                "identifier index cut at MAX_INDEX_IDENTIFIERS ({MAX_INDEX_IDENTIFIERS}): some \
+                 definitions may be missing"
+            ),
+        ));
+    }
 }
 
 /// Reads one side of `file` as UTF-8 text; `None` when that side is gone.
@@ -1858,16 +1868,24 @@ mod tests {
             &mut capped,
             &LexicalIndex::build_with_cap(&files, &LanguageRegistry::new(), 1),
         );
-        assert_eq!(
-            capped.trimmed,
-            vec![(
+        // The cap also stops the occurrences, so the callers entry may sit beside it.
+        assert!(
+            capped.trimmed.contains(&(
                 ContextKind::Definition,
                 format!(
                     "identifier index cut at MAX_INDEX_IDENTIFIERS ({MAX_INDEX_IDENTIFIERS}): \
                      some definitions may be missing"
                 )
-            )]
+            )),
+            "{:?}",
+            capped.trimmed
         );
+        let mut whole = assemble(10, 1_000, vec![], vec![], None, None).expect("assemble");
+        declare_lexical(
+            &mut whole,
+            &LexicalIndex::build(&files, &LanguageRegistry::new()),
+        );
+        assert!(whole.trimmed.is_empty());
     }
 
     #[test]
