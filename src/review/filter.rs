@@ -823,11 +823,21 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2]) -> Option<Verdict> {
             Err(_) => return Some(Verdict::Skip(SkipCause::NotUtf8)),
         }
     }
-    faces
-        .into_iter()
-        .find_map(find_secret)
-        .map(|name| secret(path, name))
+    // MAGI FIX (MS3 §6 loop13): the omission set must cover what the cache never masks. A side
+    // `holds_key_block` reports (a header `find_secret` misses, such as two joined literals) is
+    // held raw by `CachedSource`, so the file is left out here, never kept with its body.
+    let named = faces.iter().copied().find_map(find_secret);
+    match named {
+        Some(name) => Some(secret(path, name)),
+        None => faces
+            .iter()
+            .any(|face| holds_key_block(face))
+            .then(|| secret(path, KEY_BLOCK_PATTERN)),
+    }
 }
+
+/// The pattern name a file is left out under when a side holds a key block no pattern names.
+const KEY_BLOCK_PATTERN: &str = "pem-private-key";
 
 /// The verdict on a file whose diff section git printed as binary ([`is_binary_section`]).
 ///
