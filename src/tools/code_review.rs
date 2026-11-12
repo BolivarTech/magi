@@ -594,8 +594,9 @@ fn terminal_safe(text: &str) -> String {
         .collect()
 }
 
-/// `text` as an error may carry it out of the process: URL credentials redacted, then every
-/// secret the RV22 detector names masked. The one scrubber of every error string this tool and
+/// `text` as an error may carry it out of the process: terminal control characters stripped
+/// ([`terminal_safe`], first, so a control inside a key cannot hide it from the detector), URL
+/// credentials redacted, then every secret the RV22 detector names masked. The one scrubber of every error string this tool and
 /// its runner build themselves (argument errors, review errors, runner build errors), so an
 /// echoed argument or a builder's message can never leave with a key in it. Stderr and the run
 /// log also pass the process auditor; the tool's errors go back to the agent's model and do not,
@@ -607,8 +608,10 @@ fn terminal_safe(text: &str) -> String {
 /// # Returns
 /// The text with its credentials and secrets masked.
 // MAGI FIX (S6 loop 7, D-b1): one helper with both stages for every error path.
+// MAGI FIX (MS3 §6 loop13): the strip is a third stage inside it, not each call site's job.
+// MAGI FIX (MS3 §6 loop13): the strip is a third stage inside it, not seven call sites' job.
 pub(crate) fn egress_text(text: &str) -> String {
-    mask_secrets(redact_foreign_text(text).as_str())
+    mask_secrets(redact_foreign_text(&terminal_safe(text)).as_str())
 }
 
 /// `value` with every string and key passed through [`mask_secrets`], after [`terminal_safe`]
@@ -712,7 +715,7 @@ pub(crate) fn envelope_usage(r: &Rendered) -> magi_rs::headless::types::Usage {
 /// type, a blank `path`, two forms at once, half a pair, or a hostile ref.
 pub(crate) fn parse_tool_input(args: &Value) -> Result<ReviewInput, ToolError> {
     // MAGI FIX (MS3 §6 loop12): strip, then mask (a field name is model text).
-    let invalid = |m: String| ToolError::InvalidArguments(egress_text(&terminal_safe(&m)));
+    let invalid = |m: String| ToolError::InvalidArguments(egress_text(&m));
     let fields = args
         .as_object()
         .ok_or_else(|| invalid("the arguments must be a JSON object".into()))?;
@@ -1045,8 +1048,10 @@ fn tool_result(report: &str, summary: Value) -> Value {
 }
 
 /// The bytes of `value` serialized as JSON.
+// MAGI FIX (MS3 §6 loop13): a value that cannot be serialized does not fit (a serde_json `Value`
+// always serializes, so this arm is unreachable today; the safe answer is "too big", never zero).
 fn json_len(value: &Value) -> usize {
-    serde_json::to_string(value).map_or(0, |s| s.len())
+    serde_json::to_string(value).map_or(usize::MAX, |s| s.len())
 }
 
 /// The bytes `text` takes inside a JSON string, escaping included and quotes excluded.
@@ -1171,7 +1176,7 @@ fn plan_in_place(
 fn tool_error(e: &ReviewError) -> ToolError {
     // MAGI FIX (MS3 §6 loop12): stripped first, as `egress_safe` does, so a control character
     // inside a key cannot hide it from the detector.
-    ToolError::ExecutionError(egress_text(&terminal_safe(&e.to_string())))
+    ToolError::ExecutionError(egress_text(&e.to_string()))
 }
 
 #[async_trait]
@@ -1241,9 +1246,7 @@ impl Tool for CodeReviewTool {
                     Some(w) => format!("{e}\n{w}"),
                     None => e.to_string(),
                 };
-                return Err(ToolError::ExecutionError(egress_text(&terminal_safe(
-                    &text,
-                ))));
+                return Err(ToolError::ExecutionError(egress_text(&text)));
             }
         };
         let mut report = match &rendered.failure {
@@ -1258,7 +1261,7 @@ impl Tool for CodeReviewTool {
         // MAGI FIX (MS3 §6 loop10): URL redaction alone; any runner's text is masked here too.
         Ok(bounded_result(
             // MAGI FIX (MS3 §6 loop11): stripped, then masked, as `egress_safe` orders it.
-            egress_text(&terminal_safe(&report)).as_str(),
+            egress_text(&report).as_str(),
             masked_json(redacted_json(rendered.json)),
             self.output_cap,
         ))

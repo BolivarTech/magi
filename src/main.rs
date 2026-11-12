@@ -5368,7 +5368,7 @@ async fn run_code_review_subcommand(
     if let Some(warning) =
         crate::tools::code_review::finish_after_delivered_report(runner.as_ref(), &cancel).await
     {
-        magi_rs::notices::eprint_audited(&warning);
+        magi_rs::notices::eprint_audited(&crate::tools::code_review::egress_text(&warning));
     }
     code
 }
