@@ -566,7 +566,7 @@ assumes is the exact failure this harness exists to avoid.
 | S50 | a `--timeout` too short for the batches is refused naming the floor and a minimum |
 | S51 | reviewing the workspace root never takes `.magi/` or `.git/` for review |
 | S52 | a review whose embedder is unreachable still reports, and declares `without_embedder` and the cause in `trimmed` |
-| S53 | a key in a file's content is masked, declared under `masked`, the file reviewed, and the key never printed or logged |
+| S53 | a key in a file's content (in code and in a doc comment, so the documentation chunk is exercised too) is masked, declared under `masked`, the file reviewed, and the key never printed or logged; a hung run still `FAIL`s on a key in what it captured |
 | S54 | a file holding a private-key block is left out as `secret` and none of its body is printed or logged |
 | S55 | a review whose embedder answers is not degraded: `without_embedder` is false, no index degraded, and the doc comment was indexed and the query embedded |
 | S56 | a commit review reads its documentation from that commit, never from the dirty working tree (RV21) |

@@ -2234,9 +2234,15 @@ def review_masked_files() -> tuple[tuple[str, bytes], ...]:
     Returns:
         tuple: One ``(path, content)`` pair, :data:`REVIEW_MASKED_FILE`.
     """
+    # MAGI FIX (MS3 §6 loop13): a second doc comment holds the key, so the documentation chunk
+    # (embedded) carries it as well as the batch (RV22: masked on every egress path).
     body = (b"/// " + REVIEW_MASKED_DOC + b"\n"
             b"pub fn token() -> &'static str {\n"
             b'    "' + REVIEW_MASKED_KEY + b'"\n'
+            b"}\n"
+            b"/// The demo credential is " + REVIEW_MASKED_KEY + b".\n"
+            b"pub fn demo() -> u8 {\n"
+            b"    0\n"
             b"}\n")
     return ((REVIEW_MASKED_FILE, body),)
 
