@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use super::batching::{number_lines, BatchItem};
 use super::docs::{MAX_DOC_CHUNKS, MAX_DOC_INDEX_BYTES};
 use super::error::ReviewError;
-use super::index::{identifier_runs, LexicalIndex, MAX_INDEX_OCCURRENCES};
+use super::index::{identifier_runs, LexicalIndex, MAX_INDEX_IDENTIFIERS, MAX_INDEX_OCCURRENCES};
 use super::input::renamed_from;
 use super::languages::{
     enclosing_unit, ChangedLines, ExtractorKind, LanguageExtractor, LanguageRegistry, SemanticUnit,
@@ -1846,6 +1846,28 @@ mod tests {
             &LexicalIndex::build(&files, &LanguageRegistry::new()),
         );
         assert!(whole.trimmed.is_empty());
+    }
+
+    #[test]
+    fn an_identifier_index_cut_at_its_cap_is_declared_for_definitions() {
+        // MAGI FIX (MS3 §6 loop13, R2 Caspar, Melchior): the identifier cap made the index
+        // incomplete (definitions may be missing) and no report said so, only the symbol check.
+        let files = [("a.rs".to_string(), "fn one() {}\nfn two() {}\n".to_string())];
+        let mut capped = assemble(10, 1_000, vec![], vec![], None, None).expect("assemble");
+        declare_lexical(
+            &mut capped,
+            &LexicalIndex::build_with_cap(&files, &LanguageRegistry::new(), 1),
+        );
+        assert_eq!(
+            capped.trimmed,
+            vec![(
+                ContextKind::Definition,
+                format!(
+                    "identifier index cut at MAX_INDEX_IDENTIFIERS ({MAX_INDEX_IDENTIFIERS}): \
+                     some definitions may be missing"
+                )
+            )]
+        );
     }
 
     #[test]
