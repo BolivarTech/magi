@@ -28,7 +28,7 @@ use crate::decision::{
 
 use super::config::DEFAULT_CALL_TIMEOUT_SECS;
 use super::consolidate::ConsolidatedFinding;
-use super::secrets::{find_secret, holds_key_block, mask_secrets};
+use super::secrets::{find_secret, holds_key_block, mask_secrets, REDACTED_OPEN};
 
 /// Name of the gate's only question.
 pub const GATE_QUESTION_NAME: &str = "gate";
@@ -53,6 +53,9 @@ const BAD_REQUEST: u16 = 400;
 
 /// Cause of a finding without a line or without its code.
 const CAUSE_NO_LOCATION: &str = "no location";
+/// Cause of a finding whose code window carries a mask marker: the gate saw less than the file
+/// holds, so a confident `false_positive` is not trusted and the finding is never `filtered`.
+const CAUSE_MASKED_CODE: &str = "masked code";
 /// Cause of a state over `max_state_bytes`; the state is never truncated.
 const CAUSE_STATE_TOO_LARGE: &str = "state too large";
 /// Cause of a state in which the secret detector found a pattern; it is never sent.
@@ -941,6 +944,13 @@ impl<'a> Gate<'a> {
         deadline: Option<Instant>,
         skipped: &mut Vec<String>,
     ) -> Outcome {
+        // MAGI FIX (MS3 §6 loop13): a state that carries a mask marker is never `filtered`.
+        let guard = guard.or_else(|| {
+            state
+                .to_string()
+                .contains(REDACTED_OPEN)
+                .then_some(CAUSE_MASKED_CODE)
+        });
         let mut lean: Option<Outcome> = None;
         let mut called = false;
         let mut all_transport = true;
@@ -1944,7 +1954,8 @@ mod tests {
     async fn a_merged_claim_carrying_a_one_line_secret_is_asked_masked_with_the_others() {
         // [MAGI S6 loop 10, C1-c2] one reworded claim with a secret pattern made the whole merged
         // finding `unfiltered` with no question asked and no `not every claim judged`.
-        // [MAGI S6 MS3 loop2] Masked now, so every claim is asked and the finding can filter.
+        // [MAGI S6 MS3 loop2] Masked now, so the claim is asked. [loop13] A masked claim is
+        // never `filtered`: a confident `false_positive` leaves as `low_confidence`.
         let mut f = finding(Severity::Warning, Some(1));
         f.titles = vec!["a".into(), "b".into()];
         f.details = vec![
@@ -1953,15 +1964,17 @@ mod tests {
         ];
         let mut c = MockDecisionClient::new();
         c.expect_decide()
-            .times(2)
             .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.9));
         let mut g = Gate::new(&c, chain(), 61_000);
         let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
         assert_eq!(
             (v.state, v.cause, v.causes),
-            (GateState::Filtered, None, Vec::<&str>::new())
+            (
+                GateState::LowConfidence,
+                Some("masked code"),
+                vec!["masked code", "not every claim judged"]
+            )
         );
-        assert_eq!(g.questions(), 2);
     }
     #[tokio::test]
     async fn a_merged_claim_over_the_state_limit_is_withheld_and_a_kept_one_names_it() {
