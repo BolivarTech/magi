@@ -1224,6 +1224,48 @@ mod tests {
     }
 
     #[test]
+    fn a_joined_literal_key_header_is_left_out_not_held_raw() {
+        // [MAGI S6 MS3 loop13, R6a Caspar, critical] `holds_key_block` (the hold decision)
+        // saw a header joined across two literals that `find_secret` (the omission decision)
+        // missed: the file was kept and its body went out raw. The filter now omits any file
+        // whose served side holds a key block, so the omission set covers the never-masked set.
+        let header = concat!(
+            "\"",
+            "-----",
+            "BEGIN ",
+            "\" \"",
+            "RSA PRIVATE KEY-----",
+            "\""
+        );
+        let text =
+            format!("const H: &str = concat!({header});\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n");
+        assert_eq!(
+            find_secret(&text),
+            None,
+            "premise: the joined header matches no pattern"
+        );
+        let inner = MapSource::new(&[("a.rs", "fn f() {}\n"), ("h.rs", text.as_str())], &[]);
+        let src = CachedSource::new(&inner);
+        let file = |p: &str| ReviewFile {
+            path: p.into(),
+            diff: None,
+        };
+        let f = filter_files(
+            vec![file("h.rs"), file("a.rs")],
+            &src,
+            &LanguageRegistry::new(),
+            false,
+            &|_| false,
+        )
+        .expect("a.rs kept");
+        let skipped = Skipped {
+            path: "h.rs".into(),
+            cause: SkipCause::Secret,
+        };
+        assert_eq!(f.skipped, vec![skipped]);
+        assert_eq!(f.kept.len(), 1);
+    }
+    #[test]
     fn a_key_block_file_listed_twice_is_skipped_twice_never_a_failed_review() {
         // [MAGI S6 MS3 loop5, R6a Caspar] The second read of the released side was refused by
         // the cache, and that refusal ended the whole review; inside the filter it is the skip
