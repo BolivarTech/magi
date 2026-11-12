@@ -584,6 +584,10 @@ fn kept_verdict(
                 );
                 // MAGI FIX (MS3 §6 loop11): it was a third omission class (RV22 allows two); the
                 // raw diff is masked instead, by line, and the file reviewed.
+                // MAGI FIX (MS3 §6 loop13): the None arm below is a seal. By-line masking redacts
+                // every line a masked side does not show verbatim, so no input found reaches it (an
+                // AWS secret split over two lines is redacted on both); it stays because the re-scan
+                // is cheap and fails closed, and allback_secret_is_refused pins the contract.
                 match fallback_diff(&d, read.new, read.old, pattern) {
                     Some(masked) => Some(masked),
                     None => return secret(read.path, pattern),
