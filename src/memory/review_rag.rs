@@ -466,6 +466,14 @@ impl StoreRag<'_> {
     /// only for the raw read), every later call of the review reuses them. The cache lock is
     /// released before any store call.
     ///
+    /// Declared limit (MS3 §6 loop12): the store work is synchronous SQLite behind a mutex, so
+    /// the `tokio::time::timeout` around `reindex` cannot preempt it on a single-threaded
+    /// runtime; the calls are short and each is bounded by the busy timeout, and production
+    /// runs on the multi-thread runtime. `spawn_blocking` would add a thread hop per call for no
+    /// bound the store does not already give. A poisoned lock (`relock`) is recovered with one
+    /// WARN under the `magi_rs::review` target; the guarded values are replaced whole, so the
+    /// recovery is safe and the log is the signal (panics are reported by the process's own hook).
+    ///
     /// # Errors
     ///
     /// [`MemoryError`] of the store.
@@ -806,8 +814,10 @@ impl RagSource for StoreRag<'_> {
     fn skipped(&self) -> Vec<String> {
         let history = relock(&self.withheld_history);
         let mut out = self.withheld_sources.clone();
+        // MAGI FIX (MS3 §6 loop12): a set, so the merge is O(n log n), not a scan per file.
+        let mut seen: BTreeSet<&String> = self.withheld_sources.iter().collect();
         for file in history.values() {
-            if !out.contains(file) {
+            if seen.insert(file) {
                 out.push(file.clone());
             }
         }
