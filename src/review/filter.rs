@@ -2306,6 +2306,28 @@ mod tests {
     }
 
     #[test]
+    fn raw_diff_masks_hunk_context() {
+        // MAGI FIX (MS3 §6 loop12): the `@@` line was masked alone, so a secret value in the
+        // function context (its key on another line) left raw; the context is kept only when a
+        // masked side shows it, like `rebuilt_diff`'s.
+        let removed = "const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
+        let value = concat!("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY"); // allow-secret-scan
+        let diff = format!("@@ -5,2 +5,1 @@   {value}\n-{removed}\n fn f() {{}}\n");
+        let old = format!("{removed}\nfn f() {{}}\n");
+        let inner = MapSource::new(&[("a.rs", "fn f() {}\n")], &[("a.rs", old.as_str())]);
+        let one = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff),
+        }];
+        let src = CachedSource::new(&inner);
+        let f = filter_files(one, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("kept, masked");
+        let sent = f.kept[0].diff.clone().expect("diff");
+        assert!(!sent.contains("wJalrXUtn"), "{sent}");
+        assert!(sent.starts_with("@@ -5,2 +5,1 @@"), "{sent}");
+    }
+
+    #[test]
     fn diff_alone_is_unsafe_to_mask() {
         // [MAGI S6 MS3 loop3, R6a Caspar; the tie-break of RV22] Masking the raw diff text alone
         // is not enough: a hunk shows only some lines, and a pattern may need lines the hunk
