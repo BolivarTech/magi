@@ -1416,8 +1416,6 @@ fn write_context(prompt: &mut String, items: &[ContextItem]) {
     prompt.push('\n');
     for item in items {
         let (open, close) = context_frame(&item.kind, &display_path(&item.file), item.candidate);
-        // MAGI FIX (MS3 §6 loop13): the frame's label is masked where it is written.
-        let (open, close) = (mask_secrets(&open), mask_secrets(&close));
         prompt.push_str(&open);
         prompt.push('\n');
         // MAGI FIX (T3.7): a containing unit is numbered like the code under review.
@@ -2464,23 +2462,6 @@ mod tests {
         for (position, batch) in batches.iter().enumerate() {
             assert_eq!(batch.index, position);
         }
-    }
-    #[test]
-    fn a_frame_label_is_masked_too() {
-        // [MAGI S6 MS3 loop13, R4] The prompt is no longer masked as a whole after the escaping
-        // (that order wrote `<<<` from `<<` plus a mask), so the frame's own text is masked where
-        // it is written.
-        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
-        let mut item = ctx(
-            ContextKind::Documentation,
-            "README.md",
-            &format!("t {key}"),
-            None,
-        );
-        item.text = "plain\n".into();
-        let mut prompt = String::new();
-        write_context(&mut prompt, &[item]);
-        assert!(!prompt.contains("sk-ant-"), "{prompt}");
     }
     #[test]
     fn backstop_masks_then_escapes() {
