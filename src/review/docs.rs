@@ -567,6 +567,12 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
             continue;
         }
         if attr_depth > 0 || t.starts_with("#[") || t.starts_with("#![") {
+            // MAGI FIX (MS3 §6 loop12): an item written after its attribute on one line is named.
+            if attr_depth == 0 {
+                if let Some(rest) = after_attribute(t).filter(|r| !r.is_empty()) {
+                    return rust_item_name(rest);
+                }
+            }
             attr_depth = bracket_depth(attr_depth, t);
             continue;
         }
@@ -586,6 +592,37 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
         return rust_item_name(t);
     }
     String::new()
+}
+
+/// What follows the closing `]` of the attribute that opens `line` (`#[..]` or `#![..]`), when
+/// it closes on this line: the brackets are counted as [`bracket_depth`] counts them (a bracket
+/// inside a `"…"` string is text), the remainder trimmed. `None` when the attribute stays open
+/// past the line. O(len of `line`).
+fn after_attribute(line: &str) -> Option<&str> {
+    let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+    for (i, c) in line.char_indices() {
+        if quoted {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            '[' => depth = depth.saturating_add(1),
+            ']' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return line.get(i + 1..).map(str::trim);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `depth` after the square brackets of `line`: each `[` opens, each `]` closes, saturating at
