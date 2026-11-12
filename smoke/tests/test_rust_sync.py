@@ -829,7 +829,7 @@ class StderrWordingTests(unittest.TestCase):
         one_occurrence(self.error, 'format!("; left out: {}{more}", shown.join(", "))', "src/review/error.rs")
         one_occurrence(self.error, 'format!(", and {rest} more")', "src/review/error.rs")
         rendered = "error: x; left out: a b (binary), .magi/c (ignored), and 2 more"
-        entries, failure = code_review._omissions(rendered)
+        entries, failure = code_review.omissions(rendered)
         self.assertEqual("", failure)
         self.assertEqual([("a b", "binary"), (".magi/c", "ignored")], entries)
 

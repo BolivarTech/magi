@@ -3251,7 +3251,10 @@ class _RelayHandler(_RecordingHandler):
     """Records each request's path and body, forwards it to the upstream, streams the answer back.
 
     Answers HTTP/1.0 and closes, so the streamed body needs no framing of its
-    own; a request it cannot keep whole (chunked, or over
+    own (MAGI FIX, MS3 §6 loop13, declared: ``Content-Length`` and
+    ``Transfer-Encoding`` are dropped from the reply and EOF delimits the body,
+    so a reply cut short reads as complete to the product; the relay observes
+    requests, never the integrity of a response); a request it cannot keep whole (chunked, or over
     :data:`RELAY_MAX_BODY_BYTES`) is refused and marks the record incomplete.
     """
 

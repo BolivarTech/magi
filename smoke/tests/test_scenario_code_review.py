@@ -491,7 +491,7 @@ class CodeReviewScenarioTests(unittest.TestCase):
         for i in range(len(body) - n + 1):
             outcome = _outcomes("S49", r, log=b"path " + body[i:i + n] + b".txt")
             self.assertEqual(Outcome.FAIL, outcome[code_review.S49_ASSERTIONS[2]], i)
-        windows = set(code_review._with_slices((secret,), (body,)))
+        windows = set(code_review.with_slices((secret,), (body,)))
         self.assertEqual(len(windows), len(body) - n + 2, "non-uniform")
 
     def test_s49_passes_the_secret_assertion_with_no_log_directory(self) -> None:

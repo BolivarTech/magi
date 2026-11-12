@@ -85,7 +85,6 @@ S54_EXPECTED_OMISSIONS = [(runs.REVIEW_KEYBLOCK_FILE, "secret")]
 #: The leak probe S49 shares (:func:`smoke.scenarios.code_review.with_slices`).
 #: MAGI FIX (MS3 §6 loop9): one definition for S49, S53 and S54; the floor is 6 bytes (loop12).
 MIN_LEAK_FRAGMENT = code_review.MIN_LEAK_FRAGMENT
-_with_slices = code_review.with_slices
 
 
 def _no_capture(texts, run_id):
@@ -106,7 +105,7 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodie
     """Judge an assertion that none of *needles* left the process.
 
     Reads stdout, stderr and the captured run log, for each needle and a
-    slice from inside it (:func:`_with_slices`). The needles are never
+    slice from inside it (:func:`smoke.scenarios.code_review.with_slices`). The needles are never
     printed, only the outputs that hold one. With *relayed*, every request
     the recording relay forwarded is read too (MAGI §6 MS3 loop9: the egress
     itself, the trio's prompts and the embedder's texts included), and a run
@@ -121,7 +120,7 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodie
             so a needle is never compared with text.
         needles: Byte strings that must appear in no output.
         bodies: Their random bodies, looked for by every fragment of at least
-            :data:`MIN_LEAK_FRAGMENT` bytes (:func:`_with_slices`).
+            :data:`MIN_LEAK_FRAGMENT` bytes (:func:`smoke.scenarios.code_review.with_slices`).
         what: Short name of what the needles are, for the failure detail.
         relayed: Whether the run's forwarded requests are read too.
 
@@ -130,7 +129,7 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodie
         when none does but a log file could not be read whole; otherwise
         ``PASS`` (an absent log directory carries nothing).
     """
-    needles = _with_slices(needles, bodies)
+    needles = code_review.with_slices(needles, bodies)
     outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
                ("the run log", run.review_log or ()))
     if relayed:

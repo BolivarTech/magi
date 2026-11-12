@@ -269,7 +269,7 @@ class S54Tests(unittest.TestCase):
     def test_every_one_of_the_three_assertions_is_judged_on_a_hang_or_no_capture(self) -> None:
         # [MAGI S6 MS3 loop3, R7a Melchior; pinned] `_refusal`, written for S48/S49's two texts,
         # loops over all of the texts it is given on these paths, so S54's third is never lost.
-        from smoke.scenarios.code_review import _refusal
+        from smoke.scenarios.code_review import refusal as _refusal
         hung = _result("R19", 0, None, b"", timed_out=True)
         for run, outcome in ((None, Outcome.CANNOT_TEST), (hung, Outcome.FAIL)):
             with self.subTest(outcome=outcome):

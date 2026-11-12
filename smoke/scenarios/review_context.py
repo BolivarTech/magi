@@ -54,6 +54,7 @@ from smoke import runs
 from smoke.errors import ProductOutputError
 from smoke.outcome import Finding, Outcome
 from smoke.registry import scenario
+from smoke.scenarios import code_review
 
 #: The verbatim assertion texts of S52.
 S52_ASSERTIONS = (
@@ -82,7 +83,7 @@ DEGRADED_LABELS = ("index unavailable", "the embedder did not answer")
 
 
 def _finding(index, outcome, detail=""):
-    """Build the finding for assertion *index* of :data:`S52_ASSERTIONS`.
+    """Build the finding for assertion *index* of :data:`S52_ASSERTIONS` (the shared builder).
 
     Args:
         index: Position in :data:`S52_ASSERTIONS`.
@@ -92,12 +93,11 @@ def _finding(index, outcome, detail=""):
     Returns:
         Finding: The finding.
     """
-    return Finding(assertion=S52_ASSERTIONS[index], outcome=outcome, detail=detail,
-                   run_id=RUN_ID)
+    return code_review.finding(S52_ASSERTIONS, index, outcome, RUN_ID, detail)
 
 
 def _verdict(index, held, detail):
-    """Turn a boolean check into a ``PASS`` or ``FAIL`` finding.
+    """Turn a boolean check into a ``PASS`` or ``FAIL`` finding of S52 (the shared builder).
 
     Args:
         index: Position in :data:`S52_ASSERTIONS`.
@@ -111,7 +111,7 @@ def _verdict(index, held, detail):
         >>> _verdict(0, True, "x").outcome.value
         'PASS'
     """
-    return _finding(index, Outcome.PASS if held else Outcome.FAIL, "" if held else detail)
+    return code_review.verdict(S52_ASSERTIONS, index, RUN_ID, held, detail)
 
 
 @scenario("S52", assertions=S52_ASSERTIONS, run=RUN_ID, needs_backend=True)
@@ -232,7 +232,7 @@ S55_RUN_ID = "R18"
 
 
 def _s55_finding(index, outcome, detail=""):
-    """Build the finding for assertion *index* of :data:`S55_ASSERTIONS`.
+    """Build the finding for assertion *index* of :data:`S55_ASSERTIONS` (the shared builder).
 
     Args:
         index: Position in :data:`S55_ASSERTIONS`.
@@ -242,8 +242,7 @@ def _s55_finding(index, outcome, detail=""):
     Returns:
         Finding: The finding.
     """
-    return Finding(assertion=S55_ASSERTIONS[index], outcome=outcome, detail=detail,
-                   run_id=S55_RUN_ID)
+    return code_review.finding(S55_ASSERTIONS, index, outcome, S55_RUN_ID, detail)
 
 
 def _degraded_labels(trimmed):
@@ -279,6 +278,15 @@ def a_review_with_its_embedder_up_is_not_degraded(run):
 
     Both declarations must be present and well typed: a missing key is shape
     drift and a ``FAIL``, never a pass by absence.
+
+    Declared preconditions (MAGI FIX, MS3 §6 loop13): the third assertion
+    expects R18's doc chunk to be embedded, which holds while the environment's
+    documentation index does not already carry it. The review workspace is
+    rebuilt on every run (``smoke/scratch/review-ws``) with a fresh copy of the
+    environment's ``.magi``, and nothing in the environment indexes R18's doc
+    comment, so the chunk is new each time; an environment whose database
+    already held it would make the product skip the embedding, and the
+    assertion would read that as a defect (a ``--reset-env`` clears it).
 
     Args:
         run: R18's ``RunResult``, or ``None`` when the run produced no capture.
@@ -345,38 +353,6 @@ S57_ASSERTIONS = (
 _ANSWER_CODE = "pub fn answer"
 
 
-def _all(texts, run_id, outcome, detail):
-    """One finding per entry of *texts*, each *outcome* with *detail*.
-
-    Args:
-        texts: The assertion texts.
-        run_id: The run they read.
-        outcome: The outcome of each.
-        detail: The cause of each.
-
-    Returns:
-        list: The findings, in order.
-    """
-    return [Finding(assertion=a, outcome=outcome, detail=detail, run_id=run_id) for a in texts]
-
-
-def _judged(texts, index, run_id, held, detail):
-    """A ``PASS`` or ``FAIL`` finding for assertion *index* of *texts*.
-
-    Args:
-        texts: The assertion texts.
-        index: Its position.
-        run_id: The run it read.
-        held: Whether it held.
-        detail: The cause when it did not.
-
-    Returns:
-        Finding: The finding.
-    """
-    return Finding(assertion=texts[index], outcome=Outcome.PASS if held else Outcome.FAIL,
-                   detail="" if held else detail, run_id=run_id)
-
-
 @scenario("S56", assertions=S56_ASSERTIONS, run="R20", needs_backend=True)
 def documentation_comes_from_the_reviewed_commit(run):
     """Check that a commit review indexes that commit's doc comment, never the working tree's.
@@ -389,14 +365,14 @@ def documentation_comes_from_the_reviewed_commit(run):
     """
     texts = S56_ASSERTIONS
     if run is None or run.output is None:
-        yield from _all(texts, "R20", Outcome.CANNOT_TEST, "run R20 produced no capture")
+        yield from code_review.all_cannot_test(texts, "R20", "run R20 produced no capture")
         return
     code = run.output.exit_code
-    yield _judged(texts, 0, "R20", code == EXIT_OK, "exited %d" % code)
+    yield code_review.verdict(texts, 0, "R20", code == EXIT_OK, "exited %d" % code)
     if run.request_bodies is None:
-        yield from _all(texts[1:], "R20", Outcome.CANNOT_TEST, "the relay's record is missing or incomplete")
+        yield from code_review.all_cannot_test(texts[1:], "R20", "the relay's record is missing or incomplete")
         return
-    yield _judged(texts, 1, "R20",
+    yield code_review.verdict(texts, 1, "R20",
                   _chunk_sent(run.request_bodies, runs.REVIEW_COMMITTED_DOC.decode(), _ANSWER_CODE),
                   "no embedded text is the committed doc comment alone")
     # MAGI FIX (MS3 §6 loop12): RV21/RV22 forbid another revision's DOCUMENTATION, which reaches a
@@ -405,7 +381,7 @@ def documentation_comes_from_the_reviewed_commit(run):
     # it is looked for in embedding requests only; the dirty working-tree copy is in no diff.
     dirty = [p for p, b in run.request_bodies if runs.REVIEW_DIRTY_DOC in b]
     parent = _chunk_sent_any(run.request_bodies, runs.REVIEW_PARENT_DOC.decode())
-    yield _judged(texts, 2, "R20", not dirty and not parent,
+    yield code_review.verdict(texts, 2, "R20", not dirty and not parent,
                   "the working tree's doc comment went to %s, or the parent's was embedded: %s"
                   % (dirty, parent))
 
@@ -427,10 +403,10 @@ def validated_history_reaches_the_trio(run):
     texts = S57_ASSERTIONS
     # MAGI FIX (MS3 §6 loop10): a measured review that left no output crashed the scenario.
     if run is None or run.output is None or len(run.setup_outputs) != 2:
-        yield from _all(texts, "R21", Outcome.CANNOT_TEST, "run R21 did not run its three reviews")
+        yield from code_review.all_cannot_test(texts, "R21", "run R21 did not run its three reviews")
         return
     codes = [o.exit_code for o in run.setup_outputs + (run.output,)]
-    yield _judged(texts, 0, "R21", codes == [EXIT_OK] * 3, "the reviews exited %s" % codes)
+    yield code_review.verdict(texts, 0, "R21", codes == [EXIT_OK] * 3, "the reviews exited %s" % codes)
     try:
         findings = run.setup_outputs[0].json().get(CODE_REVIEW_KEY, {}).get("findings")
     except (ProductOutputError, AttributeError):
@@ -446,7 +422,7 @@ def validated_history_reaches_the_trio(run):
         yield Finding(assertion=texts[1], outcome=Outcome.CANNOT_TEST, run_id="R21",
                       detail="the relay's record is missing or incomplete")
     else:
-        yield _judged(texts, 1, "R21", _history_served(run.request_bodies, located),
+        yield code_review.verdict(texts, 1, "R21", _history_served(run.request_bodies, located),
                       "no trio prompt carries an attended history item of the first review's "
                       "findings on %s" % runs.REVIEW_HISTORY_FILE)
 
