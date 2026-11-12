@@ -2476,7 +2476,7 @@ impl App {
         // MAGI FIX (MS3 §6 loop11): after a failed review too: the shared runner may hold an
         // earlier review's history (`failed_review_still_drains`).
         if let Some(warning) =
-            crate::tools::code_review::finish_after_delivered_report(runner.as_ref()).await
+            crate::tools::code_review::finish_after_delivered_report(runner.as_ref(), &cancel).await
         {
             let warning = crate::agent::Agent::sanitize_text(&warning);
             apply_response(self, AgentResponse::Error(warning));

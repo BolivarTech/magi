@@ -375,24 +375,30 @@ fn past(deadline: Option<std::time::Instant>) -> bool {
 }
 
 /// [`finish_after_report`] for a surface whose report is delivered and that has no run deadline
-/// or cancellation of its own: bounded by [`POST_REPORT_LIMIT_SECS`]. Past it the surface goes
-/// on, says so, and leaves the work to finish on its blocking thread.
+/// of its own (the subcommand, the TUI): bounded by [`REVIEW_DEADLINE_MARGIN_SECS`], and ended at
+/// once by the run's `cancel` (the same token it ran the review with). Past the bound the surface
+/// goes on, says so, and leaves the work to finish on its blocking thread; the TUI is deaf to keys
+/// while it waits, so the wait is the margin, not the work's own [`POST_REPORT_LIMIT_SECS`].
 ///
 /// # Arguments
 /// * `runner` - The runner whose reviews left work.
+/// * `cancel` - The run's cancellation.
 ///
 /// # Returns
 /// The work's warning, a note that it was cut, or `None`.
 // MAGI FIX (MS3 §6 loop3): the subcommand and the TUI waited for it with no bound.
-pub(crate) async fn finish_after_delivered_report(runner: &dyn CodeReviewRunner) -> Option<String> {
+// MAGI FIX (MS3 §6 loop13): the token was never read and the bound was 120 s.
+pub(crate) async fn finish_after_delivered_report(
+    runner: &dyn CodeReviewRunner,
+    cancel: &CancellationToken,
+) -> Option<String> {
     finish_after_report(
         runner,
-        Some(Duration::from_secs(POST_REPORT_LIMIT_SECS)),
-        None,
+        Some(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS)),
+        Some(cancel),
     )
     .await
 }
-
 /// Runs `fut` until it ends or `cancel` fires.
 ///
 /// On cancel the future, and the batch in flight with it, is dropped. Biased toward `fut`: a
@@ -1178,9 +1184,13 @@ impl Tool for CodeReviewTool {
         // back; a history that could not be updated is said in it, never dropped.
         // MAGI FIX (MS3 §6 loop11): it runs whether the review succeeded or not, as the
         // subcommand's does: a shared runner may hold an earlier review's history.
-        let limit = self
-            .deadline
-            .map(|d| post_report_limit(d.saturating_duration_since(Instant::now())));
+        // MAGI FIX (MS3 §6 loop13): with no run deadline the margin still bounds the wait.
+        let limit = Some(
+            self.deadline
+                .map_or(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS), |d| {
+                    post_report_limit(d.saturating_duration_since(Instant::now()))
+                }),
+        );
         let warning = finish_after_report(self.runner.as_ref(), limit, Some(cancel)).await;
         let rendered = match ran {
             Ok(rendered) => rendered,
