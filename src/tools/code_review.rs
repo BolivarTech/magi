@@ -199,6 +199,23 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
     /// Any [`ReviewError`] of the input, the filter or the batching.
     fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError>;
 
+    /// [`Self::plan`] off the async runtime: the plan reads git and the filesystem, so a surface
+    /// that awaits (the tool's execution, the runner's digest re-check) asks for it here and a
+    /// large input never starves a runtime worker or makes `--timeout` unreachable. The default
+    /// runs `plan` inline, for a runner with no blocking work.
+    ///
+    /// # Arguments
+    /// * `input` - What to review.
+    ///
+    /// # Returns
+    /// The plan.
+    ///
+    /// # Errors
+    /// As [`Self::plan`].
+    // MAGI FIX (MS3 §6 loop13): both plans ran inline on the runtime.
+    async fn plan_blocking(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+        self.plan(input)
+    }
     /// Runs an approved plan until it ends or `cancel` fires.
     ///
     /// # Arguments
@@ -935,7 +952,7 @@ impl CodeReviewTool {
     /// a fresh plan.
     // MAGI FIX (MS3 §6 loop3): a prompt for other arguments was dropped and a fresh plan run.
     // MAGI FIX (MS3 §6 loop7): a prompt whose plan failed let a later, unshown plan run.
-    fn plan_for(&self, args: &Value, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+    async fn plan_for(&self, args: &Value, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
         let cached = self
             .approved
             .lock()
@@ -944,11 +961,11 @@ impl CodeReviewTool {
         match cached {
             Some((shown, Some(plan))) if &shown == args => Ok(plan),
             Some((shown, None)) if &shown == args => {
-                self.runner.plan(input)?;
+                self.runner.plan_blocking(input).await?;
                 Err(ReviewError::ContentChanged)
             }
             Some(_) => Err(ReviewError::ContentChanged),
-            None => self.runner.plan(input),
+            None => self.runner.plan_blocking(input).await,
         }
     }
 
@@ -1128,6 +1145,28 @@ fn post_report_limit(left: Duration) -> Duration {
         .min(Duration::from_secs(REVIEW_DEADLINE_MARGIN_SECS))
 }
 
+/// [`CodeReviewRunner::plan`] from a synchronous caller ([`Tool::approval_detail`], which is not
+/// async): on a multi-thread runtime the worker is handed over first (`block_in_place`), so the
+/// plan's git and filesystem work does not hold it; on any other runtime it runs inline.
+///
+/// # Arguments
+/// * `runner` - The runner.
+/// * `input` - What to review.
+///
+/// # Returns
+/// The plan, or its error.
+// MAGI FIX (MS3 §6 loop13): the approval's plan ran inline on the async worker.
+fn plan_in_place(
+    runner: &dyn CodeReviewRunner,
+    input: &ReviewInput,
+) -> Result<ReviewPlan, ReviewError> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| runner.plan(input))
+        }
+        _ => runner.plan(input),
+    }
+}
 /// A review error as the tool's execution error, redacted.
 fn tool_error(e: &ReviewError) -> ToolError {
     // MAGI FIX (MS3 §6 loop12): stripped first, as `egress_safe` does, so a control character
@@ -1178,7 +1217,10 @@ impl Tool for CodeReviewTool {
     async fn execute(&self, args: Value, cancel: &CancellationToken) -> ToolResult<Value> {
         let input = parse_tool_input(&args)?;
         let budget = self.review_budget()?;
-        let plan = self.plan_for(&args, &input).map_err(|e| tool_error(&e))?;
+        let plan = self
+            .plan_for(&args, &input)
+            .await
+            .map_err(|e| tool_error(&e))?;
         let ran = self.runner.run(plan, budget, cancel).await;
         // The tool's report is its result, so what follows it runs before the result is handed
         // back; a history that could not be updated is said in it, never dropped.
@@ -1239,7 +1281,9 @@ impl Tool for CodeReviewTool {
     /// (`ContentChanged`), never run unshown.
     fn approval_detail(&self, args: &Value) -> Option<String> {
         let input = parse_tool_input(args).ok()?;
-        let plan = self.runner.plan(&input).ok();
+        // MAGI FIX (MS3 §6 loop13): the trait method is sync, so the plan is run where it frees
+        // its worker (plan_in_place); a surface that awaits uses plan_blocking.
+        let plan = plan_in_place(self.runner.as_ref(), &input).ok();
         let detail = plan
             .as_ref()
             .map(|p| format!("{} batches; worst case {} s", p.batches, p.worst_case_secs));
@@ -1613,6 +1657,19 @@ impl ProductionReviewRunner {
 
 #[async_trait]
 impl CodeReviewRunner for ProductionReviewRunner {
+    async fn plan_blocking(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+        // A snapshot built from the same parts (the guard is rebuilt, never shared): the plan
+        // reads only them, never the follow-up queue.
+        let parts = self.parts.clone();
+        let input = input.clone();
+        tokio::task::spawn_blocking(move || {
+            let runner = ProductionReviewRunner::new(parts)
+                .map_err(|e| ReviewError::Io(egress_text(&e.to_string())))?;
+            runner.plan(&input)
+        })
+        .await
+        .map_err(|e| ReviewError::Io(egress_text(&e.to_string())))?
+    }
     fn plan(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
         let input = pin_refs(&path_input(&self.workspace, input.clone()), &self.git)?;
         let ignored = self.ignored(&input)?;
@@ -1695,7 +1752,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
             // that window; a revision review reads git objects and has no such window.
             if plan.batches > 0 {
                 if let Some(approved) = plan.digest.as_deref() {
-                    let now = self.plan(&plan.input)?;
+                    let now = self.plan_blocking(&plan.input).await?;
                     if now.batches != plan.batches {
                         return Err(ReviewError::PlanChanged {
                             approved: plan.batches,
