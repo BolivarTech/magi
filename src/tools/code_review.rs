@@ -1737,8 +1737,10 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 )?;
             }
             // The local preparation from here (the re-check below, then the documentation) is
-            // counted once, as the context source's `index_ms`, which the pipeline adds to
-            // `prep_ms`; the re-check's re-plan was counted nowhere.
+            // counted once: as prep_ms, from docs_started, which this run hands the pipeline as
+            // prep_started below (a given start never adds the context source's index_ms,
+            // given_start_counts_index_once); index_ms is only what the source reports for a
+            // run that gave no start. The re-check's re-plan is inside that span.
             // MAGI FIX (MS3 §6 loop5): the clock starts before the re-check, not after it.
             let docs_started = Instant::now();
             // MAGI FIX (MS3 §6 loop4): the approved plan is checked again here, before the
@@ -3362,6 +3364,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn egress_text_strips_then_masks() {
+        // [MAGI S6 MS3 loop13, R5] The one scrubber of an error string also takes the control
+        // characters out first, so every call site (the setup notice, the CLI warning, the TUI)
+        // has the order and none can forget the strip: a control byte inside a key would hide it
+        // from the detector and arrive as terminal input once the key was masked around it.
+        let key = concat!("sk-ant-api03-", "BBBBBBBBBB\u{1b}BBBBBBBBBB"); // allow-secret-scan
+        let out = egress_text(&format!("refused {key} \u{1b}[2J"));
+        assert!(!out.contains("BBBBBBBBBB"), "{out}");
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+    }
     #[test]
     fn post_report_notes_hold_anywhere() {
         // MAGI FIX (MS3 §6 loop11): the notes promised a "next review", which a one-shot
