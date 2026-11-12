@@ -23,7 +23,7 @@ use magi_core::finding_id::generate_finding_id;
 
 use super::consolidate::{ConsolidatedFinding, NEUTRAL_CATEGORY};
 use super::gate::{GateState, GateVerdict};
-use super::secrets::{holds_key_block, mask_secrets};
+use super::secrets::{find_secret, holds_key_block, mask_secrets};
 use super::source::GitCommand;
 
 /// Separator that joins the merged titles and details of a finding.
@@ -253,6 +253,12 @@ enum Signal {
     /// The reviewed commit is not an ancestor of `head`, and both resolve: `head` is on another
     /// line (another branch), so there is no signal there, a definitive answer of git, and a
     /// validated entry goes back to `Pending` like [`Self::NoLaterCommit`].
+    ///
+    /// Residual, declared (MAGI FIX, MS3 §6 loop13, R3 Melchior): `merge-base --is-ancestor`
+    /// reports "not an ancestor" and a failure to run with the same non-zero exit, so a git that
+    /// fails for another reason while both commits still resolve reads as `OffLine`. The effect
+    /// is the safe direction (a validated entry goes back to `Pending` and is not served until
+    /// the next review re-checks it); no entry is ever promoted by it.
     OffLine,
     /// No answer: an entry that cannot be checked, a git that failed, a diff not understood.
     Unknown,
@@ -521,6 +527,11 @@ pub fn entries_from_review(
         .filter(|(_, v)| matches!(v.state, GateState::Kept | GateState::LowConfidence))
         .filter_map(|(f, _)| {
             let (file, line) = (f.file.as_ref()?, f.line?);
+            // MAGI FIX (MS3 §6 loop13): no line to classify in an empty path, and a secret-shaped
+            // one never reaches the clear `file` column (the read side withholds it as well).
+            if file.is_empty() || find_secret(file).is_some() {
+                return None;
+            }
             let title = f.titles.join(MERGED_TEXT_SEPARATOR);
             let detail = f.details.join(MERGED_TEXT_SEPARATOR);
             // MAGI FIX (MS3 §6 loop4): a backstop at storage, on top of the masking at the
