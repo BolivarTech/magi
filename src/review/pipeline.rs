@@ -5683,6 +5683,36 @@ mod tests {
     }
 
     #[test]
+    fn unexplained_unit_is_context_only() {
+        // [MAGI S6 MS3 loop13, R4] A containing unit no hunk of its batch explains was reviewed
+        // for RV09 but had no gate face, so a finding on it reached the gate with no code. One
+        // predicate (`explained_unit`) now decides both: the unit is context only, like any item.
+        let hunk = BatchItem::Hunk {
+            file: "a.rs".into(),
+            text: "x".into(),
+            first_line: 40,
+            last_line: 40,
+            old_first_line: 40,
+            old_last_line: 40,
+        };
+        let batch = ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![hunk],
+        };
+        let contexts = vec![vec![ctx(ContextKind::Unit, "a.rs", "far", Some((1, 3)))]];
+        let (batches, done) = ([batch], BTreeSet::from([0]));
+        let mut reviewed = Reviewed::default();
+        record_shown_context(&mut reviewed, &batches, &contexts, &done);
+        assert!(!reviewed.contains_line("a.rs", 2));
+        let mut faces = HashMap::new();
+        add_unit_faces(&mut faces, &batches, &contexts, &done);
+        assert!(faces
+            .get("a.rs")
+            .is_none_or(|f| f.new.is_empty() && f.old.is_empty()));
+    }
+    #[test]
     fn old_unit_lines_keep_their_side() {
         // [MAGI S6 MS3 loop8, R4 Caspar] An old-side unit's numbers are reviewed for RV09 (a
         // finding has no side, as a hunk's deleted lines), and the side lives in the gate's faces:
@@ -5705,10 +5735,20 @@ mod tests {
         gone.old_side = true;
         let contexts = vec![vec![gone]];
         let mut reviewed = Reviewed::default();
-        record_shown_context(&mut reviewed, &contexts, &BTreeSet::from([0]));
+        record_shown_context(
+            &mut reviewed,
+            std::slice::from_ref(&batch),
+            &contexts,
+            &BTreeSet::from([0]),
+        );
         assert!(reviewed.contains_line("a.rs", 3));
         let mut faces = HashMap::new();
-        add_unit_faces(&mut faces, &[batch], &contexts, &BTreeSet::from([0]));
+        add_unit_faces(
+            &mut faces,
+            std::slice::from_ref(&batch),
+            &contexts,
+            &BTreeSet::from([0]),
+        );
         let f = faces.get("a.rs").expect("faces");
         assert_eq!((f.new.clone(), f.old.clone()), (vec![], vec![(1, 3)]));
     }
