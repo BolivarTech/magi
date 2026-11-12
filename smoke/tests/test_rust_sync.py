@@ -2047,6 +2047,14 @@ class ReviewMaskingSyncTests(unittest.TestCase):
             with self.subTest(opening=opening):
                 self.assertNotIn(opening, lowered)
 
+    def test_the_s54_keyblock_path_holds_no_opening_of_any_product_pattern(self) -> None:
+        # MAGI FIX (MS3 §6 loop12, R7b Melchior): a path that matched would leave the file out for
+        # its path, and S54 would stop exercising the key block's content while still listing `secret`.
+        lowered = runs.REVIEW_KEYBLOCK_FILE.lower()
+        for opening in _secret_openings():
+            with self.subTest(opening=opening):
+                self.assertNotIn(opening, lowered)
+
     def test_the_openings_parse_includes_every_github_token_prefix(self) -> None:
         self.assertTrue({"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "://"} <= set(_secret_openings()))
 
@@ -2065,6 +2073,33 @@ class ReviewMaskingSyncTests(unittest.TestCase):
                            % re.escape(expected["pattern"]), secrets_rs)
         self.assertEqual(1, len(found), found)
         self.assertTrue(runs._TOY_MASKED_PREFIX.startswith(found[0]), found)
+
+    def test_the_readme_context_and_history_numbers_are_the_products_constants(self) -> None:
+        # MAGI FIX (MS3 §6 loop12, R7b Melchior): the Context and History paragraphs publish these
+        # numbers; a constant that moved left the documentation wrong with every test green.
+        readme = _source("README.md")
+        # (constant, file, the number as the README writes it)
+        pinned = (
+            ("MAX_CALLERS_PER_NAME", "src/review/rag.rs", "at most 10 per name", 10),
+            ("DOC_SEARCH_K", "src/memory/review_rag.rs", "the 8 chunks closest", 8),
+            ("REINDEX_TIMEOUT_SECS", "src/memory/review_rag.rs", "bounded at 120 s", 120),
+            ("MAX_DOC_CHUNKS", "src/review/docs.rs", "MAX_DOC_CHUNKS (20000)", 20_000),
+            ("MAX_DOC_INDEX_BYTES", "src/review/docs.rs", "MAX_DOC_INDEX_BYTES (33554432)", 32 * 1024 * 1024),
+            ("MAX_HISTORY_PER_BATCH", "src/memory/review_history.rs", "MAX_HISTORY_PER_BATCH (32)", 32),
+            ("MAX_INDEX_OCCURRENCES", "src/review/index.rs", "(8 000 000 places)", 8_000_000),
+            ("MAX_RECLASSIFY_PER_REVIEW", "src/review/history.rs", "up to 200 findings", 200),
+            ("RECLASSIFY_BUDGET_SECS", "src/memory/review_rag.rs", "for at most 60 s", 60),
+            ("MAX_GC_REFS", "src/review/docs.rs", "With more than 64 local refs", 64),
+        )
+        for name, path, phrase, value in pinned:
+            with self.subTest(constant=name):
+                self.assertIn(phrase, readme)
+                text = without_comments(_source(path))
+                found = one_definition(text, r"pub const %s: \w+ = ([0-9_ *]+);" % name, path).group(1)
+                product = 1
+                for factor in found.split("*"):  # `20_000` or `32 * 1024 * 1024`
+                    product *= int(factor.replace("_", "").strip())
+                self.assertEqual(value, product, found)
 
     def test_the_readme_purge_tables_are_the_schemas_review_tables(self) -> None:
         schema = without_comments(_source("src/system/database.rs"))
