@@ -586,6 +586,10 @@ pub fn callers_for(
         let mut places: Vec<(&str, u32)> = index.occurrences(name).collect();
         // MAGI FIX (MS3 §6 loop11): only the first MAX_CALLER_SCAN_PER_NAME are inspected, in
         // O(occurrences) (a selection, not a full sort); a cut scan is declared.
+        // MAGI FIX (MS3 §6 loop12): `select_nth_unstable(k)` leaves the k smallest elements, in
+        // no order, before index k, so the truncation keeps exactly the first k by `(file, line)`
+        // (a false positive was raised here); `the_cap_keeps_the_first_by_file` pins it with the
+        // listing in the opposite order.
         let cut = places.len() > MAX_CALLER_SCAN_PER_NAME;
         if cut {
             places.select_nth_unstable(MAX_CALLER_SCAN_PER_NAME);
