@@ -75,7 +75,8 @@ pub struct Skipped {
 /// Serialized as the text the report shows, spelled in one place (`SkipCause::as_str`, pinned by
 /// `skip_causes_serialize_with_the_spec_texts`): `binary`, `not utf-8`, `secret`, `ignored`,
 /// `outside workspace`, `too large`, `not a regular file`, `hard link`, `unreadable`,
-/// and `disappeared`. A file named explicitly that is skipped fails with that same text as the cause
+/// `disappeared` and `repeated section` (a second, different diff for a path already listed).
+/// A file named explicitly that is skipped fails with that same text as the cause
 /// of [`ReviewError::NotReviewable`].
 // MAGI FIX (S6 loop 13, A2-m6 / A2-b5): the list named 7 of the 10 causes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +364,10 @@ fn classify_files(
 }
 
 /// A hash of one diff section, to tell a repeated listing from a different one. O(len).
+///
+/// `DefaultHasher::new()` is a fixed-key hasher: this is a guard against an honest repeat, not
+/// collision resistance against an adversary (two colliding sections would read as one repeated
+/// listing, and the second is declared as `repeated section`, never silently dropped).
 fn diff_hash(diff: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     diff.hash(&mut hasher);
@@ -1636,6 +1641,7 @@ mod tests {
             SkipCause::OutsideWorkspace,
             SkipCause::TooLarge,
             SkipCause::NotRegularFile,
+            SkipCause::DuplicateSection,
         ]
         .iter()
         .map(|c| serde_json::to_string(c).expect("serializes"))
@@ -1649,7 +1655,8 @@ mod tests {
                 "\"ignored\"",
                 "\"outside workspace\"",
                 "\"too large\"",
-                "\"not a regular file\""
+                "\"not a regular file\"",
+                "\"repeated section\""
             ]
         );
     }
