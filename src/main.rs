@@ -8828,6 +8828,23 @@ mod envelope_audit_guard {
 mod tests {
 
     #[test]
+    fn a_review_setup_failure_is_a_screen_notice_with_secrets_masked() {
+        // [MAGI S6 MS3 loop13, R5] A failed review-store or embedder setup was only in the run
+        // log, so the TUI operator saw reviews run without documentation and never why. The same
+        // cause now reaches the startup notices, masked like the log's.
+        let key = concat!("sk-ant-", "api03-", "FFFFFFFFFFFFFFFFFFFF"); // allow-secret-scan
+        let notice = super::review_setup_notice(
+            super::REVIEW_STORES_FAILED,
+            &format!("refused key {key} at https://u:p@host/v1"),
+        );
+        let text = format!("{notice:?}");
+        assert!(text.contains("without documentation"), "{text}");
+        assert!(
+            !text.contains("sk-ant-") && !text.contains("u:p@"),
+            "{text}"
+        );
+    }
+    #[test]
     fn a_review_setup_failure_reaches_the_log_with_its_secrets_masked() {
         // [MAGI S6 MS3 loop2, R5 Caspar/Balthasar] Every other error path of the tool masks the
         // RV22 patterns, not only URL credentials; these two logged with the URL redaction alone.
