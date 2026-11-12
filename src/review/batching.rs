@@ -458,12 +458,27 @@ impl<'a> HunkLines<'a> {
             (first.next(), first.next()),
             (Some(a), Some(b)) if a.starts_with("--- ") && b.starts_with("+++ ")
         );
+        // MAGI FIX (MS3 §6 loop13): a headerless text counts from `start` only when it has the
+        // shape `parse_hunks` writes (an optional file-header pair, then body lines); one led by
+        // anything else (`diff --git`, `index`, a combined diff's `@@@`) would be numbered by
+        // position and off by the lines before its body, so no counter runs for it.
+        let start = start.filter(|_| headerless_shape(text, file_header));
         Self {
             lines: text.split_inclusive('\n'),
             counters: if headed { None } else { start },
             outside: if !headed && file_header { 2 } else { 0 },
         }
     }
+}
+
+/// Whether a headerless hunk text has the shape [`HunkLines`] may count from the item's own first
+/// lines: after an optional `---`/`+++` file-header pair (`file_header`), every line is a body
+/// line (` `, `+`, `-`, `\`) or an empty one (a blank context line, a bare `\r`). O(bytes).
+fn headerless_shape(text: &str, file_header: bool) -> bool {
+    let skip = if file_header { 2 } else { 0 };
+    text.lines()
+        .skip(skip)
+        .all(|line| line.is_empty() || line.starts_with([' ', '+', '-', '\\', '\r']))
 }
 
 impl<'a> Iterator for HunkLines<'a> {
