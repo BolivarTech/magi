@@ -153,6 +153,11 @@ pub struct Filtered {
 }
 
 /// A file reviewed with its secrets masked (RV22): reviewed, never left out.
+///
+/// Its diff is rebuilt from the masked sides (diffmask); a body line that differs from its side's
+/// beyond a mask is replaced by the side's text, and the count is declared in the run log (one WARN
+/// per file), not per file in the report: the replaced text is always the masked side's, so the
+/// declaration is about drift between git's diff and the file, never about a secret.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Masked {
     /// The path, as it may leave the process ([`display_path`]).

@@ -114,7 +114,9 @@ pub(super) fn masked_raw_diff(
 /// anything else gives `None`, and the caller leaves the file out (`secret`).
 ///
 /// O(diff + sides) plus O(n log n) to index the n side lines once and O(log n × 80) per hunk for
-/// the function context (masked files only).
+/// the function context (masked files only), plus O(diff × s) for the divergence test, which
+/// runs [`mask_secrets`] (a full pattern scan and one `String`) on every body line, s being the
+/// scan's cost per line.
 ///
 /// # Returns
 ///
