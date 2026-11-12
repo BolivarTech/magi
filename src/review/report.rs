@@ -90,7 +90,10 @@ pub struct ReviewSummary {
     /// Files left out of the review, with their cause (both forms list at most
     /// [`MAX_OMISSIONS_SHOWN`] and declare the rest).
     pub skipped: Vec<Skipped>,
-    /// Files reviewed with their secrets masked (REQ-RV22), listed like `skipped`; never in it.
+    /// Files reviewed with their secrets masked (REQ-RV22), listed like `skipped`. The two lists
+    /// declare different things, so a path can be in both: the file reviewed masked (here) and a
+    /// context item of the same path the pipeline withheld (`skipped`, cause `secret`; a unit
+    /// holding a key block, a documentation source). Neither entry contradicts the other.
     pub masked: Vec<Masked>,
     /// Reviewed files with no language extractor (listed like `skipped`).
     pub no_extractor: Vec<String>,
