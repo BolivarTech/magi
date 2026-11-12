@@ -1156,7 +1156,9 @@ To purge what `code-review` keeps (the documentation index and the finding histo
 this in the same database:
 
 ```sql
-DELETE FROM code_review_docs; DELETE FROM code_review_doc_sources; DELETE FROM code_review_history;
+DELETE FROM code_review_docs;
+DELETE FROM code_review_doc_sources;
+DELETE FROM code_review_history;
 ```
 
 Use `DELETE FROM`, never `DROP TABLE`, for these three: a database missing one of them is

@@ -263,6 +263,9 @@ class ReviewRunDefinitionTests(unittest.TestCase):
 
     def test_the_rewrite_keeps_the_config_s_permissions(self) -> None:
         # [MAGI S6 MS3 loop9, R7a Caspar] the umask's mode replaced 0600; observed on the calls (Windows has none).
+        # MAGI FIX (MS3 §6 loop12, R7b Balthasar): no Windows skip on purpose. `os.stat` and `os.chmod`
+        # are both mocked, so the test reads no permission bit and passes on Windows (run there,
+        # the platform CI covers); a skip would drop its only run on that platform.
         with tempfile.TemporaryDirectory() as tmp:
             config = pathlib.Path(tmp) / "magi.toml"
             config.write_text('[embedding]\nbase_url = "http://emb/v1"\n', encoding="utf-8")

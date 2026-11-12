@@ -2396,7 +2396,10 @@ def point_embedding_at(config_path, url: str) -> None:
     by the product, which refuses a duplicate key. The ``[embedding]`` table is
     the only form it knows (the one ``magi init`` writes); a dotted key or an
     inline table, its key bare or quoted, is refused, named, and the file is
-    left as it was.
+    left as it was. The scan is line-based, not a TOML parse (MAGI FIX, MS3 §6
+    loop12): a line inside a multi-line string that reads ``embedding = ...`` is
+    refused too, loudly and by name, the safe direction; the harness's own
+    ``magi.toml`` holds no multi-line string.
 
     The write is atomic (:func:`_replace_bytes`); :func:`embedder_pointed_away`
     puts the file back when its block ends, so the rewrite never outlives its

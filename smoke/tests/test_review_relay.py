@@ -7,6 +7,7 @@ import dataclasses
 import http.server
 import json
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -151,6 +152,16 @@ class RelayTests(unittest.TestCase):
                 runs.point_embedding_at(path, "http://127.0.0.1:9/v1")
             self.assertEqual(broken, path.read_bytes())
 
+    def test_a_multiline_string_line_naming_the_embedder_is_refused_loudly(self) -> None:
+        # MAGI FIX (MS3 §6 loop12, R7a Caspar): declared line-based limit; a refusal, never a rewrite.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "magi.toml"
+            text = 'note = """\nembedding = 1\n"""\n[embedding]\nmodel = "m"\n'
+            path.write_text(text)
+            with self.assertRaises(HarnessError):
+                runs.point_embedding_at(path, "http://127.0.0.1:9/v1")
+            self.assertEqual(text, path.read_text(), "the file is left as it was")
+
     def test_setup_clears_the_embedder_rewrite(self) -> None:
         # MAGI FIX (MS3 §6 loop11, R7a Balthasar): a setup invocation inherited the run's flags.
         seen = []
@@ -204,6 +215,7 @@ class RelayTests(unittest.TestCase):
             with self.subTest(extra=extra), self.assertRaises(HarnessError):
                 runs.RunDefinition(**base, **extra)
 
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
     def test_a_setup_commit_records_exactly_its_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ws = pathlib.Path(tmp)
@@ -250,6 +262,22 @@ class RelayScenarioTests(unittest.TestCase):
         for bodies, want in ((R18_HEALTHY_REQUESTS, P), (unsent, F), (queried, F)):
             r = _with(_result("R18", 0, doc), request_bodies=bodies)
             self.assertEqual([want], _judged("S53", r, rm.S53_ASSERTIONS[3:]), bodies)
+
+    def test_s53_reads_the_gate_requests_too(self) -> None:
+        # MAGI FIX (MS3 §6 loop12, R7b Caspar): RV22 covers the gate's `state` (a finding with its
+        # code, sent to `/systemone`). S53's oracle reads every forwarded request, so a gate body
+        # with a window of the key fails it, and a masked state passes. R18's healthy record has
+        # no gate request (whether the trio reports a finding is the model's answer), so this
+        # exercises the oracle, not the product: the product side is
+        # `a_state_carrying_a_one_line_secret_is_sent_masked` in `src/review/gate.rs`.
+        doc = {"code_review": {"masked": rm.S53_EXPECTED_MASKED, "masked_unlisted": 0,
+                               "skipped": [], "skipped_unlisted": 0}}
+        part = rm.code_review.key_body(runs.REVIEW_MASKED_KEY)[3:3 + rm.MIN_LEAK_FRAGMENT]
+        masked = b'{"state": {"code": "let k = <redacted: anthropic-key>;"}}'
+        leaky = b'{"state": {"code": "let k = ' + part + b';"}}'
+        for gate, want in ((masked, P), (leaky, F)):
+            r = _with(_result("R18", 0, doc), request_bodies=R18_HEALTHY_REQUESTS + (("/v1/systemone", gate),))
+            self.assertEqual([want], _judged("S53", r, rm.S53_ASSERTIONS[3:]), gate)
 
     def test_s55_needs_the_chunk_and_the_query(self) -> None:
         doc = {"code_review": {"without_embedder": False, "trimmed": []}}
