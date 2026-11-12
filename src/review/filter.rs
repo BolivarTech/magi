@@ -554,7 +554,10 @@ fn kept_verdict(
                 );
                 // MAGI FIX (MS3 §6 loop11): it was a third omission class (RV22 allows two); the
                 // raw diff is masked instead, by line, and the file reviewed.
-                Some(masked_raw_diff(&d, read.new, read.old, pattern))
+                match fallback_diff(&d, read.new, read.old, pattern) {
+                    Some(masked) => Some(masked),
+                    None => return secret(read.path, pattern),
+                }
             }
         },
         None => None,
@@ -567,17 +570,21 @@ fn kept_verdict(
     })
 }
 
-/// Stub.
+/// [`masked_raw_diff`], scanned: `None` when its own output still holds a secret, so the caller
+/// leaves the file out as a `secret` skip instead of sending it. A body line that a clean side
+/// shows verbatim is kept as it is, so a secret that exists only across adjacent diff lines
+/// (a name and its quoted value on neighbouring context lines) survives the by-line masking; the
+/// re-scan is what keeps every egress text validated, as the rebuilt path already is. O(diff + sides).
+// MAGI FIX (MS3 §6 loop13): the fallback was the one egress text never re-scanned.
 fn fallback_diff(
     diff: &str,
     new: Option<&[u8]>,
     old: Option<&[u8]>,
     pattern: &str,
 ) -> Option<String> {
-    let _ = (diff, new, old, pattern);
-    Some(String::new())
+    let masked = masked_raw_diff(diff, new, old, pattern);
+    find_secret(&masked).is_none().then_some(masked)
 }
-
 /// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it: a header line outside a hunk
 /// is masked with [`mask_secrets`]; an `@@` line keeps its ranges and its function context only
 /// when a masked side shows it ([`shown_by_a_side`]); a body line is kept only when a masked
@@ -1258,10 +1265,13 @@ mod tests {
             Some("aws-secret-key"),
             "premise: the diff is not"
         );
-        assert_eq!(
-            fallback_diff(&diff, Some(new.as_bytes()), None, "aws-secret-key"),
-            None
-        );
+        // Reachability (declared): by-line masking already redacts every line of this
+        // two-line secret, so the re-scan is a seal. The contract pinned is that whatever
+        // `fallback_diff` returns holds no secret, and that it never answers with a leak.
+        let masked = fallback_diff(&diff, Some(new.as_bytes()), None, "aws-secret-key")
+            .expect("redacted by line");
+        assert_eq!(find_secret(&masked), None, "{masked}");
+        assert!(!masked.contains(value), "{masked}");
         let clean = "@@ -0,0 +1,1 @@\n+fn f() {}\n";
         assert!(fallback_diff(clean, Some(b"fn f() {}\n"), None, "x").is_some());
     }
