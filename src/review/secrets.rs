@@ -1824,6 +1824,18 @@ mod tests {
     }
 
     #[test]
+    fn outward_text_sees_through_ctrl() {
+        // MAGI FIX (MS3 §6 loop12): a control or format character inside a secret hid it from
+        // the detector, then was escaped and left both halves readable.
+        for hidden in ['\u{9b}', '\u{1b}', '\u{200b}', '\u{202e}'] {
+            let raw = format!("see sk-ant-api03-AAAAAAAAAA{hidden}AAAAAAAAAA now"); // allow-secret-scan
+            let out = outward_text(&raw);
+            assert!(!out.contains("AAAAAAAAAA"), "{hidden:?}: {out}");
+            assert!(out.contains("redacted"), "{out}");
+        }
+    }
+
+    #[test]
     fn a_pem_private_key_of_any_single_type_word_is_a_secret() {
         // [MAGI S6 MS2 loop 4, A2 Melchior] the type word is not a closed list: `ECDSA` and
         // `ED25519` keys were kept and sent. Public keys and certificates stay ordinary text.
