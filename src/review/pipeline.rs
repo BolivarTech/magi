@@ -1217,7 +1217,7 @@ impl ReviewTimer<'_> {
 /// (`backstop_masks_then_escapes`), so no mask runs on the finished prompt. The finished prompt is
 /// measured against `limit` (the code and context budget, [`prompt_limit_tokens`]): a mask is longer
 /// than many secrets, so RV04 holds on what is sent, not only on the accounting
-/// (`a_prompt_grown_by_masks_is_refused`). O(bytes).
+/// (`prompt_grown_by_masks_refused`). O(bytes).
 ///
 /// # Errors
 ///
@@ -2429,7 +2429,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_grown_by_masks_is_refused() {
+    fn prompt_grown_by_masks_refused() {
         // [MAGI S6 MS3 loop13, R4] RV04 was enforced on the accounting of the items, never on the
         // prompt sent: a mask is longer than many secrets, so a batch planned at the limit could
         // outgrow it once masked. The rendered prompt is measured and a typed error names it.
@@ -2975,7 +2975,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failure_message_is_redacted_where_stored() {
+    async fn failure_message_is_redacted() {
         // [MAGI S6 MS3 loop13, R4] A batch failure's text comes from the trio's error; it is
         // redacted where the summary stores it, whatever the producer did.
         let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan

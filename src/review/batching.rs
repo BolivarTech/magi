@@ -1097,7 +1097,7 @@ mod tests {
         // MAGI FIX (MS3 §6 loop12): the capacity hint added an eighth of the text, but each line
         // gains a whole prefix, so a file of short lines reallocated as it grew. The hint now
         // counts the prefixes: the buffer ends exactly full, never regrown (for numbers within
-        // `LINE_NUMBER_WIDTH` digits: `a_number_past_the_width_widens_its_prefix`).
+        // `LINE_NUMBER_WIDTH` digits: `wide_number_widens_prefix`).
         let short = "a\n".repeat(1_000);
         let numbered = number_lines(&short, 1);
         assert_eq!(numbered.capacity(), numbered.len());
@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_planner_reads_the_raw_limit() {
+    fn planner_alone_reads_raw_limit() {
         // [MAGI S6 MS3 loop13, R6b] `prompt_limit_tokens` is the one place the legend is
         // subtracted; a consumer going back to the raw batch limit (the T3.7 defect: the RAG
         // budget overshot by the legend) would name `batch_limit_tokens` outside `window.rs` and
@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn a_number_past_the_width_widens_its_prefix() {
+    fn wide_number_widens_prefix() {
         // [MAGI S6 MS3 loop13, R6b] `LINE_NUMBER_WIDTH` columns hold six digits; a seventh widens
         // the prefix (so the capacity hint of `numbering_never_regrows` holds below that number
         // only), and the number is never truncated: the `|` still ends it.

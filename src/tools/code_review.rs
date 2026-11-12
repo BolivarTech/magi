@@ -3449,7 +3449,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_fired_token_ends_the_delivered_report_wait() {
+    async fn fired_token_ends_report_wait() {
         // [MAGI S6 MS3 loop13, R5] `finish_after_delivered_report` ignored the run's token, so a
         // cancelled run still waited out the post-report bound. A token that fired ends the
         // wait at once, with the cut note, and the work stays on its blocking thread.
@@ -3466,7 +3466,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_tool_without_a_deadline_bounds_its_post_report_wait() {
+    async fn tool_without_deadline_is_bounded() {
         // [MAGI S6 MS3 loop13, R5] With no run deadline (a TUI chat call) the tool waited for the
         // post-report work with no bound but the work's own 120 s; the margin bounds it as it
         // bounds a deadlined run (`post_report_wait_is_bounded`).

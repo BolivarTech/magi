@@ -8858,7 +8858,7 @@ mod envelope_audit_guard {
 mod tests {
 
     #[test]
-    fn a_review_setup_failure_is_a_screen_notice_with_secrets_masked() {
+    fn setup_failure_is_a_notice() {
         // [MAGI S6 MS3 loop13, R5] A failed review-store or embedder setup was only in the run
         // log, so the TUI operator saw reviews run without documentation and never why. The same
         // cause now reaches the startup notices, masked like the log's.
