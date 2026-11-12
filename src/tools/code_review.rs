@@ -4918,6 +4918,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_errors_strip_then_mask() {
+        // MAGI FIX (MS3 §6 loop12): the two error builders masked without stripping, so a control
+        // character inside a key hid it from the detector (and reached the model). Strip first,
+        // as `egress_safe` does.
+        let key = concat!("sk-ant-api03-", "AAAAAAAAAA\u{9b}AAAAAAAAAA"); // allow-secret-scan
+        let ToolError::ExecutionError(run) = tool_error(&ReviewError::Io(key.to_string())) else {
+            unreachable!("tool_error builds an execution error")
+        };
+        let args = serde_json::json!({ key: 1 });
+        let Err(ToolError::InvalidArguments(input)) = parse_tool_input(&args) else {
+            unreachable!("an unknown field is invalid")
+        };
+        for text in [run, input] {
+            assert!(!text.contains("AAAAAAAAAA"), "{text:?}");
+            assert!(!text.chars().any(|c| c == '\u{9b}'), "{text:?}");
+        }
+    }
+
+    #[test]
     fn egress_safe_strips_terminal_control_characters_from_the_text_and_the_failure() {
         // [MAGI S6 loop 8, C2-c6] model text over untrusted code reaches the operator's
         // terminal through the text output of `magi code-review` verbatim: an escape sequence a
