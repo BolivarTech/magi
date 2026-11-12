@@ -4134,7 +4134,9 @@ class RunExecutor:
         config = workspace.joinpath(*CONFIG_PATH_PARTS)
         try:
             original = config.read_bytes()
-        except OSError as exc:
+            # MAGI FIX (MS3 §6 loop13): decoded here, inside the guard, once.
+            original_text = original.decode("utf-8")
+        except (OSError, UnicodeError) as exc:
             raise HarnessError("could not read %s to relay its requests: %s" % (config, exc)) from exc
         try:
             upstream = relay_upstream(config)
@@ -4147,7 +4149,7 @@ class RunExecutor:
             try:
                 point_config_at(config, url)
                 off = (endpoints_off_the_counter(config, url)
-                       + changes_besides_endpoints(original.decode("utf-8"), config))
+                       + changes_besides_endpoints(original_text, config))
                 if off:
                     raise HarnessError("run %s records its requests, but its configuration "
                                        "could still reach past the relay: %s"

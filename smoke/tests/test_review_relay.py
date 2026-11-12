@@ -174,6 +174,44 @@ class RelayTests(unittest.TestCase):
             executor._run_setup(definition, pathlib.Path("."))
         self.assertEqual([False], [d.unreachable_embedder for d in seen])
 
+    def test_setup_clears_the_model_ban(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7a Melchior): a setup invocation inherited forbids_model_calls.
+        seen = []
+        executor = runs.RunExecutor(binary=None, env={}, config=None)
+        definition = runs.RunDefinition(
+            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
+            stdin=b"", needs_trio=False, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+            forbids_model_calls=True, setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
+        with unittest.mock.patch.object(executor, "_invoke", lambda d, s: seen.append(d)):
+            executor._run_setup(definition, pathlib.Path("."))
+        self.assertEqual([False], [d.forbids_model_calls for d in seen])
+
+    def test_setup_shares_the_run_clock(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7a Balthasar): the setup reviews drew a clock each, unbounded
+        # by the run's own; now every step is capped by what is left of the one clock.
+        clock, seen = [0.0], []
+
+        def invoke(definition, stdin):
+            seen.append(definition.timeout_s)
+            clock[0] += 70
+
+        executor = runs.RunExecutor(binary=None, env={}, config=None)
+        executor._clock_end = 100.0
+        step = runs.Invocation(argv=("code-review",), timeout_s=60)
+        definition = runs.RunDefinition(
+            run_id="RX", argv=("code-review",), stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL,
+            timeout_s=100, setup=(step, step, step))
+        with unittest.mock.patch.object(executor, "_invoke", invoke), \
+                unittest.mock.patch.object(runs.time, "monotonic", lambda: clock[0]):
+            executor._run_setup(definition, pathlib.Path("."))
+        self.assertEqual([60, 30], seen)
+        self.assertIsNotNone(executor._setup_expired)
+
+    def test_r21_declares_its_three_reviews(self) -> None:
+        # MAGI FIX (MS3 §6 loop13): the declared cost is the sum of the three reviews, one clock.
+        self.assertEqual(3 * runs.TRIO_RUNS_MEASURED_S["R18"], runs.TRIO_RUNS_MEASURED_S["R21"])
+        self.assertEqual(3 * runs.DEFINITIONS["R20"].timeout_s, runs.DEFINITIONS["R21"].timeout_s)
+
     def test_restore_backs_off(self) -> None:
         # MAGI FIX (MS3 §6 loop11, R7a Balthasar): the retry ran at once, where a lock held by an
         # indexer clears after a moment.
@@ -251,6 +289,20 @@ class RelayTests(unittest.TestCase):
             with executor._recorded_requests(definition, ws, []) as runnable:
                 self.assertIsNone(runnable)
             self.assertIn("more than one endpoint", executor._unrunnable_cause)
+
+    def test_a_non_utf8_config_is_a_harness_error(self) -> None:
+        # MAGI FIX (MS3 §6 loop13): a config that is not UTF-8 is a typed harness error (exit 3)
+        # on every path that reads it, never a UnicodeDecodeError.
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = pathlib.Path(tmp)
+            (ws / ".magi").mkdir()
+            (ws / ".magi" / "magi.toml").write_bytes(b'base_url = "http://a/v1"\n# \xff\xfe\n')
+            definition = runs.RunDefinition(
+                run_id="RX", stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+                records_requests=True, argv=("code-review",) + runs.REVIEW_FLAGS)
+            with self.assertRaises(HarnessError):
+                with runs.RunExecutor(None, None, None)._recorded_requests(definition, ws, []):
+                    pass
 
     def test_relay_keeps_no_credential(self) -> None:
         # MAGI FIX (MS3 §6 loop13): the record scenarios read must not hold the operator's key.

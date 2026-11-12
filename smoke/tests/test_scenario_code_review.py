@@ -948,3 +948,15 @@ class CodeReviewWithoutEmbedderTests(unittest.TestCase):
     def test_s52_fails_when_the_report_hides_it(self) -> None:
         doc = {"consult": {"consensus": {}}, "code_review": {"without_embedder": False}}
         self.assertEqual(Outcome.FAIL, _outcomes("S52", _result("R17", 0, doc))[review_context.S52_ASSERTIONS[1]])
+
+    def test_s49_omissions_any_order(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7a Caspar): false positive. The comparison sorts both sides, so
+        # the product's enumeration order (renamed files sort differently) cannot turn S49 red,
+        # while each entry stays exact.
+        entries = ["%s (%s)" % entry for entry in code_review.S49_EXPECTED_OMISSIONS]
+        prefix = "nothing to review; left out: "
+        for order in (entries, entries[::-1]):
+            self.assertTrue(code_review._skipped_as_expected(prefix + ", ".join(order)))
+        self.assertFalse(code_review._skipped_as_expected(prefix + entries[0]))
+        wrong = entries[:1] + [entries[1].replace("(secret)", "(binary)")]
+        self.assertFalse(code_review._skipped_as_expected(prefix + ", ".join(wrong)))
