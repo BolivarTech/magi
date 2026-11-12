@@ -213,9 +213,11 @@ SQLITE_SIDE_SUFFIXES = ("-wal", "-shm")
 # still called a vanished listed file an I/O error.
 # MAGI FIX (MS3 S6 loop9): ``diff not rebuilt`` is gone; such a file is ``secret``
 # again (RV22 names that cause).
+# MAGI FIX (MS3 S6 loop13): ``repeated section`` is a path listed twice with different diffs;
+# the resolver never builds one (the guard covers hand-built lists), so no scenario hits it.
 OMISSION_CAUSES = ("binary", "not utf-8", "secret", "ignored",
                    "outside workspace", "too large", "not a regular file",
-                   "hard link", "unreadable", "disappeared")
+                   "hard link", "unreadable", "disappeared", "repeated section")
 
 #: The omission list of a ``nothing to review`` refusal, to the end of its line.
 OMISSION_LIST_PATTERN = re.compile(r"; left out: (?P<list>.*)")
