@@ -888,7 +888,10 @@ pub fn plan_review(
 /// and history are not covered: reference text chosen after the approval, so a documentation edit
 /// in between does not refuse the review; accepted as a narrow injection surface (someone able to
 /// write the workspace between approval and run), framed as reference data and secret-scanned.
-/// O(bytes reviewed).
+/// Declared limit, not an oversight (MS3 §6 loop12): covering it would make every edit of a
+/// README refuse a review whose code did not change, and the same text reaches the trio anyway
+/// through the code a reviewer is shown; the bound on what such text can do is the framing, the
+/// secret scan and the gate. O(bytes reviewed).
 ///
 /// # Errors
 ///
@@ -1212,6 +1215,12 @@ impl ReviewTimer<'_> {
 ///
 /// [`ReviewError::NotReviewable`] (`secret`) for a prompt holding a private-key block, which
 /// masking cannot cover (`prompt_key_block_fails_closed`); nothing is sent.
+///
+/// Declared order (MS3 §6 loop12): this check runs after [`prepare_contexts`], so the (masked)
+/// query embeddings of the documentation search may already have gone out when a prompt trips it.
+/// It is a backstop, not a budget refusal (§5.0's "no byte out" clause is about the budget): the
+/// filter leaves key-block files out and `context_egress` withholds key-block items, so in the
+/// ordinary path it never fires, and what it could add is a failed review, never a sent block.
 // MAGI FIX (MS3 §6 loop7): looked up by `batch.index`; and it trusted earlier stages to mask.
 fn render_prompts(
     batches: &[ReviewBatch],
@@ -1567,6 +1576,17 @@ fn unit_identity<'a>(items: impl Iterator<Item = &'a ContextItem>) -> Vec<(Strin
 ///
 /// `limit` is the batch limit (RV04): what the code and the heading leave is the most the kept
 /// context may cost, whatever the source charged (`over_limit_context_is_trimmed`).
+///
+/// Invariants this relies on (MS3 §6 loop12): `ReviewBatch::tokens` counts the batch's code items
+/// and header, not the containing units, which the planner charged nothing for; the units are
+/// charged here, once, on top (`oversized_unit_fails_closed`). The promised units
+/// ([`RagSource::units_for`]) replace the assembled ones only when `context_for` brings the same
+/// `(file, label)` identities (`reuse_needs_the_same_units`). A context path that matches a
+/// secret pattern is withheld, not masked: masking a path would break the file identity the trio
+/// and the report use, and RV22's tie-break ("no byte of the secret leaves") prefers omission,
+/// declared as skipped `secret`. The budget is checked before any endpoint call by the runner
+/// (`precheck_budget`, the caller's contract documented on [`RagSource::index_ms`]); the second
+/// check in `run_review` covers what preparation spent (`a_preparation_that_overran_its_reserve_runs_on_what_is_left_never_refused`).
 ///
 /// # Errors
 ///
@@ -2125,6 +2145,12 @@ impl GateCode {
 /// (`no location`) without a line, a face holding it, or a read (WARN). `source` is the masked
 /// `CachedSource`; `Gate::judge` masks its state again. The full side is returned (the state
 /// shows ±40 lines), decoded once per finding.
+///
+/// Declared split (MS3 §6 loop12): the pipeline hands the gate the side as the cache holds it
+/// (already masked, key-block files already left out) and the gate masks the ±40-line state at
+/// its own egress (`a_state_carrying_a_one_line_secret_is_sent_masked`, `src/review/gate.rs`),
+/// so the contract lives where the bytes leave, and a second mask here would hide a gate that
+/// forgot its own.
 // MAGI FIX (S6 loop 6, D-m1): the new-side preference on a colliding line, stated.
 // MAGI FIX (S6 loop 7, D-b3/D-c3): a deleted line whose number is live is ambiguous, not new.
 fn gate_code(
