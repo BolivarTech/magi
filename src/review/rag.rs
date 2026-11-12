@@ -2145,6 +2145,41 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_keeps_the_first_by_file() {
+        // MAGI FIX (MS3 §6 loop12): the cap keeps the K smallest `(file, line)` whatever the
+        // discovery order (`select_nth_unstable` puts the K smallest before index K). The listing
+        // gives the late file first; the early file's one caller must still survive the cut.
+        use crate::review::test_support::MapSource;
+        let d = "fn parse() {}\n".to_string();
+        let a = "fn early() {\n    parse();\n}\n".to_string();
+        let z = "// parse\n".repeat(MAX_CALLER_SCAN_PER_NAME + 10);
+        let files = vec![
+            ("z.rs".to_string(), z.clone()),
+            ("d.rs".to_string(), d.clone()),
+            ("a.rs".to_string(), a.clone()),
+        ];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        let src = MapSource::new(
+            &[
+                ("a.rs", a.as_str()),
+                ("d.rs", d.as_str()),
+                ("z.rs", z.as_str()),
+            ],
+            &[],
+        );
+        let (callers, capped) = callers_for(
+            &["parse"],
+            &index,
+            &src,
+            &LanguageRegistry::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(capped, vec!["parse".to_string()]);
+        let labels: Vec<_> = callers.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["early"], "the first file's caller survives");
+    }
+
+    #[test]
     fn a_changed_method_is_never_its_own_caller() {
         // [MAGI S6 MS3 loop1, R2 Melchior] The index records only top-level definitions, so a
         // method's own line was an occurrence: its unit took a caller slot and pushed a real
