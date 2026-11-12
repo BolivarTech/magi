@@ -1477,6 +1477,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reused_vector_length_is_checked() {
+        // MAGI FIX (MS3 §6 loop13, R1 Caspar): a stored vector reused for a new source was only
+        // deserialized, so one of another length (a damaged row) was written forward under the
+        // declared dimension.
+        let (store, _dir) = store_for_test();
+        let first = (src("d.md", "k"), vec![chunk("d.md", "A", "x")]);
+        store
+            .reindex(&[first], &FakeEmbedder::new(3))
+            .await
+            .expect("dim 3");
+        let short = store.seal_vector(&[1.0, 2.0]).expect("seal");
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute("UPDATE code_review_docs SET embedding_blob = ?1", [&short])
+            .expect("tamper");
+        // The same chunk under a new version of the file (another source key): its vector is reused.
+        let second = (src("d.md", "k2"), vec![chunk("d.md", "A", "x")]);
+        let err = store
+            .reindex(&[second], &FakeEmbedder::new(3))
+            .await
+            .expect_err("a reused vector of the wrong length is refused");
+        assert!(matches!(err, MemoryError::Storage(_)), "{err}");
+    }
+
+    #[tokio::test]
     async fn vanished_source_is_an_error() {
         // [MAGI S6 MS3 loop10, R1 Melchior] A source deleted after the reindex (a wipe, another
         // process's clean-up) loaded as "no documentation"; it is now the index unavailable.
