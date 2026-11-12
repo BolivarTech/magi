@@ -3893,6 +3893,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_tool_plans_off_the_runtime() {
+        // [MAGI S6 MS3 loop13, R5] A fresh plan (git, the filesystem) ran inline on the async
+        // worker, so a large input starved the runtime and `--timeout` could not cut it. The tool
+        // asks the runner's `plan_blocking`; the inline `plan` is never called here.
+        struct PlansOffRuntime;
+        #[async_trait::async_trait]
+        impl CodeReviewRunner for PlansOffRuntime {
+            fn plan(&self, _: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+                panic!("planned inline on the async worker")
+            }
+            async fn plan_blocking(&self, input: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+                Ok(ReviewPlan {
+                    input: input.clone(),
+                    batches: 1,
+                    digest: None,
+                    worst_case_secs: 1,
+                })
+            }
+            async fn run(
+                &self,
+                _: ReviewPlan,
+                _: ReviewBudget,
+                _: &CancellationToken,
+            ) -> Result<Rendered, ReviewError> {
+                Ok(Rendered {
+                    text: "report".into(),
+                    json: serde_json::json!({}),
+                    consult: Value::Null,
+                    failure: None,
+                })
+            }
+        }
+        let tool = CodeReviewTool::new(Arc::new(PlansOffRuntime), true);
+        let out = tool
+            .execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(out.is_ok(), "{:?}", out.err());
+    }
+
+    #[tokio::test]
+    async fn plan_blocking_gives_the_plan_of_plan() {
+        // [MAGI S6 MS3 loop13, R5] The off-runtime plan is the same plan: the digest re-check in
+        // `run` compares them, so a difference would refuse every review as changed.
+        let (_tmp, ws) = workspace_with_readme();
+        let runner = production_runner_with_memory(&ws, None, None);
+        let input = ReviewInput::File("src".into());
+        let inline = runner.plan(&input).expect("plans");
+        let blocking = runner.plan_blocking(&input).await.expect("plans");
+        assert_eq!(
+            (inline.batches, inline.digest.as_deref()),
+            (blocking.batches, blocking.digest.as_deref())
+        );
+    }
+    #[tokio::test]
     async fn a_review_refused_for_its_budget_sends_nothing_to_the_embedder() {
         // [SMOKE1 S50] §5.0 stage 4: the budget check precedes the documentation indexing, so a
         // refused review sends no byte out of the process. The pool's unmeasured window gives
