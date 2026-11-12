@@ -1022,6 +1022,19 @@ mod tests {
     use crate::review::test_support::MapSource;
 
     #[test]
+    fn numbering_never_regrows() {
+        // MAGI FIX (MS3 §6 loop12): the capacity hint added an eighth of the text, but each line
+        // gains a whole prefix, so a file of short lines reallocated as it grew. The hint now
+        // counts the prefixes: the buffer ends exactly full, never regrown.
+        let short = "a\n".repeat(1_000);
+        let numbered = number_lines(&short, 1);
+        assert_eq!(numbered.capacity(), numbered.len());
+        let hunk = format!("@@ -1,1000 +1,1000 @@\n{}", " a\n".repeat(1_000));
+        let shown = number_hunk(&hunk, (1, 1));
+        assert_eq!(shown.capacity(), shown.len());
+    }
+
+    #[test]
     fn a_headerless_hunk_is_numbered_from_its_item_as_hunk_change_counts_it() {
         // [MAGI S6 MS3 loop5, R4 Melchior] `hunk_change` counts a text with no `@@` header from
         // the item's own first lines; `number_hunk` started no counter, so the trio saw no line
