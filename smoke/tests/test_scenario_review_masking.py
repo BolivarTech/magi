@@ -76,14 +76,24 @@ class S53Tests(unittest.TestCase):
         # [MAGI S6 MS3 loop2, R7b Melchior/Balthasar] the README says skipped_unlisted must be 0.
         self.assertEqual(Outcome.FAIL, self._judge(2, _result("R18", 0, _doc(skipped_unlisted=1))))
 
-    def test_a_timed_out_review_never_reaches_the_body(self) -> None:
-        # [MAGI S6 MS3 loop2, R7b Melchior] S53 reaches the trio, so a hang is the backend's: it
-        # does not declare inspects_timeouts, and the runner reports such a run CANNOT_TEST
-        # (test_runner's timed-out tests pin that branch for every scenario).
+    def test_a_timed_out_review_still_judges_the_leak(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7b): a hang is the backend's, so the body assertions are
+        # CANNOT_TEST, but bytes already captured that hold the key are a leak all the same.
         from smoke.registry import DEFAULT_REGISTRY
         entry = DEFAULT_REGISTRY.get("S53")
-        self.assertFalse(entry.inspects_timeouts)
+        self.assertTrue(entry.inspects_timeouts)
         self.assertTrue(entry.needs_backend)
+        clean = _result("R18", 0, None, timed_out=True)
+        self.assertEqual([Outcome.CANNOT_TEST] * 4, [self._judge(i, clean) for i in range(4)])
+        leaky = _result("R18", 0, None, stderr=b"oops " + runs.REVIEW_MASKED_KEY, timed_out=True)
+        self.assertEqual([Outcome.CANNOT_TEST] * 3 + [Outcome.FAIL], [self._judge(i, leaky) for i in range(4)])
+
+    def test_the_masked_prompt_claim_is_s53s_own(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7a Balthasar): the generic leak judge no longer carries it.
+        run = _result("R18", 0, _doc(), requests=(("/api/chat", b"{}"),))
+        generic = rm._leak_finding(rm.S53_ASSERTIONS, 3, "R18", run, (runs.REVIEW_MASKED_KEY,), "k", relayed=True)
+        self.assertEqual(Outcome.PASS, generic.outcome)
+        self.assertEqual(Outcome.FAIL, self._judge(3, run))
 
     def test_a_skipped_keyed_file_fails_the_reviewed_assertion(self) -> None:
         doc = _doc(skipped=[{"path": runs.REVIEW_MASKED_FILE, "cause": "secret"}])
