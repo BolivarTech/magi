@@ -1511,6 +1511,26 @@ pub fn record_review(
     })
 }
 
+/// The wall clock [`record_review`]'s reclassification may spend under `deadline` (the post-report
+/// bound, or `None` for none): [`RECLASSIFY_BUDGET_SECS`] or what is left before `deadline`,
+/// whichever is smaller; zero once it has passed. The reclassification is derived work, so it
+/// is what yields to the deadline; the findings are still recorded (`record_review` applies them
+/// with whatever was reclassified, even none). O(1).
+///
+/// # Arguments
+///
+/// * `deadline` - When the work must be over, if it must.
+///
+/// # Returns
+///
+/// The budget to hand `record_review`.
+// MAGI FIX (MS3 §6 loop12): the reclassification was bounded by its own sub-budget alone, so it
+// ran past a deadline the reserve did not cover (R2 Caspar).
+pub fn reclassify_budget(deadline: Option<std::time::Instant>) -> Duration {
+    let _ = deadline;
+    Duration::from_secs(RECLASSIFY_BUDGET_SECS)
+}
+
 /// Deletes the documentation sources nothing reaches any more (RV-S39): with `git`, the live
 /// set is every local ref's sources plus `worktree` when the review listed the working tree;
 /// without git, `worktree` alone; with neither, nothing is deleted. A review that did not list
@@ -2834,6 +2854,19 @@ mod tests {
             BUDGET,
         );
         assert!(matches!(r, Err(MemoryError::Storage(_))), "{r:?}");
+    }
+
+    #[test]
+    fn reclassify_budget_yields_to_its_deadline() {
+        // MAGI FIX (MS3 §6 loop12): a deadline that only covers the old reserve (a few seconds)
+        // shortens the reclassification; a passed one gives it nothing; none keeps the sub-budget.
+        let now = std::time::Instant::now();
+        assert_eq!(reclassify_budget(None), BUDGET);
+        let short = reclassify_budget(Some(now + Duration::from_secs(5)));
+        assert!(short <= Duration::from_secs(5), "{short:?}");
+        assert_eq!(reclassify_budget(Some(now)), Duration::ZERO);
+        let far = reclassify_budget(Some(now + 10 * BUDGET));
+        assert_eq!(far, BUDGET, "never above its own sub-budget");
     }
 
     #[tokio::test]
