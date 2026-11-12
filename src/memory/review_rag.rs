@@ -2859,7 +2859,7 @@ mod tests {
     }
 
     #[test]
-    fn reclassify_budget_yields_to_its_deadline() {
+    fn reclassify_budget_by_deadline() {
         // MAGI FIX (MS3 §6 loop12): a deadline that only covers the old reserve (a few seconds)
         // shortens the reclassification; a passed one gives it nothing; none keeps the sub-budget.
         let now = std::time::Instant::now();
@@ -4030,6 +4030,51 @@ mod tests {
             !a.trimmed
                 .iter()
                 .any(|(kind, label)| *kind == ContextKind::History && label == NO_ROOM),
+            "{:?}",
+            a.trimmed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_withheld_batch_is_not_down() {
+        // MAGI FIX (MS3 §6 loop12): a key block in the BATCH text withholds that batch's query
+        // only; it was declared as a down embedder and left the whole review without RAG.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let key = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n{end}");
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let rag = f.rag(true);
+        let a = rag
+            .context_for(&batch_on("a.rs", &key))
+            .await
+            .expect("context");
+        assert_eq!(f.embedder.calls(), 0, "nothing was sent");
+        assert!(!rag.embedder_down.load(Ordering::SeqCst), "not down");
+        assert!(
+            a.trimmed.iter().all(|(_, label)| label != EMBEDDER_DOWN),
+            "{:?}",
+            a.trimmed
+        );
+        rag.context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(f.embedder.calls() > 0, "the next batch is still served");
+    }
+
+    #[tokio::test]
+    async fn no_docs_no_room_note() {
+        // MAGI FIX (MS3 §6 loop12): a review that indexed no documentation source declared
+        // `no room` for a layer that had nothing to retrieve.
+        let f = RagFixture::new(&[("notes.txt", "plain\n")]).await;
+        let b = batch_on("notes.txt", "plain");
+        let mut rag = f.rag(true);
+        rag.limit_tokens = b.tokens
+            + magi_rs::review::window::estimate_tokens(magi_rs::review::pipeline::CONTEXT_HEADING);
+        let a = rag.context_for(&b).await.expect("context");
+        assert!(
+            !a.trimmed
+                .iter()
+                .any(|(kind, label)| *kind == ContextKind::Documentation && label == NO_ROOM),
             "{:?}",
             a.trimmed
         );
