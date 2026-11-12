@@ -527,6 +527,8 @@ pub fn entries_from_review(
             // context read: a key block is left out (masking would keep its body).
             // MAGI FIX (MS3 §6 loop6): looked for across the mages' texts too, and by its END
             // line, not only by a header whole in one joined string.
+            // MAGI FIX (MS3 §6 loop13): the END line is looked for over the joined (stored) forms
+            // too: a footer opening the second text is at a line start only there.
             if [&title, &detail].iter().any(|t| holds_key_block(t))
                 || quotes_a_split_key_block(&f.titles, &f.details)
             {
@@ -1033,6 +1035,23 @@ mod tests {
         }
         let clean = vec![(found("a.rs", 5, "fine"), judged(GateState::Kept))];
         assert_eq!(entries_from_review(&clean, "c1").len(), 1);
+    }
+
+    #[test]
+    fn joined_end_line_is_not_stored() {
+        // MAGI FIX (MS3 §6 loop13, R3 Melchior): a footer that opens the second of two texts is
+        // at a line start only in the stored (joined) form, never in the separator-free
+        // concatenations, so the END check must also run over the joined title and detail.
+        use crate::review::gate::GateState;
+        let footer = concat!("-----", "END PRIVATE KEY-----");
+        let mut in_detail = found("a.rs", 3, "see the key");
+        in_detail.details = vec!["MIIEvQIBADANBgkqhkiG9w0BAQEFAASC".into(), footer.into()];
+        let mut in_title = found("a.rs", 4, "lead");
+        in_title.titles.push(footer.into());
+        for (case, f) in [("detail", in_detail), ("title", in_title)] {
+            let main = vec![(f, judged(GateState::Kept))];
+            assert!(entries_from_review(&main, "c1").is_empty(), "{case}");
+        }
     }
 
     #[test]

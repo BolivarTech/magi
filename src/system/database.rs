@@ -96,9 +96,9 @@ fn table_exists(conn: &Connection, table: &str) -> std::result::Result<bool, Vau
 /// Refuses a database written by 0.24.x or earlier, naming the first v0.25.0 table it lacks
 /// ([`PRE_0_25_MISSING_TABLES`]). Read-only: it runs before any write on every open path
 /// (`new_with_vault` before `init_schema`, and both envelope branches of the state machine), so
-/// the refused file stays byte for byte as it was. Byte for byte holds for a WAL database, the
-/// only kind the product writes: the open's `journal_mode` pragma runs before this check, so a
-/// file in another journal mode would get its header flipped, never data. A file without the
+/// the refused file stays byte for byte as it was. Byte for byte holds for every journal mode:
+/// `open_connection` runs this check before its `journal_mode` pragma
+/// (`refusal_keeps_the_journal_mode`), so no header is flipped. A file without the
 /// older data tables ([`PRE_0_25_MARKER_TABLE`]) is not an older database and passes, to get the
 /// open's own answer.
 ///
@@ -381,6 +381,8 @@ fn open_connection(path: &Path) -> std::result::Result<Connection, VaultError> {
     let conn = Connection::open(path).map_err(|e| VaultError::Storage(e.to_string()))?;
     conn.busy_timeout(std::time::Duration::from_secs(BUSY_TIMEOUT_SECS))
         .map_err(|e| VaultError::Storage(e.to_string()))?;
+    // MAGI FIX (MS3 §6 loop13): an older (0.24.x) database is refused BEFORE the journal mode
+    // is touched, so a refused file in any journal mode keeps its header byte for byte (RV19).
     // `query_row` (not `execute`): `journal_mode` returns the new mode, which
     // `execute` rejects on some driver builds.
     let _: String = conn
@@ -2423,6 +2425,34 @@ mod tests {
             matches!(
                 err.downcast_ref::<VaultError>(),
                 Some(VaultError::DbCorrupt { detail, .. }) if *detail == pre_0_25_detail("code_review_docs")
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            db_state(&path),
+            before,
+            "the file and its WAL must not change"
+        );
+    }
+
+    #[test]
+    fn refusal_keeps_the_journal_mode() {
+        // MAGI FIX (MS3 §6 loop13, R3 Caspar): the refusal ran after the open's WAL pragma, so a
+        // 0.24.x file in another journal mode got its header flipped even though it was refused.
+        let (conn, tmp) = pre_0_25_connection_for_test();
+        drop(conn);
+        let path = tmp.path().to_path_buf();
+        let before = db_state(&path);
+        let err = EncryptedSqliteMemory::new(
+            path.clone(),
+            Zeroizing::new(TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .err()
+        .expect("an older database is refused");
+        assert!(
+            matches!(
+                err.downcast_ref::<VaultError>(),
+                Some(VaultError::DbCorrupt { .. })
             ),
             "{err:?}"
         );
