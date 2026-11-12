@@ -1527,8 +1527,10 @@ pub fn record_review(
 // MAGI FIX (MS3 §6 loop12): the reclassification was bounded by its own sub-budget alone, so it
 // ran past a deadline the reserve did not cover (R2 Caspar).
 pub fn reclassify_budget(deadline: Option<std::time::Instant>) -> Duration {
-    let _ = deadline;
-    Duration::from_secs(RECLASSIFY_BUDGET_SECS)
+    let own = Duration::from_secs(RECLASSIFY_BUDGET_SECS);
+    deadline.map_or(own, |d| {
+        own.min(d.saturating_duration_since(std::time::Instant::now()))
+    })
 }
 
 /// Deletes the documentation sources nothing reaches any more (RV-S39): with `git`, the live

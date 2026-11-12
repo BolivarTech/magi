@@ -52,8 +52,9 @@ use tokio_util::sync::CancellationToken;
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::review_docs::ReviewDocStore;
 use crate::memory::review_rag::{
-    collect_garbage, outbound_prep_reserve_secs, prepare_docs, record_review, DocPrep, RecordStats,
-    ReviewMemory, ReviewRag, HISTORY_HEAD, RECLASSIFY_BUDGET_SECS, REINDEX_TIMEOUT_SECS,
+    collect_garbage, outbound_prep_reserve_secs, prepare_docs, reclassify_budget, record_review,
+    DocPrep, RecordStats, ReviewMemory, ReviewRag, HISTORY_HEAD, RECLASSIFY_BUDGET_SECS,
+    REINDEX_TIMEOUT_SECS,
 };
 use crate::system::path_guard::PathGuard;
 use crate::system::review_git::{review_path_guard, ScrubbedGit};
@@ -1870,7 +1871,9 @@ fn follow_up_work_until(
 ) -> Option<String> {
     let mut warning = None;
     if let Some(rev) = &follow.rev {
-        match record_history(memory, git, rev, &follow.findings) {
+        // MAGI FIX (MS3 §6 loop12): the reclassification yields to the deadline too.
+        let budget = reclassify_budget(deadline);
+        match record_history(memory, git, rev, &follow.findings, budget) {
             Ok(stats) => tracing::event!(
                 target: REVIEW_LOG_TARGET,
                 tracing::Level::INFO,
@@ -1940,6 +1943,8 @@ fn follow_up_work_until(
 /// one-line secrets masked and leaves out one quoting a private-key block (a backstop at
 /// storage, on top of the masking at the context read; RV22).
 ///
+/// `budget` is the reclassification's wall clock (`reclassify_budget`).
+///
 /// # Errors
 /// The redacted cause, when the revision starts with `-` (never passed to git), the SHA cannot
 /// be resolved or the store fails.
@@ -1948,6 +1953,7 @@ fn record_history(
     git: &dyn GitCommand,
     rev: &str,
     findings: &[(ConsolidatedFinding, GateVerdict)],
+    budget: Duration,
 ) -> Result<RecordStats, String> {
     // MAGI FIX (MS3 §6 loop3): the revision is an argument of `rev-parse`; one starting with
     // `-` would be read as an option (git's `--end-of-options` is not in every git it runs on).
@@ -1968,15 +1974,8 @@ fn record_history(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-    record_review(
-        memory.history(),
-        &entries,
-        HISTORY_HEAD,
-        git,
-        now,
-        Duration::from_secs(RECLASSIFY_BUDGET_SECS),
-    )
-    .map_err(|e| egress_text(&e.to_string()))
+    record_review(memory.history(), &entries, HISTORY_HEAD, git, now, budget)
+        .map_err(|e| egress_text(&e.to_string()))
 }
 
 /// Whether `input` reviews a git revision (a commit, a range, two branches), whose history is
@@ -3858,10 +3857,11 @@ mod tests {
             }
         }
         let (_db, _mem, memory) = review_memory();
-        let r = record_history(&memory, &Prints("abc1234\n"), "main", &[]);
+        let budget = Duration::from_secs(1);
+        let r = record_history(&memory, &Prints("abc1234\n"), "main", &[], budget);
         assert!(r.is_err(), "{r:?}");
         let full = "abc1234def5678901234567890123456789abcde\n";
-        assert!(record_history(&memory, &Prints(full), "main", &[]).is_ok());
+        assert!(record_history(&memory, &Prints(full), "main", &[], budget).is_ok());
     }
 
     #[tokio::test]
