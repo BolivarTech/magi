@@ -325,6 +325,39 @@ class ReadSourceTests(unittest.TestCase):
         self.assertIn("[package]", helpers.read_source("Cargo.toml"))
 
 
+class SecretOpeningsTests(unittest.TestCase):
+    """[MAGI §6 MS3 loop 13, R6a] ``secret_openings`` fails loudly when the table it reads matches
+    nothing: a filter that matches nothing raises no error, so a drifted source shape would
+    silently drop every opening from the scenarios that read them."""
+
+    _TOKENS = 'SecretPattern { prefixes: &["ghp_", "sk-"] }\n'
+
+    def _openings(self, source: str):
+        """Run ``secret_openings`` over *source* written as the product's secrets file."""
+        import pathlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            target = root / "src" / "review"
+            target.mkdir(parents=True)
+            (target / "secrets.rs").write_text(source, encoding="utf-8")
+            return _helpers().secret_openings(root)
+
+    def test_the_real_table_yields_its_header_and_token_openings(self) -> None:
+        import pathlib
+        openings = _helpers().secret_openings(pathlib.Path(__file__).resolve().parents[2])
+        self.assertIn("-----begin ", openings)
+        self.assertGreater(len(openings), 10)
+
+    def test_a_table_with_no_fixed_openings_is_refused(self) -> None:
+        source = self._TOKENS + "const NON_TOKEN_PREFIXES: &[&str] = &[];\n"
+        with self.assertRaises(AssertionError):
+            self._openings(source)
+
+    def test_a_table_with_fixed_openings_parses(self) -> None:
+        source = self._TOKENS + 'const NON_TOKEN_PREFIXES: &[&str] = &["-----begin "];\n'
+        self.assertEqual(["ghp_", "sk-", "-----begin "], self._openings(source))
+
 class GuardRoutingTests(unittest.TestCase):
     """The sync guards themselves read through the helpers."""
 
