@@ -1046,7 +1046,7 @@ pub fn mask_secrets(text: &str) -> String {
 /// byte of the text, and a mask that says so, rather than an empty string. Fail closed.
 const MASK_FAILED: &str = "<redacted: masking failed>";
 
-/// The name of the first pattern (in table order) whose mask, `<redacted: <name>>`, appears in
+/// The name of the first pattern (in text order) whose mask, `<redacted: <name>>`, appears in
 /// `text`: what [`mask_secrets`] masked in a text it produced. O(n · p).
 ///
 /// It reads the text, not a record of the masking, so it serves declarations only (a quoted
@@ -1188,7 +1188,9 @@ const HEADER_JOINERS: [char; 6] = [' ', '\t', '"', '\'', ',', '+'];
 /// Whether `line`, with its spaces and literal joiners ([`HEADER_JOINERS`]) removed, holds a
 /// private-key header: four or more dashes,
 /// `BEGIN`, upper-case letters or digits ending in `PRIVATEKEY` or `PRIVATEKEYBLOCK`, then four
-/// dashes. So a PEM, OpenPGP or SSH2 header split at a token boundary (`…RSA PRIVATE` +
+/// dashes; one optional space is read before `BEGIN` and before the closing dashes (the
+/// canonical SSH2 armor, `---- BEGIN SSH2 PRIVATE KEY ----`). So a PEM, OpenPGP or SSH2 header
+/// split at a token boundary (`…RSA PRIVATE` +
 /// `KEY-----`, in a separator-free concatenation) still opens a block
 /// (`spaceless_header_is_a_block`); upper case only, as [`holds_key_block`]. Errs toward a block,
 /// RV22's safe direction. O(bytes of `line`).
@@ -1198,10 +1200,13 @@ fn spaceless_key_header(line: &str) -> bool {
     // `BEGIN` and after the key words stay contiguous, so source that spells a header from
     // constants (`concat!("-----", "BEGIN ", ..)`) is no block.
     line.match_indices("BEGIN").any(|(at, begin)| {
-        let opened = at
-            .checked_sub(SSH2_ARMOR_DASHES.len())
-            .and_then(|from| line.get(from..at))
-            .is_some_and(|d| d == SSH2_ARMOR_DASHES);
+        // MAGI FIX (MS3 §6 loop14): the canonical SSH2 armor has a space on each side of the
+        // words (`---- BEGIN SSH2 PRIVATE KEY ----`): one optional space is read there.
+        let before = line.get(..at).unwrap_or_default();
+        let opened = before
+            .strip_suffix(' ')
+            .unwrap_or(before)
+            .ends_with(SSH2_ARMOR_DASHES);
         if !opened {
             return false;
         }
@@ -1222,7 +1227,10 @@ fn spaceless_key_header(line: &str) -> bool {
         }
         let after = rest.get(end..).unwrap_or_default();
         (words.ends_with("PRIVATEKEY") || words.ends_with("PRIVATEKEYBLOCK"))
-            && after.starts_with(SSH2_ARMOR_DASHES)
+            && after
+                .strip_prefix(' ')
+                .unwrap_or(after)
+                .starts_with(SSH2_ARMOR_DASHES)
     })
 }
 /// `text` masked as [`mask_secrets`] masks it, but with every line break a masked span held
@@ -1862,6 +1870,39 @@ mod tests {
         assert_eq!(m.text, mask_secrets(text));
         assert!(!m.text.contains("S3cr3t"));
         assert_eq!(mask_secrets_keeping_lines("fn f() {}\n"), None);
+    }
+
+    #[test]
+    fn ssh2_armor_with_its_space() {
+        // [MAGI S6 MS3 loop14, R6a2 Caspar/Melchior] The canonical SSH2 armor is four dashes, a
+        // space, `BEGIN`, the words, a space and four dashes; the split-header fallback read
+        // only the spaceless form, so the standard header split across literals opened no block.
+        let s = SSH2_ARMOR_DASHES;
+        for line in [
+            format!("{s} BEGIN SSH2 PRIVATE KEY {s}"),
+            format!("\"{s} BEGIN SSH2 PRIVATE\" \"KEY {s}\""),
+            format!("{s} BEGIN SSH2 ENCRYPTED PRIVATE\" + \" KEY {s}"),
+            format!("{s}BEGIN SSH2 PRIVATE KEY{s}"),
+        ] {
+            assert!(spaceless_key_header(&line), "{line}");
+            assert!(holds_key_block(&format!("{line}\nAAAAB3\n")), "{line}");
+        }
+        for line in [
+            format!("{s} BEGIN SSH2 PUBLIC KEY {s}"),
+            format!("see {s} BEGIN, then a PRIVATE KEY"),
+        ] {
+            assert!(!spaceless_key_header(&line), "{line}");
+        }
+    }
+
+    #[test]
+    fn outward_text_keeps_the_cr() {
+        // [MAGI S6 MS3 loop14, R6a2 Caspar/Melchior] The stripped pass dropped `\r` while its
+        // comment said line breaks stay: a CRLF text lost its breaks when the pass fired.
+        let text = format!("a\r\nb\rghp_AAAA\u{200b}{}", "A".repeat(40)); // allow-secret-scan
+        let out = outward_text(&text);
+        assert!(out.contains("\\r\\n") && out.contains("b\\r"), "{out}");
+        assert!(!out.contains("ghp_AAAA"), "{out}");
     }
 
     #[test]
