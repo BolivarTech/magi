@@ -312,6 +312,9 @@ fn classify_files(
                             cause: SkipCause::DuplicateSection,
                         });
                     }
+                    // MAGI FIX (MS3 §6 loop14): the repeat's own sides (a rename's other path)
+                    // are released like any left-out file's, but never one a kept file read.
+                    release_unkept(source, &kept_sides, sides);
                     continue;
                 }
                 kept_paths.insert(path.clone(), diff_key);
@@ -331,6 +334,9 @@ fn classify_files(
                 if let Some(pattern) = kept.masked {
                     filtered.masked.push(masked_file(&path, pattern));
                 }
+                // MAGI FIX (MS3 §6 loop14): a kept path is never secret-shaped: `classify` skips
+                // such a path as `secret` before any verdict (`a_path_shaped_like_a_key_is_never_sent`),
+                // and every display goes through `display_path` besides.
                 filtered.kept.push(ReviewFile {
                     path,
                     diff: kept.diff,
@@ -343,6 +349,12 @@ fn classify_files(
                 })
             }
             Verdict::Skip(cause) => {
+                // MAGI FIX (MS3 §6 loop14): a path already kept is not also skipped under its
+                // repeat's cause: the repeat is declared as the dropped section it is.
+                let cause = match kept_paths.contains_key(&path) {
+                    true => SkipCause::DuplicateSection,
+                    false => cause,
+                };
                 // MAGI FIX (S6 loop 12, A2-c1 / A2-c5): a skipped file is never sent, so the
                 // cache keeps none of it: the total cap bounds what is reviewed.
                 // MAGI FIX (S6 loop 13, A2-m2 / A2-b1): side by side, and never a side a kept file
@@ -517,8 +529,9 @@ struct SidesRead<'a> {
 /// rebuilt from the masked sides ([`rebuilt_diff`]) and the file declared with the first
 /// pattern found; when the diff cannot be rebuilt or the rebuilt one still holds a secret, the
 /// raw diff is masked by line instead ([`masked_raw_diff`], `unrebuilt_diff_is_masked`), with a
-/// WARN naming which: RV22 leaves out only a private-key block and a secret-shaped path. Declared
-/// limit: a rebuild whose body lines differ beyond masking (sides changed after the diff was read;
+/// WARN naming which. RV22's omission classes, all with the `secret` cause: a private-key block, a
+/// secret-shaped path and the by-line fallback's refusal (its output still holds a secret, so the
+/// file is left out, `a_refused_fallback_is_a_secret_skip`). Declared limit: a rebuild whose body lines differ beyond masking (sides changed after the diff was read;
 /// RV21 reads both through one git access) keeps the diff's hunk ranges with the sides' text,
 /// said by a run-log WARN only.
 ///
@@ -593,7 +606,7 @@ fn kept_verdict(
                 // every line a masked side does not show verbatim, so no input found reaches it (an
                 // AWS secret split over two lines is redacted on both); it stays because the re-scan
                 // is cheap and fails closed, and `fallback_secret_is_refused` pins the contract.
-                match fallback_diff(&d, read.new, read.old, pattern) {
+                match fallback_diff(&d, read.new, read.old) {
                     Some(masked) => Some(masked),
                     None => return secret(read.path, pattern),
                 }
@@ -1070,12 +1083,11 @@ mod tests {
         // Reachability (declared): by-line masking already redacts every line of this
         // two-line secret, so the re-scan is a seal. The contract pinned is that whatever
         // `fallback_diff` returns holds no secret, and that it never answers with a leak.
-        let masked = fallback_diff(&diff, Some(new.as_bytes()), None, "aws-secret-key")
-            .expect("redacted by line");
+        let masked = fallback_diff(&diff, Some(new.as_bytes()), None).expect("redacted by line");
         assert_eq!(find_secret(&masked), None, "{masked}");
         assert!(!masked.contains(value), "{masked}");
         let clean = "@@ -0,0 +1,1 @@\n+fn f() {}\n";
-        assert!(fallback_diff(clean, Some(b"fn f() {}\n"), None, "x").is_some());
+        assert!(fallback_diff(clean, Some(b"fn f() {}\n"), None).is_some());
     }
     #[test]
     fn joined_key_header_is_omitted() {

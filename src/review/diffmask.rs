@@ -17,19 +17,23 @@ use super::secrets::{find_secret, holds_key_block, mask_secrets, REDACTED_OPEN};
 /// The marker that opens and closes a hunk header line (`@@ -a,b +c,d @@`).
 pub(super) const HUNK_START: &str = "@@";
 
+/// The name a redacted line carries when it holds no secret of its own: it was left out because
+/// no masked side shows it (drift between the diff and the sides, or one half of a secret that
+/// spans lines), not because it is a credential, and the model is not told it is one.
+pub(super) const DRIFT_PATTERN: &str = "diff-drift";
+
+/// The prefix of the line that opens each file's section of a git diff and so ends the previous
+/// section's last hunk.
+const SECTION_START: &str = "diff ";
+
 /// [`masked_raw_diff`], scanned: `None` when its own output still holds a secret, so the caller
 /// leaves the file out as a `secret` skip instead of sending it. A body line that a clean side
 /// shows verbatim is kept as it is, so a secret that exists only across adjacent diff lines
 /// (a name and its quoted value on neighbouring context lines) survives the by-line masking; the
 /// re-scan is what keeps every egress text validated, as the rebuilt path already is. O(diff + sides).
 // MAGI FIX (MS3 §6 loop13): the fallback was the one egress text never re-scanned.
-pub(super) fn fallback_diff(
-    diff: &str,
-    new: Option<&[u8]>,
-    old: Option<&[u8]>,
-    pattern: &str,
-) -> Option<String> {
-    let masked = masked_raw_diff(diff, new, old, pattern);
+pub(super) fn fallback_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<String> {
+    let masked = masked_raw_diff(diff, new, old);
     find_secret(&masked).is_none().then_some(masked)
 }
 /// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it: a header line outside a hunk
@@ -41,19 +45,17 @@ pub(super) fn fallback_diff(
 /// (`diff_alone_is_unsafe_to_mask`), and every line
 /// holding a byte of a masked secret differs from its masked side. So masking, never omission, and
 /// no byte of the secret leaves (RV22's tie-break) (`unrebuilt_diff_is_masked`). O(diff + sides).
-pub(super) fn masked_raw_diff(
-    diff: &str,
-    new: Option<&[u8]>,
-    old: Option<&[u8]>,
-    pattern: &str,
-) -> String {
+pub(super) fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> String {
     let (new_vec, old_vec) = (
         side_lines(new).unwrap_or_default(),
         side_lines(old).unwrap_or_default(),
     );
     let new_lines: HashSet<&str> = new_vec.iter().copied().collect();
     let old_lines: HashSet<&str> = old_vec.iter().copied().collect();
-    let redacted = format!("{REDACTED_OPEN}{pattern}>");
+    let redacted = |text: &str| {
+        let name = find_secret(text).unwrap_or(DRIFT_PATTERN);
+        format!("{REDACTED_OPEN}{name}>")
+    };
     let mut index: Option<SideIndex<'_>> = None;
     let mut in_hunk = false;
     let mut out = String::with_capacity(diff.len());
@@ -75,11 +77,16 @@ pub(super) fn masked_raw_diff(
                         header.to_string()
                     }
                 }
-                None => format!("@@ {redacted}"),
+                None => format!("@@ {}", redacted(body)),
             };
             out.push_str(&kept);
             out.push_str(end);
             continue;
+        }
+        // MAGI FIX (MS3 §6 loop14): a new file's section ends the hunk, so its header lines are
+        // masked as headers, not redacted as body lines.
+        if body.starts_with(SECTION_START) {
+            in_hunk = false;
         }
         let marker = body.chars().next();
         let text = body.get(1..).unwrap_or_default();
@@ -90,8 +97,8 @@ pub(super) fn masked_raw_diff(
             }
             (true, Some('+')) if new_lines.contains(text) => body.into(),
             (true, Some('-')) if old_lines.contains(text) => body.into(),
-            (true, Some(m @ (' ' | '+' | '-'))) => format!("{m}{redacted}"),
-            (true, _) => redacted.clone(),
+            (true, Some(m @ (' ' | '+' | '-'))) => format!("{m}{}", redacted(text)),
+            (true, _) => redacted(body),
         };
         out.push_str(&kept);
         out.push_str(end);
@@ -107,7 +114,9 @@ pub(super) fn masked_raw_diff(
 /// exist, a header does not parse or a body line has no marker. A body line that differs from
 /// its side's is replaced by the side's text, and counted unless masking the diff's line gives
 /// the side's; the caller logs the count (RV21) and checks the result for secrets again. Header
-/// lines are kept as they are: a secret-shaped path in one leaves the file out.
+/// lines are kept as they are; one that holds a secret (a secret-shaped path) fails the caller's
+/// re-scan, and the file is then masked by line ([`fallback_diff`], headers through
+/// [`mask_secrets`]), never kept with it.
 ///
 /// Subset of git's unified diff read: lines outside hunks verbatim; a hunk opens at
 /// `@@ -a[,b] +c[,d] @@` (`@@@` gives `None`); body lines start with ` `, `+`, `-` or `\`,
@@ -174,9 +183,10 @@ pub(super) fn rebuilt_diff(
             // Declared (MS3 §6 loop12): the side was masked by `mask_secrets_keeping_lines`, this
             // one line by `mask_secrets`. For a secret whose span crosses a line break the two
             // differ (the side's later lines are blanked, the diff's line alone shows no key), so
-            // the count can be HIGH, never low: a counted line sends the file down the
-            // masked-by-line fallback (`masked_raw_diff`), the safe direction
-            // (`raw_diff_masks_hunk_context`, `diff_alone_is_unsafe_to_mask`).
+            // the count can be HIGH, never low. A counted line is only logged by the caller (a
+            // WARN, RV21): the rebuilt text is the sides' own masked lines either way, so a high
+            // count costs a log entry and never a leak (`raw_diff_masks_hunk_context`,
+            // `diff_alone_is_unsafe_to_mask` pin the by-line path a failed re-scan takes).
             let differs = |side: &str| shown != side && mask_secrets(shown) != side;
             if differs(text) || old_context.is_some_and(differs) {
                 diverged = diverged.saturating_add(1);
@@ -381,8 +391,7 @@ mod tests {
             let rebuilt =
                 rebuilt_diff(&diff, Some(new_m.as_bytes()), Some(old_m.as_bytes())).map(|(d, _)| d);
             rebuilt_count += usize::from(rebuilt.is_some());
-            let fallback =
-                masked_raw_diff(&diff, Some(new_m.as_bytes()), Some(old_m.as_bytes()), "x");
+            let fallback = masked_raw_diff(&diff, Some(new_m.as_bytes()), Some(old_m.as_bytes()));
             for out in rebuilt.iter().chain(std::iter::once(&fallback)) {
                 for s in [&s_add, &s_del, &s_ctx] {
                     for window in s.as_bytes().windows(8) {
@@ -408,12 +417,7 @@ mod tests {
         let named = find_secret(&token).expect("premise: a token is a secret");
         let diff =
             format!("@@ -1,1 +1,3 @@\n fn f() {{}}\n+let t = \"{token}\";\n+let drifted = 1;\n");
-        let out = masked_raw_diff(
-            &diff,
-            Some(b"fn f() {}\n"),
-            Some(b"fn f() {}\n"),
-            "aws-secret-key",
-        );
+        let out = masked_raw_diff(&diff, Some(b"fn f() {}\n"), Some(b"fn f() {}\n"));
         assert!(!out.contains(&token), "{out}");
         assert!(out.contains(&format!("+{REDACTED_OPEN}{named}>")), "{out}");
         assert!(
@@ -436,7 +440,7 @@ mod tests {
         assert_eq!(find_secret(&side), None, "premise: each side is clean");
         assert!(find_secret(&diff).is_some(), "premise: the diff is not");
         assert_eq!(
-            fallback_diff(&diff, Some(side.as_bytes()), Some(side.as_bytes()), "x"),
+            fallback_diff(&diff, Some(side.as_bytes()), Some(side.as_bytes())),
             None
         );
     }
@@ -446,7 +450,7 @@ mod tests {
         // [MAGI S6 MS3 loop14, R6a1 Balthasar] `in_hunk` was never reset: a header line after a
         // hunk was read as a body line and redacted whole instead of masked as a header.
         let diff = "@@ -1,1 +1,1 @@\n fn f() {}\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n";
-        let out = masked_raw_diff(diff, Some(b"fn f() {}\n"), Some(b"fn f() {}\n"), "x");
+        let out = masked_raw_diff(diff, Some(b"fn f() {}\n"), Some(b"fn f() {}\n"));
         assert!(
             out.contains("diff --git a/b.rs b/b.rs\n--- a/b.rs\n"),
             "{out}"
