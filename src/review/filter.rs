@@ -567,6 +567,17 @@ fn kept_verdict(
     })
 }
 
+/// Stub.
+fn fallback_diff(
+    diff: &str,
+    new: Option<&[u8]>,
+    old: Option<&[u8]>,
+    pattern: &str,
+) -> Option<String> {
+    let _ = (diff, new, old, pattern);
+    Some(String::new())
+}
+
 /// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it: a header line outside a hunk
 /// is masked with [`mask_secrets`]; an `@@` line keeps its ranges and its function context only
 /// when a masked side shows it ([`shown_by_a_side`]); a body line is kept only when a masked
@@ -1233,6 +1244,27 @@ mod tests {
         assert_eq!(find_secret(&held), None, "{held}");
     }
 
+    #[test]
+    fn a_fallback_diff_that_still_holds_a_secret_is_refused() {
+        // [MAGI S6 MS3 loop13, R6a Melchior] The by-line fallback was the one egress text never
+        // re-scanned: a secret that exists only across adjacent diff lines (each line verbatim
+        // on a clean side) survived it. `fallback_diff` scans its own output.
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let new = format!("aws_secret_key =\nfn f() {{}}\n\"{value}\"\n");
+        let diff = format!("@@ -1,2 +1,2 @@\n aws_secret_key =\n \"{value}\"\n");
+        assert_eq!(find_secret(&new), None, "premise: each side is clean");
+        assert_eq!(
+            find_secret(&diff),
+            Some("aws-secret-key"),
+            "premise: the diff is not"
+        );
+        assert_eq!(
+            fallback_diff(&diff, Some(new.as_bytes()), None, "aws-secret-key"),
+            None
+        );
+        let clean = "@@ -0,0 +1,1 @@\n+fn f() {}\n";
+        assert!(fallback_diff(clean, Some(b"fn f() {}\n"), None, "x").is_some());
+    }
     #[test]
     fn a_joined_literal_key_header_is_left_out_not_held_raw() {
         // [MAGI S6 MS3 loop13, R6a Caspar, critical] `holds_key_block` (the hold decision)
