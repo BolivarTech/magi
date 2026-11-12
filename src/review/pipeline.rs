@@ -646,7 +646,7 @@ pub async fn run_review(
     // MAGI FIX (MS3 §6 loop6): every prompt is rendered now, before a caller's deadline is read
     // again and before the clock starts, so no batch's wall clock is computed before work the
     // total never counted (R4 Caspar).
-    let prompts = render_prompts(&batches, &contexts)?;
+    let prompts = render_prompts(&batches, &contexts, limit)?;
     // Read again: the total is what is left of a caller's deadline. A preparation that overran
     // its reserve already made its calls, so a refusal now would come after the egress (§5.0
     // stage 4): a source that declared a reserve (`sent_out`) runs on what is left.
@@ -1211,14 +1211,19 @@ impl ReviewTimer<'_> {
 }
 
 /// The prompt of every batch, its code then its context, rendered before the review clock
-/// starts (RV06). `contexts[i]` is the context of `batches[i]`, by position (`batch.index == i`).
-/// Code and context arrive masked; each prompt is masked once more, a no-op backstop
-/// (`a_prompt_masks_a_secret_its_stages_left_raw`). O(bytes).
+/// starts (RV06). `contexts[i]` is the context of `batches[i]`, by position (`batch.index == i`,
+/// pinned by `batch_index_is_its_position`). The code is masked, then each context item is masked and then
+/// escaped ([`write_context`]): masking after the escaping wrote `<<<` out of `<<` plus a mask
+/// (`backstop_masks_then_escapes`), so no mask runs on the finished prompt. The finished prompt is
+/// measured against `limit` (the code and context budget, [`prompt_limit_tokens`]): a mask is longer
+/// than many secrets, so RV04 holds on what is sent, not only on the accounting
+/// (`a_prompt_grown_by_masks_is_refused`). O(bytes).
 ///
 /// # Errors
 ///
 /// [`ReviewError::NotReviewable`] (`secret`) for a prompt holding a private-key block, which
 /// masking cannot cover (`prompt_key_block_fails_closed`); nothing is sent.
+/// [`ReviewError::TooLargeForBatch`] when a rendered prompt is over `limit` tokens.
 ///
 /// Declared order (MS3 §6 loop12): this check runs after [`prepare_contexts`], so the (masked)
 /// query embeddings of the documentation search may already have gone out when a prompt trips it.
@@ -1226,30 +1231,45 @@ impl ReviewTimer<'_> {
 /// filter leaves key-block files out and `context_egress` withholds key-block items, so in the
 /// ordinary path it never fires, and what it could add is a failed review, never a sent block.
 // MAGI FIX (MS3 §6 loop7): looked up by `batch.index`; and it trusted earlier stages to mask.
+// MAGI FIX (MS3 §6 loop13): masked before the escaping, then measured.
 fn render_prompts(
     batches: &[ReviewBatch],
     contexts: &[Vec<ContextItem>],
+    limit: usize,
 ) -> Result<Vec<String>, ReviewError> {
     batches
         .iter()
         .enumerate()
         .map(|(i, batch)| {
-            let mut prompt = prompt_of(batch);
+            let code = prompt_of(batch);
+            // MAGI FIX (MS3 §6 loop9): the mask covers a key block's armor, never its body.
+            let key_block = |batch: &ReviewBatch| ReviewError::NotReviewable {
+                path: format!("batch {}", batch.index),
+                cause: SkipCause::Secret.as_str(),
+            };
+            if holds_key_block(&code) {
+                return Err(key_block(batch));
+            }
+            let mut prompt = mask_secrets(&code);
             if let Some(items) = contexts.get(i) {
                 write_context(&mut prompt, items);
             }
-            // MAGI FIX (MS3 §6 loop9): the mask covers a key block's armor, never its body.
             if holds_key_block(&prompt) {
-                return Err(ReviewError::NotReviewable {
-                    path: format!("batch {}", batch.index),
-                    cause: SkipCause::Secret.as_str(),
+                return Err(key_block(batch));
+            }
+            let tokens =
+                estimate_tokens(prompt.strip_prefix(LINE_NUMBER_LEGEND).unwrap_or(&prompt));
+            if tokens > limit {
+                return Err(ReviewError::TooLargeForBatch {
+                    what: format!("batch {} prompt", batch.index),
+                    tokens,
+                    limit,
                 });
             }
-            Ok(mask_secrets(&prompt))
+            Ok(prompt)
         })
         .collect()
 }
-
 /// Whether a review with `total` runs below the `configured` ceiling: its derived `ceiling`, or,
 /// on an overrun (`None`, the batches run on what is left), the absolute floor each batch's
 /// ceiling never goes under. Without a `total`, never. O(1).
@@ -1396,6 +1416,8 @@ fn write_context(prompt: &mut String, items: &[ContextItem]) {
     prompt.push('\n');
     for item in items {
         let (open, close) = context_frame(&item.kind, &display_path(&item.file), item.candidate);
+        // MAGI FIX (MS3 §6 loop13): the frame's label is masked where it is written.
+        let (open, close) = (mask_secrets(&open), mask_secrets(&close));
         prompt.push_str(&open);
         prompt.push('\n');
         // MAGI FIX (T3.7): a containing unit is numbered like the code under review.
@@ -2419,6 +2441,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn batch_index_is_its_position() {
+        // [MAGI S6 MS3 loop13, R4] Prompts, contexts and metrics pair with batches by position
+        // (`zip`, `contexts.get(i)`), so the planner's `index` must equal the position.
+        let files: Vec<ReviewFile> = (0..4)
+            .map(|i| ReviewFile {
+                path: format!("f{i}.rs"),
+                diff: None,
+            })
+            .collect();
+        let text = "fn a() {}\n".repeat(30);
+        let owned: Vec<(String, &str)> = (0..4)
+            .map(|i| (format!("f{i}.rs"), text.as_str()))
+            .collect();
+        let pairs: Vec<(&str, &str)> = owned.iter().map(|(p, t)| (p.as_str(), *t)).collect();
+        let source = crate::review::test_support::MapSource::new(&pairs, &[]);
+        let batches =
+            crate::review::batching::plan_batches(&files, &source, &LanguageRegistry::new(), 150)
+                .expect("plans");
+        assert!(batches.len() >= 3, "{}", batches.len());
+        for (position, batch) in batches.iter().enumerate() {
+            assert_eq!(batch.index, position);
+        }
+    }
     #[test]
     fn a_frame_label_is_masked_too() {
         // [MAGI S6 MS3 loop13, R4] The prompt is no longer masked as a whole after the escaping

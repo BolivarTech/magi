@@ -1097,7 +1097,7 @@ mod tests {
         // MAGI FIX (MS3 §6 loop12): the capacity hint added an eighth of the text, but each line
         // gains a whole prefix, so a file of short lines reallocated as it grew. The hint now
         // counts the prefixes: the buffer ends exactly full, never regrown (for numbers within
-        // LINE_NUMBER_WIDTH digits: _number_past_the_width_widens_its_prefix).
+        // `LINE_NUMBER_WIDTH` digits: `a_number_past_the_width_widens_its_prefix`).
         let short = "a\n".repeat(1_000);
         let numbered = number_lines(&short, 1);
         assert_eq!(numbered.capacity(), numbered.len());
