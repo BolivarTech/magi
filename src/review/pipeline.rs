@@ -362,7 +362,9 @@ impl ReviewClock for SystemReviewClock {
 /// The whole seconds, at least as many as `elapsed`. O(1).
 // MAGI FIX (MS3 §6 loop12): the clock floored whole seconds (R4 Caspar).
 fn whole_secs_up(elapsed: Duration) -> u64 {
-    elapsed.as_secs()
+    elapsed
+        .as_secs()
+        .saturating_add(u64::from(elapsed.subsec_nanos() > 0))
 }
 
 /// Runs one batch under its wall clock.
@@ -1533,6 +1535,26 @@ fn masked_store_item(item: &ContextItem) -> Option<&'static str> {
     }
 }
 
+/// What a batch's source promised ([`RagSource::units_for`]): the units as they may leave the
+/// process, and their sorted identities ([`unit_identity`]).
+type PromisedUnits = (Vec<ContextEgress>, Vec<(String, String)>);
+
+/// The `(file, label)` of each item, sorted: what says two lists name the same units whatever
+/// their order. O(n log n).
+///
+/// # Arguments
+///
+/// * `items` - The context items (units).
+///
+/// # Returns
+///
+/// The sorted identities.
+fn unit_identity<'a>(items: impl Iterator<Item = &'a ContextItem>) -> Vec<(String, String)> {
+    let mut ids: Vec<(String, String)> = items.map(|i| (i.file.clone(), i.label.clone())).collect();
+    ids.sort_unstable();
+    ids
+}
+
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
 ///
 /// Each item passes [`context_egress`]: a one-line secret is masked and its file declared masked;
@@ -1562,13 +1584,13 @@ async fn prepare_contexts(
     // MAGI FIX (MS3 §6 loop10): units past the limit failed after earlier batches' calls.
     // MAGI FIX (MS3 §6 loop11): each unit's egress is computed here once and reused below when
     // `context_for` brings the same units (the `units_for` contract), not computed twice.
-    let mut pre_units: Vec<Vec<ContextEgress>> = Vec::with_capacity(batches.len());
+    // MAGI FIX (MS3 §6 loop12): each batch's promised units are kept with their identity (file,
+    // label), and reused only when `context_for` brings the same ones, not merely as many.
+    let mut pre_units: Vec<PromisedUnits> = Vec::with_capacity(batches.len());
     for batch in batches {
-        let egress: Vec<ContextEgress> = rag
-            .units_for(batch)?
-            .into_iter()
-            .map(context_egress)
-            .collect();
+        let promised = rag.units_for(batch)?;
+        let identity = unit_identity(promised.iter());
+        let egress: Vec<ContextEgress> = promised.into_iter().map(context_egress).collect();
         let units: usize = egress
             .iter()
             .map(|e| match e {
@@ -1576,7 +1598,7 @@ async fn prepare_contexts(
                 ContextEgress::Withhold(_) => 0,
             })
             .sum();
-        pre_units.push(egress);
+        pre_units.push((egress, identity));
         let code = batch
             .tokens
             .saturating_add(estimate_tokens(CONTEXT_HEADING));
@@ -1589,7 +1611,7 @@ async fn prepare_contexts(
         }
     }
     let mut contexts = Vec::with_capacity(batches.len());
-    for (batch, pre) in batches.iter().zip(pre_units) {
+    for (batch, (pre, promised)) in batches.iter().zip(pre_units) {
         let mut assembled = rag.context_for(batch).await?;
         summary.trimmed.extend(
             assembled
@@ -1604,12 +1626,13 @@ async fn prepare_contexts(
         summary.without_memory |= assembled.without_memory;
         summary.context_withheld = summary.context_withheld.saturating_add(assembled.withheld);
         let charged: usize = assembled.items.iter().map(item_cost).sum();
-        let units = assembled
-            .items
-            .iter()
-            .filter(|i| i.kind == ContextKind::Unit)
-            .count();
-        let reuse = !pre.is_empty() && pre.len() == units;
+        let brought = unit_identity(
+            assembled
+                .items
+                .iter()
+                .filter(|i| i.kind == ContextKind::Unit),
+        );
+        let reuse = !pre.is_empty() && brought == promised;
         if reuse {
             assembled.items.retain(|i| i.kind != ContextKind::Unit);
         }
