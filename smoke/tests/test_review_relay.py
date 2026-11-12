@@ -441,6 +441,13 @@ class RelayScenarioTests(unittest.TestCase):
                 r = _with(_result(run_id, 0, {}), output=None)
                 self.assertTrue(all(o is C for o in _judged(sid, r, texts)), sid)
 
+    def test_s54_without_output_is_three_findings(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7a Melchior): the leak check read `run.output.*` on a result
+        # that left no capture; S54 yields its three findings, as its five siblings do.
+        r = _with(_result("R19", 0, {}), output=None)
+        outcomes = _outcomes("S54", r)
+        self.assertEqual(3, len(outcomes))
+
     def test_s57_serves_validated_history(self) -> None:
         found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3,
                                                "title": "off by one"}]}}
@@ -463,6 +470,20 @@ class RelayScenarioTests(unittest.TestCase):
             self.assertEqual(want, _judged("S57", r, rc.S57_ASSERTIONS), bodies)
         r = _with(_result("R21", 0, {}), request_bodies=served, setup_outputs=(first, first), output=None)
         self.assertEqual([C, C], _judged("S57", r, rc.S57_ASSERTIONS))
+
+    def test_s57_matches_utf8_and_separators(self) -> None:
+        # MAGI FIX (MS3 §6 loop13, R7a): the product's JSON body keeps non-ASCII characters
+        # (serde_json does not escape them) and may write the path with either separator.
+        title = "décalage à l'index"
+        found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3, "title": title}]}}
+        first = ProductOutput(stdout=json.dumps(found).encode(), stderr=b"", exit_code=0, command=["m"])
+        item = ("\\n%s (attended)\\n" % title).encode("utf-8")
+        path = runs.REVIEW_HISTORY_FILE
+        for shown in (path, path.replace("/", "\\"), path.replace("/", "\\\\")):
+            frame = b"<<<context kind=history file=%s>>>" % shown.encode()
+            r = _with(_result("R21", 0, {}), request_bodies=(("/api/chat", frame + item),),
+                      setup_outputs=(first, first))
+            self.assertEqual([P, P], _judged("S57", r, rc.S57_ASSERTIONS), shown)
 
 
 if __name__ == "__main__":
