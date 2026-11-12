@@ -293,7 +293,9 @@ const KEY_BLOCK_END_OPENERS: [(&str, &str); 2] = [(ARMOR_DASHES, "END "), (SSH2_
 /// what text is masked, this one only how far a withheld window reaches inside a file the filter
 /// has ALREADY left out for holding a block (RV22's file-level exception), a backstop. A drift
 /// loosens at most this backstop, never the file-level omission, and each side is pinned by its
-/// own tests (`armor_end_lines_close_a_block`, `armor_end_must_open_its_line`).
+/// own tests (`armor_end_lines_close_a_block`, `armor_end_must_open_its_line`), and the relation
+/// between them by `footer_rules_agree`: on every canonical PEM, OpenPGP and SSH2 block, where the
+/// mask stops is a line this reads as an END line.
 // MAGI FIX (MS3 §6 loop10): any occurrence closed a block, `----- END` as an SSH2 footer.
 fn holds_armor_end(text: &str) -> bool {
     let line = text.trim_start();
@@ -1755,6 +1757,43 @@ mod tests {
         assert!(!holds_armor_end("MIIEvQIBADANBgkqhkiG9w0BAQEFAASC+/="));
     }
 
+    #[test]
+    fn footer_rules_agree() {
+        // [MAGI S6 MS3 loop13, R6b] The gate's END rule and `secrets::mask_secrets`' are two
+        // implementations kept apart on purpose; this pins their relation. Over the canonical
+        // PEM, OpenPGP and SSH2 blocks, the point where the mask stops (the text after the block
+        // survives) is a line the gate reads as an END line, so the gate's backstop never
+        // reaches less far than the mask on any footer the mask recognises.
+        let (d, s) = (ARMOR_DASHES, SSH2_DASHES);
+        let blocks = [
+            (
+                format!("{d}BEGIN PRIVATE KEY{d}"),
+                format!("{d}END PRIVATE KEY{d}"),
+            ),
+            (
+                format!("{d}BEGIN PGP PRIVATE KEY BLOCK{d}"),
+                format!("{d}END PGP PRIVATE KEY BLOCK{d}"),
+            ),
+            (
+                format!("{s} BEGIN SSH2 ENCRYPTED PRIVATE KEY {s}"),
+                format!("{s} END SSH2 ENCRYPTED PRIVATE KEY {s}"),
+            ),
+            (
+                format!("{s} BEGIN SSH2 PRIVATE KEY {s}"),
+                format!("{s} END SSH2 PRIVATE KEY {s}"),
+            ),
+        ];
+        for (header, footer) in blocks {
+            let masked =
+                crate::review::secrets::mask_secrets(&format!("{header}\nAAAA\n{footer}\nAFTER\n"));
+            assert!(
+                masked.contains("AFTER"),
+                "the mask ran past {footer}: {masked}"
+            );
+            assert!(!masked.contains("AAAA"), "{masked}");
+            assert!(holds_armor_end(&footer), "the gate misses {footer}");
+        }
+    }
     #[tokio::test]
     async fn deadline_precedes_key_scan() {
         // MAGI FIX (MS3 §6 loop12): the whole-code key-block scan ran before the deadline check, so
