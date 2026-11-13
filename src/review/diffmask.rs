@@ -142,6 +142,9 @@ pub(super) fn rebuilt_diff(
 ) -> Option<(String, usize)> {
     let (new_lines, old_lines) = (side_lines(new)?, side_lines(old)?);
     let (mut next_new, mut next_old) = (0usize, 0usize);
+    // Asymmetric with the raw masker on purpose: that one resets `in_hunk` at a header line
+    // because it reads a whole multi-section diff; this one reads one section's hunks, whose
+    // own header lines are not body lines (see the rustdoc above).
     let mut in_hunk = false;
     let mut diverged = 0usize;
     let mut index: Option<SideIndex<'_>> = None;

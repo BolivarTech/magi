@@ -785,6 +785,10 @@ fn deletion_diff(section: &str, old: &str) -> String {
     diff
 }
 
+/// The pattern a `secret` skip logs when the cache refused the read: the file was left out
+/// earlier, and the refusal does not carry which pattern did it.
+const REFUSED_BY_CACHE_PATTERN: &str = "left out earlier";
+
 /// A `secret` skip, logged with the shown path and the pattern's name (never the value).
 fn secret(path: &str, pattern: &'static str) -> Verdict {
     let shown = display_path(path);
@@ -879,7 +883,12 @@ fn read_side(
         Err(ReviewError::NotRegularFile(_)) => Ok(Side::Skip(SkipCause::NotRegularFile)),
         // MAGI FIX (MS3 §6 loop5): the cache refuses a side already left out for a secret (a
         // path listed twice); inside the filter that is the same skip, not a failed review.
-        Err(ReviewError::EgressSecret { .. }) => Ok(Side::Skip(SkipCause::Secret)),
+        // MAGI FIX (MS3 §6 loop15): logged like every other `secret` skip; the cache's refusal
+        // does not carry the pattern that first left the file out, so the entry names why.
+        Err(ReviewError::EgressSecret { .. }) => {
+            let _ = secret(path, REFUSED_BY_CACHE_PATTERN);
+            Ok(Side::Skip(SkipCause::Secret))
+        }
         // The source's one `NotReviewable`, keyed on the constant it is built from.
         Err(ReviewError::NotReviewable {
             cause: HARD_LINK_CAUSE,
