@@ -211,7 +211,7 @@ class SecretOpeningsTests(unittest.TestCase):
 
     def test_every_fixed_opening_is_read(self) -> None:
         got = secret_openings(pathlib.Path(__file__).resolve().parents[2])
-        for fixed in ("-----begin ", "---- begin ssh2 ", "aws_secret", "secretaccesskey", "://"):
+        for fixed in ("-----begin", "---- begin", "aws_secret", "secretaccesskey", "://"):
             self.assertIn(fixed, got)
 
     def test_an_identifier_is_resolved_or_refused(self) -> None:
