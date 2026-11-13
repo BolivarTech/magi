@@ -335,7 +335,9 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
 // `smoke/tests/rust_source.py`): keep each element a literal or a `const` of this file.
 const NON_TOKEN_PREFIXES: &[&str] = &[
     // MAGI FIX (MS3 §6 loop15): no trailing space; a NUL that ate it left the opening unmatched.
-    "-----begin",
+    // MAGI FIX (MS3 §6 loop16): four dashes, spaceless, is what the text path's SSH2 armor
+    // reads; it also covers the five-dash PEM and OpenPGP openings.
+    "----begin",
     "---- begin",
     "aws_secret",
     "secretaccesskey",

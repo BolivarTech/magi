@@ -347,7 +347,8 @@ class SecretOpeningsTests(unittest.TestCase):
         import pathlib
         openings = _helpers().secret_openings(pathlib.Path(__file__).resolve().parents[2])
         # [MAGI S6 MS3 loop15] the openings lost their trailing space (a NUL split `-----BEGIN`).
-        self.assertIn("-----begin", openings)
+        # [MAGI S6 MS3 loop16] four dashes: the spaceless SSH2 armor covers the five-dash headers.
+        self.assertIn("----begin", openings)
         self.assertGreater(len(openings), 10)
 
     def test_a_table_with_no_fixed_openings_is_refused(self) -> None:
