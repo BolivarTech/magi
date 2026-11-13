@@ -491,6 +491,9 @@ struct Outcome {
     /// The cause that kept one of its pairs from being sent (`state too large`, `secret`) while
     /// another pair was asked.
     withheld: Option<&'static str>,
+    /// The guard the state itself raised (`masked code`) when the critical rule's cause took
+    /// the state's cause, so both are named in the causes.
+    guard_also: Option<&'static str>,
 }
 
 impl Outcome {
@@ -506,6 +509,7 @@ impl Outcome {
             decided: false,
             unasked: false,
             withheld: None,
+            guard_also: None,
         }
     }
 
@@ -527,6 +531,7 @@ impl Outcome {
             decided: false,
             unasked: false,
             withheld: None,
+            guard_also: None,
         }
     }
 }
@@ -750,6 +755,9 @@ impl<'a> Gate<'a> {
         if let Some(guard) = guard.filter(|_| outcome.cause == Some(CAUSE_CRITICAL_NEVER_FILTERED))
         {
             causes.push(guard);
+        }
+        if let Some(also) = outcome.guard_also.filter(|a| !causes.contains(a)) {
+            causes.push(also);
         }
         causes.extend(outcome.withheld);
         if outcome.unasked && !causes.contains(&CAUSE_NOT_EVERY_CLAIM_JUDGED) {
@@ -1019,8 +1027,12 @@ impl<'a> Gate<'a> {
                         (FALSE_POSITIVE, None) => (GateState::Filtered, None),
                         _ => (GateState::Kept, None),
                     };
+                    // MAGI FIX (MS3 §6 loop15): the guard the state raised is named beside the
+                    // critical cause that replaced it.
+                    let guard_also = guard.filter(|_| cause == Some(CAUSE_CRITICAL_NEVER_FILTERED));
                     return Outcome {
                         decided: true,
+                        guard_also,
                         ..Outcome::answered(state, cause, &spec.model, choice, confidence)
                     };
                 }
