@@ -1785,7 +1785,9 @@ mod tests {
     impl GitCommand for OnHeadsLine {
         fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
             match a.first() {
-                Some(&"merge-base") => Ok(Vec::new()),
+                // The reviewed commit is a strict ancestor of HEAD: the reverse question (is HEAD
+                // an ancestor of it?) answers no.
+                Some(&"merge-base") if a.get(2) != Some(&"HEAD") => Ok(Vec::new()),
                 _ => Err(ReviewError::Git(a.join(" "))),
             }
         }

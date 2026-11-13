@@ -831,8 +831,10 @@ mod tests {
         // [MAGI S6 MS3 loop3, R3 Melchior; false positive pinned] A stored path such as
         // `:(glob)*.rs` reaches `git diff ... -- <file>` in `classify`. Every call of this runner
         // carries GIT_LITERAL_PATHSPECS=1, so it names that file and no other: here it matches
-        // nothing (untouched, a weak reject), where read as magic it would match `a.rs`, whose
-        // line 1 changed (attended).
+        // nothing, where read as magic it would match `a.rs`, whose line 1 changed: the runner's
+        // own listing below is what discriminates the two readings (MAGI FIX, MS3 §6 loop14);
+        // `classify` alone answers Pending either way, since it also needs the diff to name only
+        // the entry's file.
         use magi_rs::review::history::{classify, HistoryEntry, HistoryStatus};
         let d = repo();
         std::fs::write(d.path().join("a.rs"), "one\ntwo\n").expect("write");
@@ -856,9 +858,12 @@ mod tests {
             status: HistoryStatus::Pending,
         };
         // [MAGI S6 MS3 loop7] Pending, no longer a weak reject: the literal path is no file at
-        // c1, and an empty diff weak-rejects only a regular file. Read as magic it would be
-        // attended, so the literal reading is still what this pins.
+        // c1, and an empty diff weak-rejects only a regular file.
         assert_eq!(classify(&magic, "HEAD", &g), HistoryStatus::Pending);
+        let listed = g
+            .run(&["diff", "--name-only", &c1, "HEAD", "--", ":(glob)*.rs"])
+            .expect("diff");
+        assert_eq!(listed.trim(), "", "read as magic it would name a.rs");
         let real = HistoryEntry {
             file: "a.rs".into(),
             ..magic

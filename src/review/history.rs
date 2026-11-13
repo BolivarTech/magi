@@ -218,8 +218,9 @@ pub fn served_as_validated(entry: &HistoryEntry, head: &str, git: &dyn GitComman
 }
 
 /// The ancestry half of [`served_as_validated`]: whether `commit` is a commit id that is an
-/// ancestor of `head`. Depends on `commit` and `head` alone, so a caller may memoize it per
-/// commit (`StoreRag`). Fails closed as [`served_as_validated`]. One local git call.
+/// strict ancestor of `head` (not `head` itself, `an_entry_at_its_own_commit_is_not_served`).
+/// Depends on `commit` and `head` alone, so a caller may memoize it per commit (`StoreRag`).
+/// Fails closed as [`served_as_validated`]. Two local git calls.
 ///
 /// # Arguments
 /// * `commit` - the reviewed commit.
@@ -229,11 +230,18 @@ pub fn served_as_validated(entry: &HistoryEntry, head: &str, git: &dyn GitComman
 /// # Returns
 /// Whether `commit` is on `head`'s line.
 pub fn on_heads_line(commit: &str, head: &str, git: &dyn GitCommand) -> bool {
+    // MAGI FIX (MS3 §6 loop14): a commit is its own ancestor, so the first call alone served an
+    // entry while `head` was the reviewed commit (no commit after it, no RV08 signal). `head` an
+    // ancestor of `commit` too means they are one commit; a git that cannot answer the second
+    // call reads as "not the same", which the first call's success already makes the exotic case.
     is_commit_id(commit)
         && !head.starts_with('-')
         && git
             .run(&["merge-base", "--is-ancestor", commit, head])
             .is_ok()
+        && git
+            .run(&["merge-base", "--is-ancestor", head, commit])
+            .is_err()
 }
 
 /// Whether `rev` resolves to a commit: `rev-parse --verify <rev>^{commit}` answers. One call.
@@ -498,7 +506,9 @@ pub fn reclassify_then_record(
 /// consolidation uses, so it is stable across reviews while file and line do not change; a
 /// failure that moves to another line is another id. Declared limitation: two different
 /// findings on one unchanged `file:line` in two reviews share the id, and the first sighting
-/// wins (`ReviewHistoryStore::record`) unless the stored one is `attended`, whose code changed. It depends on magi-core's algorithm
+/// wins (by design: the trio rewords a title on every run, so an id keyed on it would record the
+/// same defect anew each review and the history would grow without bound; the consolidated
+/// row already merges the titles of one review, as RV12 does across mages) (`ReviewHistoryStore::record`) unless the stored one is `attended`, whose code changed. It depends on magi-core's algorithm
 /// (pinned `=4.2.0`): a bump that changes it leaves old rows with ids no new review
 /// repeats, and must re-verify this.
 ///
@@ -540,8 +550,6 @@ pub fn entries_from_review(
             // line, not only by a header whole in one joined string.
             // MAGI FIX (MS3 §6 loop13): the END line is looked for over the joined (stored) forms
             // too: a footer opening the second text is at a line start only there.
-            // MAGI FIX (MS3 §6 loop13): the END line is looked for over the joined (stored) forms
-            // too: a footer opening the second text is at a line start only there.
             if [&title, &detail]
                 .iter()
                 .any(|t| holds_key_block(t) || holds_key_block_end(t))
@@ -549,17 +557,34 @@ pub fn entries_from_review(
             {
                 return None;
             }
+            let (title, detail) = masked_text(&title, &detail);
             Some(HistoryEntry {
                 id: generate_finding_id(file, line, NEUTRAL_CATEGORY),
                 file: file.clone(),
                 line: Some(line),
                 reviewed_commit: reviewed_commit.to_string(),
-                title: mask_secrets(&title),
-                detail: mask_secrets(&detail),
+                title,
+                detail,
                 status: HistoryStatus::Pending,
             })
         })
         .collect()
+}
+
+/// `title` and `detail` with their secrets masked, over each field and over the two joined by the
+/// line break the context read shows between them: a secret whose name ends the title and whose
+/// value opens the detail is found only joined. When the joined text masks differently from the
+/// fields, the joined masked text is stored whole as the title, so no byte of it is kept in a
+/// clear field (`a_secret_across_title_and_detail_is_stored_masked`). O(bytes).
+// MAGI FIX (MS3 §6 loop14): the two fields were masked apart.
+fn masked_text(title: &str, detail: &str) -> (String, String) {
+    let apart = (mask_secrets(title), mask_secrets(detail));
+    let joined = mask_secrets(&format!("{title}{MERGED_TEXT_SEPARATOR}{detail}"));
+    if joined == format!("{}{MERGED_TEXT_SEPARATOR}{}", apart.0, apart.1) {
+        apart
+    } else {
+        (joined, String::new())
+    }
 }
 
 /// The five dashes that open and close a PEM or OpenPGP armor line.

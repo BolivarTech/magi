@@ -49,9 +49,14 @@ const FILES_PER_QUERY: usize = 400;
 /// trimmed. Past it the newest are kept and the cut is declared.
 pub const MAX_HISTORY_PER_BATCH: usize = 32;
 
-/// Raw rows (still encrypted, never decrypted here) one file batch of the context read scans
-/// for entries on `HEAD`'s line, eight times [`MAX_HISTORY_PER_BATCH`]: a starting point. Past it
-/// the read declares a cut rather than scan the whole history.
+/// Raw rows (still encrypted, never decrypted here) one file batch of the context read returns
+/// from SQLite to be checked against `HEAD`'s line, eight times [`MAX_HISTORY_PER_BATCH`]: a
+/// starting point. It bounds the rows held, ancestry-checked and decrypted, and past it the read
+/// declares a cut. It does not bound SQLite's own matching: the query finds the batch's validated
+/// rows through the `file` index and sorts those (`LIMIT` stops the output, not the sort), which
+/// is O(m log m) for the `m` validated rows of the files under review (declared; `m` is the
+/// remembered findings on those files, not the history, and
+/// `the_bounded_history_reads_are_served_by_their_indexes_not_by_a_full_sort` pins the plan).
 pub const MAX_HISTORY_SCAN: usize = 8 * MAX_HISTORY_PER_BATCH;
 
 /// Rows the `due` count reads at most: its `total` (the review's backlog) saturates here, so the
@@ -223,18 +228,28 @@ impl ReviewHistoryStore {
     /// [`Self::corrupt_rows`], so one bad row never takes the whole read
     /// (`corrupt_row_is_skipped`). O(rows) decryptions.
     ///
-    /// Declared (MS3 §6 loop12): the skipped row is never in the caller's `touched`, so it stays
-    /// first in the due queue, is read and WARNed again each review and takes one of the 200 slots
-    /// of that review. Rows come only from this store's own atomic writes under the never-delete
-    /// open, so a row that fails to decode means a damaged file or a foreign key, and the WARN
-    /// per review is the signal; rotating it away would hide it.
+    /// Declared (MS3 §6 loop12, revised loop14): a skipped row is never in the caller's
+    /// `touched`, so [`Self::due`] moves it behind the queue itself (`corrupt_rows_never_starve_the_valid_ones`);
+    /// the WARN per read stays, so a damaged file or a foreign key is still signalled.
     // MAGI FIX (MS3 §6 loop11): one corrupt row failed the whole read.
     fn decode_all(&self, rows: Vec<RawRow>) -> Result<Vec<HistoryEntry>, MemoryError> {
+        self.decode_noting_corrupt(rows).map(|(entries, _)| entries)
+    }
+
+    /// [`Self::decode_all`], also naming the rows it skipped, for [`Self::due`] to move behind
+    /// the rest of the queue.
+    fn decode_noting_corrupt(
+        &self,
+        rows: Vec<RawRow>,
+    ) -> Result<(Vec<HistoryEntry>, Vec<String>), MemoryError> {
         let mut out = Vec::with_capacity(rows.len());
+        let mut skipped = Vec::new();
         for row in rows {
+            let id = row.id.clone();
             match self.decode(row) {
                 Ok(entry) => out.push(entry),
                 Err(e) => {
+                    skipped.push(id);
                     self.corrupt.fetch_add(1, Ordering::SeqCst);
                     let error = outward_text(&e.to_string());
                     tracing::event!(
@@ -246,7 +261,7 @@ impl ReviewHistoryStore {
                 }
             }
         }
-        Ok(out)
+        Ok((out, skipped))
     }
 
     /// [`Self::apply_review`] of `entries` alone (tests).
@@ -380,10 +395,34 @@ impl ReviewHistoryStore {
             snapshot.commit().map_err(db_err)?;
             (total, rows)
         };
-        Ok((
-            self.decode_all(rows)?,
-            usize::try_from(total).unwrap_or(usize::MAX),
-        ))
+        let (entries, corrupt) = self.decode_noting_corrupt(rows)?;
+        // MAGI FIX (MS3 §6 loop14): a row that does not decode is never in the caller's `touched`,
+        // so it kept the front of the queue and a slot of every review; reading it counts as a
+        // check, and it rotates behind the rest (the WARN per read stays the signal).
+        self.touch_rows(&corrupt)?;
+        Ok((entries, usize::try_from(total).unwrap_or(usize::MAX)))
+    }
+
+    /// Sets `checked_at = now` on `ids` (one statement each, one transaction); an id that is gone
+    /// is ignored, since another process may have removed it. O(ids).
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`].
+    fn touch_rows(&self, ids: &[String]) -> Result<(), MemoryError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now = now_secs();
+        let mut c = self.locked_conn();
+        let tx = c.transaction().map_err(db_err)?;
+        for id in ids {
+            tx.execute(
+                "UPDATE code_review_history SET checked_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )
+            .map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)
     }
 
     /// The validated (`attended` / `weak_reject`) entries on `files`, by SQL over the clear
@@ -404,8 +443,9 @@ impl ReviewHistoryStore {
     ///
     /// Complexity: each batch searches the `code_review_history_by_file` index for its files'
     /// validated rows (never a scan of the history) and sorts only those, O(m log m) for the `m`
-    /// such rows; at most 2 x (bound + 1) raw rows held at once (the newest are kept after each
-    /// file batch), O(bound) decryptions.
+    /// such rows; at most (bound + 1) + [`MAX_HISTORY_SCAN`] raw rows held at once (the kept
+    /// newest plus one batch's read; the newest are kept after each file batch), O(bound)
+    /// decryptions.
     ///
     /// Test-only wrapper (MS3 §6 loop12): it accepts every reviewed commit. The production
     /// context read is [`Self::validated_on_line`], which adds the `HEAD` ancestry filter
