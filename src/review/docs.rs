@@ -1106,12 +1106,15 @@ pub fn bounded(
             n.saturating_add(c.text.len())
                 .saturating_add(c.section.len())
         });
-        if total.saturating_add(chunks.len()) > MAX_DOC_CHUNKS
+        // MAGI FIX (MS3 §6 loop15): a source with no chunk still costs a registry row, so it
+        // counts as one against the bound (R1 Caspar).
+        let cost = chunks.len().max(1);
+        if total.saturating_add(cost) > MAX_DOC_CHUNKS
             || bytes.saturating_add(size) > MAX_DOC_INDEX_BYTES
         {
             truncated = true;
         } else {
-            total += chunks.len();
+            total += cost;
             bytes += size;
             kept.push((source, chunks));
         }
