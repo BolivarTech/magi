@@ -2031,6 +2031,20 @@ mod tests {
     }
 
     #[test]
+    fn outward_text_sees_through_a_tab_or_a_lone_cr() {
+        // [MAGI S6 MS3 loop15, R6a2] the error-text path kept tabs and CRs in its stripped
+        // pass, so a token split by one was read as two short runs and left both halves.
+        for split in ["\t", "\r"] {
+            let raw = format!("see sk-ant-api03-AAAAAAAAAA{split}AAAAAAAAAA now"); // allow-secret-scan
+            let out = outward_text(&raw);
+            assert!(!out.contains("AAAAAAAAAA"), "{split:?}: {out}");
+            assert!(out.contains("redacted"), "{split:?}: {out}");
+        }
+        // A clean tab-separated line is only escaped, never replaced.
+        assert_eq!(outward_text("a\tb\r\nc"), "a\\tb\\r\\nc");
+    }
+
+    #[test]
     fn outward_text_keeps_line_breaks() {
         // [MAGI S6 MS3 loop13, R6a Melchior] when the control-stripped copy found a secret the
         // first pass missed, it returned a text with every line break gone, joining a
