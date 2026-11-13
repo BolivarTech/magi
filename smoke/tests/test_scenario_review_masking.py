@@ -91,6 +91,16 @@ class S53Tests(unittest.TestCase):
         leaky = _result("R18", 0, None, stderr=b"oops " + runs.REVIEW_MASKED_KEY, timed_out=True)
         self.assertEqual([Outcome.CANNOT_TEST] * 3 + [Outcome.FAIL], [self._judge(i, leaky) for i in range(4)])
 
+    def test_a_hung_runs_leak_cannot_test_keeps_its_own_detail(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7a2 Melchior): the leak judge's own CANNOT_TEST (here the relay's
+        # record is missing) was replaced by "its capture holds no key", which claimed a check the
+        # judge had refused to make.
+        hung = _result("R18", 0, None, timed_out=True)
+        findings = list(rm.a_key_in_a_files_content_is_masked_and_the_file_reviewed(hung))
+        self.assertEqual(Outcome.CANNOT_TEST, findings[3].outcome)
+        self.assertIn("relay's record", findings[3].detail)
+        self.assertNotIn("holds no key", findings[3].detail)
+
     def test_the_masked_prompt_claim_is_s53s_own(self) -> None:
         # MAGI FIX (MS3 §6 loop13, R7a Balthasar): the generic leak judge no longer carries it.
         run = _result("R18", 0, _doc(), requests=(("/api/chat", b"{}"),))
