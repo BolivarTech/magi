@@ -1858,6 +1858,26 @@ mod tests {
     }
 
     #[test]
+    fn sources_without_chunks_count_against_the_bound() {
+        // [MAGI S6 MS3 loop15, R1 Caspar] a source with no chunk (an empty README, a file with no
+        // doc comment) cost nothing, so a tree of them was registered without limit.
+        let empty: Vec<(DocSource, Vec<DocChunk>)> = (0..MAX_DOC_CHUNKS + 1)
+            .map(|i| {
+                (
+                    DocSource {
+                        path: format!("docs/{i:05}.md"),
+                        key: format!("k{i}"),
+                    },
+                    Vec::new(),
+                )
+            })
+            .collect();
+        let (kept, truncated) = bounded(empty);
+        assert_eq!(kept.len(), MAX_DOC_CHUNKS);
+        assert!(truncated);
+    }
+
+    #[test]
     fn a_source_is_indexed_whole_or_left_for_a_later_review() {
         // [RV21 D+B, 2026-10-20] A half-indexed source would be remembered as indexed and never completed.
         let c = |p: &str, n: usize| -> (DocSource, Vec<DocChunk>) {
