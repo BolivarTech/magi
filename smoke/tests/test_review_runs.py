@@ -146,10 +146,10 @@ class ReviewRunDefinitionTests(unittest.TestCase):
         # [MAGI S6 MS3 loop11, R7b Balthasar] Renamed: the old name said four context runs. Five
         # reach the trio: R12 (S47) the large review; R17 (S52) a one-batch review whose embedder
         # is unreachable; R18 (S53) a file whose content holds a one-line key, masked; R20 (S56)
-        # and R21 (S57) the revision and history reviews.
+        # R21 (S57) and R22 (S58) the revision and history reviews.
         reviewing = {rid for rid, d in runs.DEFINITIONS.items()
                      if d.argv[0] == "code-review" and d.needs_trio}
-        self.assertEqual({"R12", "R17", "R18", "R20", "R21"}, reviewing)
+        self.assertEqual({"R12", "R17", "R18", "R20", "R21", "R22"}, reviewing)
 
     def test_the_embedder_run_points_only_its_embedder_away(self) -> None:
         # S52: the trio and the gate keep the real backend; only [embedding] reaches the closed port.

@@ -433,6 +433,59 @@ def validated_history_reaches_the_trio(run):
                       "findings on %s" % runs.REVIEW_HISTORY_FILE)
 
 
+#: S58 (R22, RV07, RV-S8): a review with seeded history and an unreachable embedder.
+S58_ASSERTIONS = (
+    "the setup reviews and the measured review all exit 0",
+    "the measured review declares without_embedder true and its history layer names a degraded cause",
+    "the measured review still delivers its findings list",
+)
+
+#: The ``trimmed`` kind of the history layer (``ContextKind::History`` in ``src/review/``).
+_HISTORY_KIND = "history"
+
+
+@scenario("S58", assertions=S58_ASSERTIONS, run="R22", needs_backend=True)
+def a_review_with_history_and_a_down_embedder_declares_it(run):
+    """Check that history which exists but cannot be retrieved is declared, and the report still comes.
+
+    R22 seeds history exactly as R21 does, against the live embedder, then runs the
+    measured review with ``[embedding]`` on a served error. The product must still
+    deliver its findings and say, for the history layer, that the embedder did not
+    answer (RV07, RV-S8). Whether the trio finds anything is its own answer: the
+    ``findings`` list is asserted to exist, never to be non-empty.
+
+    Args:
+        run: R22's ``RunResult``, or ``None`` when the run produced no capture.
+
+    Yields:
+        Finding: One per entry of :data:`S58_ASSERTIONS`, in that order.
+    """
+    texts = S58_ASSERTIONS
+    if run is None or run.output is None or len(run.setup_outputs) != 2:
+        yield from code_review.all_cannot_test(texts, "R22", "run R22 did not run its three reviews")
+        return
+    codes = [o.exit_code for o in run.setup_outputs + (run.output,)]
+    yield code_review.verdict(texts, 0, "R22", codes == [EXIT_OK] * 3, "the reviews exited %s" % codes)
+    try:
+        report = run.output.json()
+    except ProductOutputError as exc:
+        for index in (1, 2):
+            yield code_review.finding(texts, index, Outcome.FAIL, "R22", "stdout is not a JSON document: %s" % exc)
+        return
+    summary = report.get(CODE_REVIEW_KEY)
+    summary = summary if isinstance(summary, dict) else {}
+    trimmed = summary.get(TRIMMED_KEY)
+    history_degraded = (isinstance(trimmed, list)
+                        and any(isinstance(t, dict) and t.get("kind") == _HISTORY_KIND
+                                and t.get(TRIMMED_LABEL_KEY) in DEGRADED_LABELS for t in trimmed))
+    yield code_review.verdict(texts, 1, "R22",
+                              summary.get(WITHOUT_EMBEDDER_KEY) is True and history_degraded,
+                              "without_embedder is %r and trimmed is %r"
+                              % (summary.get(WITHOUT_EMBEDDER_KEY), trimmed))
+    yield code_review.verdict(texts, 2, "R22", isinstance(summary.get("findings"), list),
+                              "code_review.findings is %r, not a list" % (summary.get("findings"),))
+
+
 def _history_served(request_bodies, located) -> bool:
     """Whether a trio prompt carries a validated history item of *located* (MAGI FIX, MS3 §6 loop10).
 

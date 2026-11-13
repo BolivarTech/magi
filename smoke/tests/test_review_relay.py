@@ -170,7 +170,9 @@ class RelayTests(unittest.TestCase):
         base = dict(run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
                     stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
                     setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
-        for extra in ({"forbids_model_calls": True}, {"unreachable_embedder": True}, {"rotates": True}):
+        # An unreachable embedder is allowed beside a setup (R22 seeds its history against the live
+        # one); see `test_a_setup_may_run_before_an_embedder_that_is_pointed_away`.
+        for extra in ({"forbids_model_calls": True}, {"rotates": True}):
             with self.subTest(extra=extra), self.assertRaises(HarnessError):
                 runs.RunDefinition(**base, **extra)
 

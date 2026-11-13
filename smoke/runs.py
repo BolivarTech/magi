@@ -553,10 +553,12 @@ class RunDefinition:
         # MAGI FIX (MS3 §6 loop14, R7a1): setup invocations run before the counter, the embedder
         # rewrite and the rotation guard are in place, so they would run uncounted, against a live
         # embedder or with the credential unrotated.
-        if self.setup and (self.forbids_model_calls or self.unreachable_embedder or self.rotates):
-            raise HarnessError("run %s has setup steps and also counts model calls, points its "
-                               "embedder away or rotates a credential; the setup would run "
-                               "outside those guards" % self.run_id)
+        # MAGI FIX (MS3 §6 loop15, R7b): a run that points its embedder away MAY have setup steps:
+        # they seed state (R22's history) against the live embedder, and only the measured run
+        # is pointed away (:meth:`RunExecutor._embedder_away` wraps it, not the setup).
+        if self.setup and (self.forbids_model_calls or self.rotates):
+            raise HarnessError("run %s has setup steps and also counts model calls or rotates a "
+                               "credential; the setup would run outside those guards" % self.run_id)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -718,7 +720,8 @@ LARGE_CONSULT_CEILING_S = 20184
 #: Replace them at the first run.
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
                                         "R10": 67, "R12": 1500, "R17": 300,
-                                        "R18": 300, "R20": 300, "R21": 3 * 300}
+                                        "R18": 300, "R20": 300, "R21": 3 * 300,
+                                        "R22": 3 * 300}
 
 #: The factor a trio run's ``timeout_s`` must reach over its measurement in
 #: :data:`TRIO_RUNS_MEASURED_S`: at least this many times it, equality
@@ -2305,6 +2308,14 @@ _REVIEW_HEAD_ARGV = ("code-review",) + REVIEW_FLAGS
 
 #: Each review R21 runs before the measured one; R18's provisional figure each.
 _HISTORY_SETUP_TIMEOUT_S = 900
+
+#: How R21 and R22 seed the history: a buggy commit reviewed, a commit rewriting it, and that
+#: commit reviewed again (which reclassifies the first review's entries as attended).
+_HISTORY_SETUP = (Commit((("README.md", b"# smoke history\n"),)),
+                  Commit(((REVIEW_HISTORY_FILE, _HISTORY_BUGGY),)),
+                  Invocation(_REVIEW_HEAD_ARGV, _HISTORY_SETUP_TIMEOUT_S),
+                  Commit(((REVIEW_HISTORY_FILE, _HISTORY_FIXED),)),
+                  Invocation(_REVIEW_HEAD_ARGV, _HISTORY_SETUP_TIMEOUT_S))
 
 
 def review_keyblock_files() -> tuple[tuple[str, bytes], ...]:
@@ -3981,11 +3992,16 @@ DEFINITIONS: dict[str, RunDefinition] = {
         stdin=b"",
         needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=3 * 900,
         records_requests=True,
-        setup=(Commit((("README.md", b"# smoke history\n"),)),
-               Commit(((REVIEW_HISTORY_FILE, _HISTORY_BUGGY),)),
-               Invocation(_REVIEW_HEAD_ARGV, _HISTORY_SETUP_TIMEOUT_S),
-               Commit(((REVIEW_HISTORY_FILE, _HISTORY_FIXED),)),
-               Invocation(_REVIEW_HEAD_ARGV, _HISTORY_SETUP_TIMEOUT_S))),
+        setup=_HISTORY_SETUP),
+    # R22 feeds S58 (RV07, RV-S8): R21's seeding against the live embedder, then the same review
+    # with the embedder pointed at a served error, so the history that exists cannot be retrieved.
+    "R22": RunDefinition(
+        run_id="R22",
+        argv=_REVIEW_HEAD_ARGV,
+        stdin=b"",
+        needs_trio=True, payload_size=PAYLOAD_SMALL, timeout_s=3 * 900,
+        unreachable_embedder=True,
+        setup=_HISTORY_SETUP),
 }
 
 

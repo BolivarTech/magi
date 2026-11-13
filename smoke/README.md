@@ -487,13 +487,14 @@ so no scanner sees a key-shaped literal in the source.
 
 ### The working-RAG scenario (v0.25.0, RV07)
 
-S55 adds two assertions (55 scenarios and 164 assertions when it was added) and a third in MAGI §6 MS3 loop 9, read off the relay; S56 and S57 below add five. The harness now promises 57 scenarios and 171 assertions.
+S55 adds two assertions (55 scenarios and 164 assertions when it was added) and a third in MAGI §6 MS3 loop 9, read off the relay; S56 and S57 below add five. S58 below adds three (MAGI §6 MS3 loop 15). The harness now promises 58 scenarios and 174 assertions.
 
 | Id | Invariant | Without its environment |
 |---|---|---|
 | S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key, or a `trimmed` entry without a string `label`, is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes; the relay saw the doc comment embedded as a chunk and the batch's query. The chunk check needs an environment whose database does not already hold R18's doc chunk (a content-addressed hit skips the embedding, and the failure detail says so; `--reset-env` clears it) | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
 | S56 | R20 reviews `HEAD` of two commits whose doc comments differ, the file's working-tree copy dirty: exit 0, `HEAD`'s doc comment embedded as a chunk, the dirty one in no request and the parent's in no embedding request (RV21; the parent's lines may appear in a trio prompt as the removed lines of the diff under review) | `CANNOT_TEST` with no backend or an incomplete record |
 | S57 | R21 reviews a buggy commit, a commit rewriting it, and that commit again: every review exits 0, and a trio request of the third carries a `kind=history` item on `hist/calc.rs` with a first-review finding's title and `(attended)` (RV08; only the third review is relayed) | `CANNOT_TEST` with no backend, an incomplete record, or no located finding in the first review |
+| S58 | R22 seeds history exactly as R21 does (two setup reviews against the live embedder), then reviews `HEAD` again with `[embedding]` pointed at a served error: all three reviews exit 0, the measured one prints `code_review.without_embedder` `true` and a `code_review.trimmed` entry of kind `history` whose label is `index unavailable` or `the embedder did not answer`, and `code_review.findings` is a list (RV07, RV-S8: history that exists but cannot be retrieved is declared and the report still comes; whether the trio finds anything is never asserted). Unlike R21 the run is not relayed: the declaration is read, not the absence of egress | `CANNOT_TEST` with no backend, a timed-out R22 or missing setup outputs. A missing key, a non-`true` flag, a history-less or wrongly labelled `trimmed`, or a `findings` that is not a list is `FAIL` |
 
 Without S55 the suite could not tell a working RAG from one that degrades on every run: S52 expects the
 degradation. What S55 observes is that the embedder answered, indexed the chunk and embedded the query, and no
@@ -512,7 +513,7 @@ or a shape together with these scenarios.
 **Cost.** R18 is one batch by the real trio plus the gate over a four-line file, like R17: harness
 timeout 900 s, `TRIO_RUNS_MEASURED_S["R18"]` carries 300 s provisionally and has not been measured. R19
 never reaches a model. R20 is one batch like R18 and carries its 300 s. R21 runs three reviews under one 2 700 s clock shared by its two
-setup reviews and the measured one, so a hung setup review leaves the last less time; its declared cost is the sum, 900 s.
+setup reviews and the measured one, so a hung setup review leaves the last less time; its declared cost is the sum, 900 s. R22 is R21's seeding plus a measured review under the same clock; it carries the same provisional sum, unmeasured, and a setup may run beside an unreachable embedder only because the setup is meant to see the live one (`RunDefinition` still refuses a setup beside a model counter or a credential rotation).
 
 ## Out of scope
 
@@ -571,6 +572,7 @@ assumes is the exact failure this harness exists to avoid.
 | S55 | a review whose embedder answers is not degraded: `without_embedder` is false, no index degraded, and the doc comment was indexed and the query embedded |
 | S56 | a commit review reads its documentation from that commit, never from the dirty working tree (RV21) |
 | S57 | a finding attended in a later commit reaches the trio as validated history (RV08) |
+| S58 | a review with seeded history and an unreachable embedder declares the degradation for its history layer and still delivers its report (RV07, RV-S8); the live run is part of SMOKE #2 |
 
 The `decide` scenarios D1 to D10 are listed under "The decide scenarios" above. K1 to K3 are listed under "The per-section key scenarios".
 
