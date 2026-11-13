@@ -145,7 +145,8 @@ pub struct ReviewSummary {
     /// An item holding a one-line secret is not counted here, even when its mask is longer than
     /// what the budget charged: it is sent masked, and its file (the item's path, as
     /// [`display_path`](crate::review::secrets::display_path) shows it) is declared in
-    /// [`Self::masked`] (the pipeline's `declare_masked` adds a documentation or history source`n    /// there as it does a reviewed file, so no masked egress goes undeclared); the batch
+    /// [`Self::masked`] (the pipeline's `declare_masked` adds a documentation or history source
+    /// there as it does a reviewed file, so no masked egress goes undeclared); the batch
     /// pays for the growth with trimmed optional context, listed in [`Self::trimmed`] (RV22
     /// amended; pipeline tests `a_context_item_quoting_a_one_line_secret_reaches_the_prompt_masked`
     /// and `the_growth_of_a_mask_is_paid_by_trimming_optional_context_never_by_omitting_the_item`).
@@ -997,6 +998,12 @@ fn listed(text: &str) -> String {
 /// O(collisions · log size of `taken`). Public, not `pub(crate)`, because its consumer is in
 /// another crate: the agent tool's own JSON masking (`tools::code_review`, in the binary) keeps
 /// colliding keys the same way, and a `pub(crate)` item of this library would not compile there.
+///
+/// MAGI FIX (MS3 §6 loop14): there is no overflow to report. The counter climbs one at a time and
+/// stops at the first free spelling, so it reaches at most `taken.len() + 2`; `taken` is held in
+/// memory, so that is far below `usize::MAX` and the loop ends before a saturating add could
+/// repeat a value. No panic is possible (no unchecked arithmetic, no indexing), which is why the
+/// function stays infallible instead of returning a typed failure nobody could trigger.
 ///
 /// # Arguments
 /// * `taken` - The object the key goes into.
