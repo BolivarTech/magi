@@ -2102,6 +2102,19 @@ class ReviewMaskingSyncTests(unittest.TestCase):
                     product *= int(factor.replace("_", "").strip())
                 self.assertEqual(value, product, found)
 
+    def test_the_fixtures_write_the_products_mask_marker(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7b1): the healthy R18 record hand-writes `<redacted: NAME>`;
+        # a reshaped marker left it untrue with the suite green.
+        secrets_rs = without_comments(_source("src/review/secrets.rs"))
+        opening = one_definition(
+            secrets_rs, r'pub\(crate\) const REDACTED_OPEN: &str = "([^"]+)";', "src/review/secrets.rs").group(1)
+        self.assertEqual("<redacted: ", opening)
+        from smoke.tests.support import R18_HEALTHY_REQUESTS
+        marks = [m for _, body in R18_HEALTHY_REQUESTS for m in re.findall(r"<redacted:[^>]*>", body.decode())]
+        self.assertTrue(marks)
+        for mark in marks:
+            self.assertTrue(re.fullmatch(re.escape(opening) + r"[a-z0-9-]+>", mark), mark)
+
     def test_the_r18_requests_use_the_products_embedding_prefixes(self) -> None:
         # MAGI FIX (MS3 §6 loop14): R18_HEALTHY_REQUESTS hand-copies the document and query prefixes
         # the embedder prepends; a changed default left the healthy record untrue with the suite green.
