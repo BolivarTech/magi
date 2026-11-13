@@ -5193,6 +5193,42 @@ mod tests {
     }
 
     #[test]
+    fn egress_safe_redacts_a_url_credential_in_the_failure() {
+        // MAGI FIX (MS3 §6 loop14): the failure arm masked secrets but did not redact a URL
+        // credential the way every other error string does.
+        let r = egress_safe(Rendered {
+            text: String::new(),
+            json: serde_json::json!({}),
+            consult: serde_json::json!({}),
+            failure: Some("fetch failed: https://svc:hunter2@host.example/x".to_string()),
+        });
+        let failure = r.failure.unwrap_or_default();
+        assert!(!failure.contains("hunter2"), "{failure}");
+    }
+
+    #[test]
+    fn a_revision_with_a_space_or_dots_never_reaches_git() {
+        // MAGI FIX (MS3 §6 loop14): only a leading `-` was refused before `rev-parse`; the
+        // shared ref validation (`validate_ref`) is the one gate now.
+        for rev in ["a b", "a..b", "x\u{0}y"] {
+            let (_db, _mem, memory) = review_memory();
+            let git = CountingGit(std::sync::atomic::AtomicUsize::new(0));
+            let warning = follow_up_work(&memory, &git, follow_up(Some(rev)));
+            assert!(
+                warning
+                    .as_deref()
+                    .is_some_and(|w| w.starts_with(HISTORY_NOT_UPDATED)),
+                "{rev:?}: {warning:?}"
+            );
+            assert_eq!(
+                git.0.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "{rev:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_content_change_and_a_plan_change_have_distinct_run_log_names() {
         // [MAGI S6 loop 8, D2-b2] two failure modes (the batch count moved; the content moved
         // under the same count) read apart in the run log.
