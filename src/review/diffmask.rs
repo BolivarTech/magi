@@ -466,6 +466,21 @@ mod tests {
     }
 
     #[test]
+    fn a_body_line_whose_text_opens_like_a_section_does_not_end_the_hunk() {
+        // [MAGI S6 MS3 loop16, R6a1 Melchior, false positive] The claim: a line whose text begins
+        // with `diff ` ends the hunk. The check reads the whole line, marker included, and a body
+        // line always starts with ` `, `+`, `-` or `\`, so only a real section header matches. The
+        // line after a context line reading `diff --git …` stays a body line: a value no side shows
+        // is redacted, not just masked as a header (which would let it through, key line absent).
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let diff = format!("@@ -1,1 +1,2 @@\n diff --git a/x b/x\n+{value}\n");
+        let side = b"diff --git a/x b/x\n";
+        let out = masked_raw_diff(&diff, Some(side), Some(side));
+        assert!(!out.contains(value), "{out}");
+        assert!(out.contains(DRIFT_PATTERN), "{out}");
+    }
+
+    #[test]
     fn a_new_file_header_ends_the_hunk() {
         // [MAGI S6 MS3 loop14, R6a1 Balthasar] `in_hunk` was never reset: a header line after a
         // hunk was read as a body line and redacted whole instead of masked as a header.

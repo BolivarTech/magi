@@ -1261,6 +1261,28 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_declared_masked_only_when_a_mask_happened() {
+        // [MAGI S6 MS3 loop16, R6a1 Melchior] `kept_verdict` took the pattern from
+        // `find_secret(diff)` when neither side was masked: a diff quoting a credential that no
+        // side holds (a stale line the rebuild replaces with the clean side's text) put the file
+        // in `Filtered::masked` though no byte of it was masked.
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let diff = format!("@@ -1 +1 @@\n-fn a() {{}}\n+let t = \"{token}\";\n");
+        let inner = MapSource::new(&[("a.rs", "fn b() {}\n")], &[("a.rs", "fn a() {}\n")]);
+        let src = CachedSource::new(&inner);
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff),
+        }];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("kept");
+        assert_eq!(f.kept.len(), 1, "{f:?}");
+        let served = f.kept[0].diff.as_deref().unwrap_or_default();
+        assert!(!served.contains(token), "{served}");
+        assert!(f.masked.is_empty(), "nothing was masked: {:?}", f.masked);
+    }
+
+    #[test]
     fn a_path_left_out_as_secret_is_never_kept_by_a_later_listing() {
         // [MAGI S6 MS3 loop16, R6a1 Melchior] The repeated-path guard ran one way: a kept path
         // turned a later skip into a repeat, but a path left out as `secret` could be kept by a
