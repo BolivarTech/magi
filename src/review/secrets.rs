@@ -22,6 +22,17 @@
 //! not detected. A password in a URL (`scheme://user:password@host`) is a secret unless it is a
 //! placeholder (`{password}`, `$PASSWORD`, `<password>`, `***`); a URL with a user and no
 //! password is not.
+//!
+//! # Hidden-character strip policies
+//!
+//! Three passes read a text with the characters that can split a token taken out; each keeps
+//! what its output needs, so they differ on purpose:
+//!
+//! | Pass | Strips | Keeps | Output |
+//! |---|---|---|---|
+//! | `holds_secret_prefix` (binary or non-UTF-8 side) | control characters, format characters, U+FFFD | nothing (a verdict only) | `bool` |
+//! | `hides_secret_behind_hidden_chars` (text side) | control characters (tabs and lone CRs included), format characters | `\n`; `\r\n` folds to `\n` | `bool` |
+//! | [`outward_text`] (text that leaves) | control and format characters in the stripped copy; tabs and lone CRs in the joined copy | `\n`, `\r`, `\t` in the stripped copy; CRLF pairs in the joined copy | masked, escaped `String` |
 
 use std::ops::Range;
 
