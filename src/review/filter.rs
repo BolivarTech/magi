@@ -536,7 +536,7 @@ struct SidesRead<'a> {
 /// reaches here, [`content_verdict`] leaves it out). When anything was masked, the diff is
 /// rebuilt from the masked sides ([`rebuilt_diff`]) and the file declared with the first
 /// pattern found; when the diff cannot be rebuilt or the rebuilt one still holds a secret, the
-/// raw diff is masked by line instead ([`masked_raw_diff`], `unrebuilt_diff_is_masked`), with a
+/// raw diff is masked by line instead ([`fallback_diff`], `unrebuilt_diff_is_masked`), with a
 /// WARN naming which. RV22's omission classes, all with the `secret` cause: a private-key block, a
 /// secret-shaped path and the by-line fallback's refusal (its output still holds a secret, so the
 /// file is left out, `a_refused_fallback_is_a_secret_skip`). Declared limit: a rebuild whose body lines differ beyond masking (sides changed after the diff was read;
@@ -565,10 +565,11 @@ fn kept_verdict(
 ) -> Verdict {
     let new_mask = read.new.and(source.masked(Face::New, read.path));
     let old_mask = read.old.and(source.masked(Face::Old, read.old_path));
-    let pattern = new_mask
-        .or(old_mask)
-        .map(|m| m.pattern)
-        .or_else(|| diff.as_deref().and_then(find_secret));
+    // MAGI FIX (MS3 §6 loop16, R6a1): `side_mask` is a mask that happened; a secret found only in
+    // the diff (`pattern`) makes the diff rebuild, but declares the file masked only when the
+    // by-line fallback redacted something.
+    let side_mask = new_mask.or(old_mask).map(|m| m.pattern);
+    let pattern = side_mask.or_else(|| diff.as_deref().and_then(find_secret));
     let Some(pattern) = pattern else {
         return Verdict::Keep(Kept {
             diff,
@@ -576,17 +577,23 @@ fn kept_verdict(
             masked: None,
         });
     };
+    let mut declared = side_mask;
     let diff = match diff {
         Some(d) => match rebuilt_diff(&d, read.new, read.old) {
             Some((r, diverged)) if find_secret(&r).is_none() => {
                 if diverged > 0 {
                     let shown = display_path(read.path);
+                    // The reviews that reach here read their sides and their diff through one
+                    // access, and a moved worktree fails closed before this text is used
+                    // (`moved_worktree_fails_closed`), so a count is a secret spanning a line
+                    // break, masked differently on the whole side than on one diff line.
                     tracing::event!(
                         target: LOG_TARGET,
                         tracing::Level::WARN,
                         path = shown.as_str(),
                         lines = diverged,
-                        "diff lines differ from the file's sides; the file is reviewed from its sides"
+                        "diff lines differ from the file's masked sides (a secret spanning lines, \
+                         not drift); the file is reviewed from its sides"
                     );
                 }
                 Some(r)
@@ -610,23 +617,29 @@ fn kept_verdict(
                 );
                 // MAGI FIX (MS3 §6 loop11): it was a third omission class (RV22 allows two); the
                 // raw diff is masked instead, by line, and the file reviewed.
-                // MAGI FIX (MS3 §6 loop13): the None arm below is a seal. By-line masking redacts
-                // every line a masked side does not show verbatim, so no input found reaches it (an
-                // AWS secret split over two lines is redacted on both); it stays because the re-scan
-                // is cheap and fails closed, and `fallback_secret_is_refused` pins the contract.
+                // MAGI FIX (MS3 §6 loop16, R6a1): the None arm below is reachable, with its cost
+                // declared: a secret whose lines each sit verbatim in a clean side (an AWS key and
+                // its value as adjacent context) survives by-line masking, the re-scan refuses it
+                // and the whole file is left out as `secret`
+                // (`a_refused_fallback_is_a_secret_skip`, `fallback_refusal_is_reachable`).
                 match fallback_diff(&d, read.new, read.old) {
-                    Some(masked) => Some(masked),
+                    Some(masked) => {
+                        declared = Some(declared.unwrap_or(pattern));
+                        Some(masked)
+                    }
                     None => return secret(read.path, pattern),
                 }
             }
         },
         None => None,
     };
-    log_masked(read.path, pattern);
+    if let Some(declared) = declared {
+        log_masked(read.path, declared);
+    }
     Verdict::Keep(Kept {
         diff,
         with_old,
-        masked: Some(pattern),
+        masked: declared,
     })
 }
 
@@ -1097,9 +1110,9 @@ mod tests {
             Some("aws-secret-key"),
             "premise: the diff is not"
         );
-        // Reachability (declared): by-line masking already redacts every line of this
-        // two-line secret, so the re-scan is a seal. The contract pinned is that whatever
-        // `fallback_diff` returns holds no secret, and that it never answers with a leak.
+        // Reachability: here by-line masking redacts both lines (no clean side shows them), so
+        // the input is answered; `fallback_refusal_is_reachable` has the input the re-scan
+        // refuses. The contract pinned is that whatever `fallback_diff` returns holds no secret.
         let masked = fallback_diff(&diff, Some(new.as_bytes()), None).expect("redacted by line");
         assert_eq!(find_secret(&masked), None, "{masked}");
         assert!(!masked.contains(value), "{masked}");
@@ -1274,8 +1287,8 @@ mod tests {
             path: "a.rs".into(),
             diff: Some(diff),
         }];
-        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
-            .expect("kept");
+        let f =
+            filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false).expect("kept");
         assert_eq!(f.kept.len(), 1, "{f:?}");
         let served = f.kept[0].diff.as_deref().unwrap_or_default();
         assert!(!served.contains(token), "{served}");
@@ -1614,7 +1627,9 @@ mod tests {
                 cause: SkipCause::Secret
             }]
         );
-        assert_eq!(f.masked, vec![masked("new.rs", "openai-key")]);
+        // [MAGI S6 MS3 loop16, R6a1] The key sat only in the diff's removed line, which the
+        // rebuild replaces with the clean old side: no byte was masked, so none is declared.
+        assert!(f.masked.is_empty(), "{:?}", f.masked);
         let diff = f
             .kept
             .iter()

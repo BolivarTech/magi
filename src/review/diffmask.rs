@@ -36,7 +36,10 @@ pub(super) fn fallback_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) 
     let masked = masked_raw_diff(diff, new, old);
     find_secret(&masked).is_none().then_some(masked)
 }
-/// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it: a header line outside a hunk
+
+/// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it. Private on purpose: its output
+/// is not re-scanned, so [`fallback_diff`] is the only entry that may serve it (a secret across
+/// adjacent verbatim lines survives this pass; the re-scan catches it). A header line outside a hunk
 /// is masked with [`mask_secrets`]; an `@@` line keeps its ranges and its function context only
 /// when a masked side shows it ([`shown_by_a_side`]); a body line is kept only when a masked
 /// side shows its text verbatim (context and added lines on `new`, context and deleted on `old`),
@@ -45,7 +48,7 @@ pub(super) fn fallback_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) 
 /// (`diff_alone_is_unsafe_to_mask`), and every line
 /// holding a byte of a masked secret differs from its masked side. So masking, never omission, and
 /// no byte of the secret leaves (RV22's tie-break) (`unrebuilt_diff_is_masked`). O(diff + sides).
-pub(super) fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> String {
+fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> String {
     let (new_vec, old_vec) = (
         side_lines(new).unwrap_or_default(),
         side_lines(old).unwrap_or_default(),
