@@ -323,48 +323,62 @@ fn holds_armor_end(text: &str) -> bool {
 // MAGI FIX (MS3 §6 loop6): the whole-code check withheld every finding of such a file.
 // MAGI FIX (MS3 §6 loop8): `scan` is the per-file part, memoized by `Gate`: no second whole-code
 // pass and no allocation per finding.
-fn window_overlaps_key_block(code: &str, line: u32, scan: KeyBlockScan) -> bool {
-    scan.holds && (scan.untracked || overlaps_tracked_block(code, line, &holds_key_block))
+fn window_overlaps_key_block(line: u32, scan: &KeyBlockScan) -> bool {
+    scan.holds && (scan.untracked || window_meets_block(&scan.blocks, line))
 }
 
 /// What the gate knows of one file's private-key blocks, whatever the finding: computed once
 /// per file ([`Gate::key_block_scan`]).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct KeyBlockScan {
     /// The code holds a block ([`holds_key_block`]).
     holds: bool,
     /// The detector finds one outside the blocks its lines open and close ([`untracked_block`]).
     untracked: bool,
+    /// The line intervals `(first, last)` of the blocks its lines open and close, computed once
+    /// per file: each finding then costs O(blocks), not a pass over the code.
+    // MAGI FIX (MS3 §6 loop15): `overlaps_tracked_block` rescanned the whole file per finding
+    // (R6b2).
+    blocks: Vec<(u32, u32)>,
 }
 
 /// [`window_overlaps_key_block`] with the block detector `opens` given, so the cases the real
 /// detector cannot produce today (a header read only across lines) are testable.
 #[cfg(test)]
 fn window_overlaps_block_of(code: &str, line: u32, opens: &dyn Fn(&str) -> bool) -> bool {
-    opens(code) && (untracked_block(code, opens) || overlaps_tracked_block(code, line, opens))
+    opens(code)
+        && (untracked_block(code, opens) || window_meets_block(&tracked_blocks(code, opens), line))
 }
 
-/// Whether the window around `line` overlaps a block of `code` opened by one of its lines and
-/// closed by its armor `END` line (or by the end of `code`). Allocates nothing. O(bytes of
-/// `code`) times the cost of `opens`.
-fn overlaps_tracked_block(code: &str, line: u32, opens: &dyn Fn(&str) -> bool) -> bool {
+/// Whether the window around `line` overlaps one of `blocks` ([`tracked_blocks`]). O(blocks).
+fn window_meets_block(blocks: &[(u32, u32)], line: u32) -> bool {
     let first = line.saturating_sub(GATE_CONTEXT_LINES).max(1);
     let last = line.saturating_add(GATE_CONTEXT_LINES);
+    blocks
+        .iter()
+        .any(|&(start, end)| start <= last && end >= first)
+}
+
+/// The line intervals `(first, last)` of the blocks of `code` opened by one of its lines and
+/// closed by its armor `END` line; a block still open at the end runs to the last line
+/// (`u32::MAX`). O(bytes of `code`) times the cost of `opens`.
+fn tracked_blocks(code: &str, opens: &dyn Fn(&str) -> bool) -> Vec<(u32, u32)> {
+    let mut blocks = Vec::new();
     let mut opened: Option<u32> = None;
     for (n, text) in (1u32..).zip(code.lines()) {
         match opened {
             None if opens(text) => opened = Some(n),
             Some(start) if holds_armor_end(text) => {
-                if start <= last && n >= first {
-                    return true;
-                }
+                blocks.push((start, n));
                 opened = None;
             }
             _ => {}
         }
     }
-    // A block still open at the end runs to the last line.
-    opened.is_some_and(|start| start <= last)
+    if let Some(start) = opened {
+        blocks.push((start, u32::MAX));
+    }
+    blocks
 }
 
 /// Whether the detector still finds a block in the lines outside every block tracked by its
@@ -628,7 +642,7 @@ impl<'a> Gate<'a> {
         let digest: [u8; 32] = Sha256::digest(code.as_bytes()).into();
         if let Some((last, scan)) = &self.last_scan {
             if *last == digest {
-                return *scan;
+                return scan.clone();
             }
         }
         #[cfg(test)]
@@ -637,8 +651,17 @@ impl<'a> Gate<'a> {
         }
         let holds = holds_key_block(code);
         let untracked = holds && untracked_block(code, &holds_key_block);
-        let scan = KeyBlockScan { holds, untracked };
-        self.last_scan = Some((digest, scan));
+        let blocks = if holds && !untracked {
+            tracked_blocks(code, &holds_key_block)
+        } else {
+            Vec::new()
+        };
+        let scan = KeyBlockScan {
+            holds,
+            untracked,
+            blocks,
+        };
+        self.last_scan = Some((digest, scan.clone()));
         scan
     }
 
@@ -863,7 +886,7 @@ impl<'a> Gate<'a> {
         // names, so [`Self::sendable`]'s check on the state could not see it.
         // MAGI FIX (MS3 §6 loop6): only a finding whose window overlaps a block's lines is
         // withheld; one far from it is judged (R6b).
-        if window_overlaps_key_block(code, line, self.key_block_scan(code)) {
+        if window_overlaps_key_block(line, &self.key_block_scan(code)) {
             return Outcome::unfiltered(CAUSE_SECRET);
         }
         let pairs = constituents(finding).len();
@@ -1868,6 +1891,28 @@ mod tests {
         assert_eq!(g.scans, 2, "another file scans once");
         // Type-level pin: the memo is a 32-byte digest and a scan, never a copy of the file.
         let _: &Option<([u8; 32], KeyBlockScan)> = &g.last_scan;
+    }
+
+    #[test]
+    fn the_tracked_block_intervals_are_scanned_once_per_file() {
+        // [MAGI S6 MS3 loop15, R6b2] every finding rescanned the whole file for its tracked
+        // blocks; the intervals are part of the per-file scan now, and a finding costs O(blocks).
+        let c = MockDecisionClient::new();
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let code = format!("fn a() {{}}\n{begin}\nQQQQ\n{end}\nfn b() {{}}\n{begin}\nRRRR\n");
+        let scan = g.key_block_scan(&code);
+        assert_eq!(scan.blocks, vec![(2, 4), (6, u32::MAX)]);
+        let found = |line: u32| window_overlaps_key_block(line, &scan);
+        assert!(
+            found(1) && found(5) && found(7),
+            "a window within reach of a block"
+        );
+        let far = format!("{}{begin}\nQQQQ\n{end}\n", "fn x() {}\n".repeat(200));
+        let scan = g.key_block_scan(&far);
+        assert!(!window_overlaps_key_block(1, &scan));
+        assert!(window_overlaps_key_block(201 + 1, &scan));
     }
 
     #[test]
