@@ -1612,7 +1612,10 @@ fn unit_identity<'a>(items: impl Iterator<Item = &'a ContextItem>) -> Vec<(Strin
 /// `(file, label)` identities (`reuse_needs_the_same_units`). A context path that matches a
 /// secret pattern is withheld, not masked: masking a path would break the file identity the trio
 /// and the report use, and RV22's tie-break ("no byte of the secret leaves") prefers omission,
-/// declared as skipped `secret`. The budget is checked before any endpoint call by the runner
+/// declared as skipped `secret`; a reviewed file with such a path never reaches a batch (the
+/// filter skips it first, `a_path_shaped_like_a_key_is_never_sent`), so "skipped" never names a
+/// file whose code is sent. A promised unit `context_for` does not bring is declared as trimmed
+/// (`a_promised_unit_the_context_lacks_is_declared`). The budget is checked before any endpoint call by the runner
 /// (`precheck_budget`, the caller's contract documented on [`RagSource::index_ms`]); the second
 /// check in `run_review` covers what preparation spent (`a_preparation_that_overran_its_reserve_runs_on_what_is_left_never_refused`).
 ///
@@ -1689,6 +1692,19 @@ async fn prepare_contexts(
                 .filter(|i| i.kind == ContextKind::Unit),
         );
         let reuse = !pre.is_empty() && brought == promised;
+        // MAGI FIX (MS3 §6 loop15): RV07(1) makes the containing unit mandatory; one the source
+        // promised and did not bring is declared as trimmed, never dropped unsaid.
+        if !reuse {
+            summary.trimmed.extend(
+                promised
+                    .iter()
+                    .filter(|id| brought.binary_search(id).is_err())
+                    .map(|(_, label)| TrimmedItem {
+                        kind: ContextKind::Unit,
+                        label: display_path(label),
+                    }),
+            );
+        }
         if reuse {
             assembled.items.retain(|i| i.kind != ContextKind::Unit);
         }
