@@ -152,6 +152,12 @@ pub struct ReviewSummary {
     /// and `the_growth_of_a_mask_is_paid_by_trimming_optional_context_never_by_omitting_the_item`).
     /// This module only writes the count it is given.
     pub context_withheld: usize,
+    /// Containing units (RV07(1), mandatory) the context source promised at planning and did not
+    /// bring when it assembled the batch's context, by label as
+    /// [`display_path`](crate::review::secrets::display_path) shows it. A unit the mage was meant
+    /// to see and did not is a different fact from optional context trimmed to fit the budget
+    /// ([`Self::trimmed`]), so it is declared on its own.
+    pub undelivered_units: Vec<String>,
     /// `(file, line)` of the findings whose line names no line of the reviewed revision: one
     /// whose number can only be a removed line (read on the old side only). A number that is
     /// both a removed and a live line (an in-place edit, or a removed line whose old number
@@ -237,6 +243,7 @@ impl Default for ReviewSummary {
             without_embedder: false,
             without_memory: false,
             context_withheld: 0,
+            undelivered_units: Vec::new(),
             off_revision: BTreeMap::new(),
         }
     }
@@ -1216,6 +1223,22 @@ mod tests {
         ] {
             assert!(v.get(k).is_some(), "missing {k}: {v}");
         }
+    }
+
+    #[test]
+    fn the_text_names_each_undelivered_unit() {
+        // [MAGI S6 MS3 loop16, R4] A mandatory unit the source promised and did not bring is
+        // declared on its own line, apart from the optional context trimmed to fit.
+        let s = ReviewSummary {
+            undelivered_units: vec!["unit_a".into(), "unit_b".into()],
+            ..ReviewSummary::default()
+        };
+        let mut out = String::new();
+        write_review_section(&mut out, &s, 0).expect("writes");
+        assert!(
+            out.contains("containing units were not delivered: unit_a, unit_b"),
+            "{out}"
+        );
     }
 
     #[test]

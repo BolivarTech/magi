@@ -7361,6 +7361,90 @@ mod tests {
         );
     }
 
+    fn empty_assembled() -> Assembled {
+        Assembled {
+            items: vec![],
+            trimmed: vec![],
+            without_embedder: false,
+            without_memory: false,
+            withheld: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bound_sources_masked_paths_are_declared_like_its_skips() {
+        // [MAGI S6 MS3 loop16, R4] `skipped()` was read from both sources, `masked()` from the
+        // given one only, so a documentation file the bound source sent masked went undeclared.
+        struct Unbound;
+        struct Bound;
+        #[async_trait::async_trait]
+        impl RagSource for Unbound {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Err(ReviewError::Io("unbound".into()))
+            }
+            fn for_review<'r>(&'r self, _m: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
+                Some(Box::new(Bound))
+            }
+        }
+        #[async_trait::async_trait]
+        impl RagSource for Bound {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Ok(empty_assembled())
+            }
+            fn masked(&self) -> Vec<(String, &'static str)> {
+                vec![("docs/b.md".into(), "openai-key")]
+            }
+        }
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = review_with_rag(dir.path(), &Unbound, &consult, &gate_always("real_defect"))
+            .await
+            .expect("runs");
+        assert!(
+            out.summary.masked.iter().any(|m| m.path == "docs/b.md"),
+            "{:?}",
+            out.summary.masked
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_source_that_reserves_more_than_the_given_one_is_refused_unsent() {
+        // [MAGI S6 MS3 loop16, R4] The budget check reserves what the GIVEN source declares and
+        // never asks the bound one, so a bound source making outbound calls it did not declare
+        // would send bytes after a check that never counted them. Asserted at bind time.
+        struct Unbound;
+        struct Bound;
+        #[async_trait::async_trait]
+        impl RagSource for Unbound {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Err(ReviewError::Io("unbound".into()))
+            }
+            fn for_review<'r>(&'r self, _m: ReviewMaterial<'r>) -> Option<Box<dyn RagSource + 'r>> {
+                Some(Box::new(Bound))
+            }
+        }
+        #[async_trait::async_trait]
+        impl RagSource for Bound {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                panic!("a refused review must not reach the bound source's calls");
+            }
+            fn outbound_reserve_secs(&self, _batches: usize) -> u64 {
+                5
+            }
+        }
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![]);
+        let err = review_with_rag(dir.path(), &Unbound, &consult, &gate_always("real_defect"))
+            .await
+            .err()
+            .expect("refused");
+        assert!(
+            matches!(&err, ReviewError::Io(m) if m.contains("outbound reserve")),
+            "{err:?}"
+        );
+        assert_eq!(consult.calls(), 0);
+    }
+
     #[tokio::test]
     async fn bound_skips_are_declared() {
         // [MAGI S6 MS3 loop10, R2 Melchior] A file the bound source withheld while assembling (a
@@ -7659,14 +7743,21 @@ mod tests {
         let out = review_with_rag(dir.path(), &Lacking, &consult, &gate_always("real_defect"))
             .await
             .expect("runs");
-        let labels: Vec<_> = out
-            .summary
-            .trimmed
-            .iter()
-            .filter(|t| t.kind == ContextKind::Unit)
-            .map(|t| t.label.as_str())
-            .collect();
-        assert_eq!(labels, vec!["promised_unit"]);
+        // [MAGI S6 MS3 loop16, R4] Changed deliberately: a mandatory unit that was not delivered
+        // has its own declaration, no longer the optional-context `trimmed` list.
+        assert_eq!(out.summary.undelivered_units, vec!["promised_unit"]);
+        assert!(
+            out.summary
+                .trimmed
+                .iter()
+                .all(|t| t.kind != ContextKind::Unit),
+            "{:?}",
+            out.summary.trimmed
+        );
+        assert_eq!(
+            summary_json(&out.summary)["undelivered_units"],
+            serde_json::json!(["promised_unit"])
+        );
     }
 
     #[tokio::test]
