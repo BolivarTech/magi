@@ -10331,12 +10331,47 @@ mod tests {
                 !statement.contains("Vec::new()"),
                 "a throwaway list: {statement}"
             );
-            let after = call.split(';').nth(1).unwrap_or("");
+            // MAGI FIX (MS3 §6 loop16, R5b): the NEXT statement must be the emission of THIS
+            // call's list; `contains("emit_notices(")` was satisfied by an unrelated arm below.
+            let after = call.split(';').nth(1).unwrap_or("").trim_start();
+            let list = statement
+                .rsplit("&mut ")
+                .next()
+                .and_then(|tail| {
+                    tail.split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                })
+                .unwrap_or("");
             assert!(
-                statement.contains("startup_notices") || after.contains("emit_notices("),
+                statement.contains("startup_notices")
+                    || (!list.is_empty() && after.starts_with(&format!("emit_notices({list})"))),
                 "announced with the call: {statement}"
             );
         }
+    }
+
+    #[test]
+    fn review_setup_cause_strips_then_masks() {
+        // [MAGI S6 MS3 loop16, R5b Caspar/Balthasar] The setup log lines and notices masked a
+        // foreign error without stripping first, the claim went: a control byte inside a key
+        // would hide it from the detector. `egress_text` strips first; pinned at this call site.
+        let key = concat!("sk-ant-api03-", "BBBBBBBBBB\u{1b}BBBBBBBBBB"); // allow-secret-scan
+        let out = review_setup_cause(&format!("refused {key} \u{1b}[2J"));
+        assert!(!out.contains("BBBBBBBBBB"), "{out}");
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+    }
+
+    #[test]
+    fn the_post_report_warning_strips_then_masks() {
+        // [MAGI S6 MS3 loop16, R5b] The subcommand's post-report warning, the same order as the
+        // TUI's and the setup cause's: one helper, `surface_text`.
+        let key = concat!("sk-ant-api03-", "BBBBBBBBBB\u{1b}BBBBBBBBBB"); // allow-secret-scan
+        let out = post_report_warning_line(&format!("history: {key} \u{9b}2J"));
+        assert!(!out.contains("BBBBBBBBBB"), "{out}");
+        assert!(
+            !out.contains('\u{1b}') && !out.contains('\u{9b}'),
+            "{out:?}"
+        );
     }
 
     #[test]

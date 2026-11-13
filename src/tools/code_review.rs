@@ -3984,6 +3984,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_runner_that_never_declared_its_stateless_form_refuses() {
+        // [MAGI S6 MS3 loop16, R5b Melchior/Caspar] The default answered `Ok(None)` ("already
+        // stateless"), the same as a runner holding stores that never overrode `stateless`, so
+        // `--no-memory` silently ran with the documentation index and the embedder. The default
+        // refuses: a runner states that it holds no stores (`Ok(None)`) or builds its twin.
+        struct Undeclared;
+        #[async_trait::async_trait]
+        impl CodeReviewRunner for Undeclared {
+            fn plan(&self, _: &ReviewInput) -> Result<ReviewPlan, ReviewError> {
+                Err(ReviewError::Cancelled)
+            }
+            async fn run(
+                &self,
+                _: ReviewPlan,
+                _: ReviewBudget,
+                _: &CancellationToken,
+            ) -> Result<Rendered, ReviewError> {
+                Err(ReviewError::Cancelled)
+            }
+        }
+        assert!(Undeclared.stateless().is_err());
+    }
+
     #[tokio::test]
     async fn the_tool_plans_off_the_runtime() {
         // [MAGI S6 MS3 loop13, R5] A fresh plan (git, the filesystem) ran inline on the async
