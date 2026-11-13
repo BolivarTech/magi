@@ -1385,7 +1385,7 @@ impl Default for TuiCodeReviewCommand {
 fn code_review_error_text(e: &dyn std::fmt::Display) -> String {
     // MAGI FIX (MS3 §6 loop11): sanitized, then masked, as `egress_safe` orders it, so a control
     // byte inside a key cannot hide it from the detector (`error_text_strips_then_masks`).
-    crate::tools::code_review::egress_text(&crate::agent::Agent::sanitize_text(&e.to_string()))
+    crate::tools::code_review::surface_text(e)
 }
 
 /// The runner a `/code-review` command runs on: the session's, or with `--no-memory` the same
@@ -9399,6 +9399,15 @@ end"
                 failure: None,
             })
         }
+        fn stateless(
+            &self,
+        ) -> Result<
+            Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
+            magi_rs::review::error::ReviewError,
+        > {
+            // This double holds no stores: it is its own stateless runner, stated, not defaulted.
+            Ok(None)
+        }
     }
 
     #[test]
@@ -9506,8 +9515,9 @@ end"
     #[test]
     fn a_runner_without_stores_is_used_as_it_is() {
         // [MAGI S6 MS3 loop14, R5b Melchior] The trait's contract, `Ok(None)` = "already
-        // stateless, use it as it is": with `--no-memory`, a runner that keeps the default
-        // `stateless` is the runner chosen, not an error and not a rebuilt twin.
+        // stateless, use it as it is": with `--no-memory`, a runner that states `Ok(None)` is
+        // the runner chosen, not an error and not a rebuilt twin (the trait default no longer
+        // says it for a runner: `a_runner_that_never_declared_its_stateless_form_refuses`).
         let cmd = parse_tui_code_review("/code-review src --no-memory").expect("parses");
         let session: Arc<dyn crate::tools::code_review::CodeReviewRunner> =
             Arc::new(FakeTuiRunner::default());

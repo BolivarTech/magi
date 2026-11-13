@@ -5369,7 +5369,7 @@ async fn run_code_review_subcommand(
     if let Some(warning) =
         crate::tools::code_review::finish_after_delivered_report(runner.as_ref(), &cancel).await
     {
-        magi_rs::notices::eprint_audited(&crate::tools::code_review::egress_text(&warning));
+        magi_rs::notices::eprint_audited(&post_report_warning_line(&warning));
     }
     code
 }
@@ -5451,7 +5451,7 @@ const REVIEW_STORES_FAILED: &str =
 
 /// What a [`review_setup_notice`] says when the review embedder could not be built.
 const REVIEW_EMBEDDER_FAILED: &str =
-    "the review embedder could not be built: reviews run without documentation and without history as context";
+    "the review embedder could not be built: reviews run without documentation and without history as context (the history is still recorded)";
 
 /// The startup notice of a failed review-store or embedder setup: `what` and the cause as
 /// [`review_setup_cause`] gives it (credentials redacted, RV22 patterns masked), so the screen
@@ -5465,7 +5465,7 @@ const REVIEW_EMBEDDER_FAILED: &str =
 /// The warning notice.
 // MAGI FIX (MS3 §6 loop13): the failure was in the run log only; the TUI showed nothing.
 fn review_setup_notice(what: &str, cause: &str) -> Notice {
-    Notice::warn(format!("{what}: {}", review_setup_cause(cause)))
+    Notice::warn(format!("{what} (cause: {})", review_setup_cause(cause)))
 }
 /// The cause of a failed review-store or embedder setup as the run log may hold it.
 ///
@@ -5477,7 +5477,19 @@ fn review_setup_notice(what: &str, cause: &str) -> Notice {
 /// as on every other error path of the tool.
 // MAGI FIX (MS3 §6 loop2): these two logged with the URL redaction alone.
 fn review_setup_cause(cause: &str) -> String {
-    crate::tools::code_review::egress_text(cause)
+    crate::tools::code_review::surface_text(&cause)
+}
+
+/// The post-report warning of the `code-review` subcommand as stderr may show it: the same
+/// helper as every other surface ([`crate::tools::code_review::surface_text`]).
+///
+/// # Arguments
+/// * `warning` - The warning the follow-up work returned.
+///
+/// # Returns
+/// The warning with its control sequences removed and its secrets masked.
+fn post_report_warning_line(warning: &str) -> String {
+    crate::tools::code_review::surface_text(&warning)
 }
 
 /// Upper bound on the gate-evaluation lines [`BufferedGateTelemetry`] keeps in memory.

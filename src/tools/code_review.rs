@@ -260,15 +260,24 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
     /// surface whose runner holds them (the TUI's): no documentation, no history read or
     /// written, no embedder called.
     ///
+    /// There is no default that answers `Ok(None)`: a runner that holds stores and forgot to
+    /// override this would silently run `--no-memory` with them. The default refuses, so every
+    /// implementor states its form.
+    ///
     /// # Returns
     /// `Ok(None)` when this runner holds no stores (it is already stateless; use it as it is),
     /// or the stateless runner.
     ///
     /// # Errors
-    /// [`ReviewError::Io`] when the stateless runner cannot be built; the caller refuses the
-    /// review then, never runs it with the stores.
+    /// [`ReviewError::Io`] when the stateless runner cannot be built, or when the runner never
+    /// declared its stateless form (the default); the caller refuses the review then, never
+    /// runs it with the stores.
+    // MAGI FIX (MS3 §6 loop16, R5b): the default was `Ok(None)`, indistinguishable from "holds no
+    // stores".
     fn stateless(&self) -> Result<Option<Arc<dyn CodeReviewRunner>>, ReviewError> {
-        Ok(None)
+        Err(ReviewError::Io(
+            "this review runner did not declare how to run without its stores".into(),
+        ))
     }
 }
 
@@ -612,6 +621,22 @@ fn terminal_safe(text: &str) -> String {
 // MAGI FIX (MS3 §6 loop13): the strip is a third stage inside it, not seven call sites' job.
 pub(crate) fn egress_text(text: &str) -> String {
     mask_secrets(redact_foreign_text(&terminal_safe(text)).as_str())
+}
+
+/// A foreign error as an operator surface (stderr, the run log, the TUI transcript) may show it:
+/// the transcript sanitizer first (it removes whole ANSI sequences, parameters included), then
+/// [`egress_text`] (control characters again, URL credentials, the RV22 detector last). The one
+/// helper of every `code-review` surface, so none orders the stages its own way.
+/// O(len of the text).
+///
+/// # Arguments
+/// * `e` - Any displayable error or message.
+///
+/// # Returns
+/// The text with its control sequences removed and its credentials and secrets masked.
+// MAGI FIX (MS3 §6 loop16, R5b): main.rs and the TUI each composed the stages themselves.
+pub(crate) fn surface_text(e: &dyn std::fmt::Display) -> String {
+    egress_text(&crate::agent::Agent::sanitize_text(&e.to_string()))
 }
 
 /// `value` with every string and key passed through [`mask_secrets`], after [`terminal_safe`]
