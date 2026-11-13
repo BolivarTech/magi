@@ -420,6 +420,16 @@ class RelayScenarioTests(unittest.TestCase):
         self.assertEqual([P, P, F], _judged("S56", _with(_result("R20", 0, {}), request_bodies=(good, gate)),
                                             rc.S56_ASSERTIONS), "the dirty copy is in no request at all")
 
+    def test_s56_allows_the_parents_lines_in_the_retrieval_query(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7a2 Melchior): the retrieval query is an EMBEDDING request
+        # built from the batch's raw hunk (`batch_text` in src/memory/review_rag.rs), removed
+        # lines included, so it carries the parent's doc comment beside the batch's code. Only a
+        # chunk (the doc comment without that code) is another revision's documentation.
+        good = _chunk(runs.REVIEW_COMMITTED_DOC.decode())
+        query = _chunk("search_query: -    /// " + runs.REVIEW_PARENT_DOC.decode() + "\n+pub fn answer() {}")
+        self.assertEqual([P, P, P], _judged("S56", _with(_result("R20", 0, {}), request_bodies=(good, query)),
+                                            rc.S56_ASSERTIONS))
+
     def test_trio_bodies_never_hold_gate_requests(self) -> None:
         # MAGI FIX (MS3 §6 loop12, R7a Caspar/Melchior): the oracle of S53 and the history check
         # of S57 read the trio's prompts; the gate's `state` (a finding with its code) goes to
