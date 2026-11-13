@@ -334,8 +334,9 @@ pub(crate) const SECRET_PATTERNS: &[SecretPattern] = &[
 // The smoke harness parses this table and the `prefixes: &[...]` lists (`secret_openings` in
 // `smoke/tests/rust_source.py`): keep each element a literal or a `const` of this file.
 const NON_TOKEN_PREFIXES: &[&str] = &[
-    "-----begin ",
-    "---- begin ssh2 ",
+    // MAGI FIX (MS3 §6 loop15): no trailing space; a NUL that ate it left the opening unmatched.
+    "-----begin",
+    "---- begin",
     "aws_secret",
     "secretaccesskey",
     URL_AUTHORITY_START,
@@ -1143,6 +1144,9 @@ pub struct LineMasked {
     /// The masked text, with as many line breaks as the original.
     pub text: String,
     /// The name of the first pattern [`find_secret`] finds in the original (table order).
+    /// [`masked_pattern`] reads a masked text in text order, so a file with two kinds of secret
+    /// may be declared under either name; both are true, and the declaration names a pattern
+    /// the file held, not a ranking.
     pub pattern: &'static str,
 }
 
@@ -1381,7 +1385,10 @@ fn without_hidden_chars(text: &str) -> String {
 /// Whether `masked`, a text [`mask_secrets`] already went over, still holds a secret once its
 /// control and format characters are taken out: a token such a character split (`ghp_AAAA`,
 /// ZWSP, `AAAA…`) was read as two short runs and masked nothing, though every byte of it would
-/// leave. A text with none of those characters is not scanned again. O(n · p).
+/// leave. Tabs and lone CRs count as such characters here (CRLF pairs stay line breaks), and a
+/// key-block header the strip joins opens a block. A text the strip leaves unchanged is not
+/// scanned again; over-matching (a tab between two words joining a token) only holds a side
+/// raw, RV22's safe direction. O(n · p).
 ///
 /// # Arguments
 /// * `masked` - A text already masked (a secret the contiguous pass found is a mask by now, so
@@ -1391,9 +1398,14 @@ fn without_hidden_chars(text: &str) -> String {
 /// `true` when the stripped copy holds a secret, so the caller must hold the text back.
 // MAGI FIX (MS3 §6 loop14): the content path had no such pass (R6a2 Melchior, CRITICAL).
 pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
-    let hidden =
-        |c: char| !matches!(c, '\n' | '\r' | '\t') && (c.is_control() || is_hidden_format_char(c));
-    masked.chars().any(hidden) && find_secret(&without_hidden_chars(masked)).is_some()
+    // MAGI FIX (MS3 §6 loop15): tabs and lone CRs are stripped too (a tab split a token like a
+    // NUL), and a key-block header the strip joins opens a block. CRLF pairs stay line breaks.
+    let normalized = masked.replace("\r\n", "\n");
+    let stripped: String = normalized
+        .chars()
+        .filter(|&c| c == '\n' || !(c.is_control() || is_hidden_format_char(c)))
+        .collect();
+    stripped != normalized && (find_secret(&stripped).is_some() || holds_key_block(&stripped))
 }
 
 /// The characters that can break, reorder or hide text on a terminal or a log viewer: every

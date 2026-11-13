@@ -952,7 +952,8 @@ fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
             // and its file omitted; RV22 masks every one-line secret, so it is masked unbounded.
             // Declared (MS3 §6 loop11): this allocates the masked copy before `get`'s total cap,
             // O(side) with a constant factor (about 3.6x for a side dense in short URL
-            // credentials), bounded by MAX_REVIEW_FILE_BYTES per side; the cap then refuses it.
+            // credentials), so about 3.6 x MAX_REVIEW_FILE_BYTES per side at most; the cap then
+            // refuses it.
             BoundedMask::TooLarge => (mask_secrets_keeping_lines(text), false),
         },
         // MAGI FIX (MS3 §6 loop5): a binary side is never masked; whether it holds a secret is
