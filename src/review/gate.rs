@@ -950,6 +950,10 @@ impl<'a> Gate<'a> {
         skipped: &mut Vec<String>,
     ) -> Outcome {
         // MAGI FIX (MS3 §6 loop13): a state that carries a mask marker is never `filtered`.
+        // MAGI FIX (MS3 §6 loop14): the trigger is the marker's text in the state, not the act of
+        // masking (`sendable` returns a `Value`, and widening it for the flag would change every
+        // caller). A finding that itself quotes the marker therefore also stays out of `filtered`
+        // (`a_quoted_marker_is_never_filtered`): the safe direction, one `low_confidence`.
         let guard = guard.or_else(|| {
             state
                 .to_string()
@@ -1201,6 +1205,28 @@ mod tests {
             (GateState::LowConfidence, Some("not every claim judged"))
         );
         assert_eq!(v.lean.as_deref(), Some("false_positive"));
+    }
+
+    #[tokio::test]
+    async fn a_critical_with_unasked_pairs_and_a_confident_false_positive_is_low_confidence() {
+        // MAGI FIX (MS3 §6 loop14): a critical whose confidence reaches CRITICAL_MIN_CONFIDENCE is
+        // not protected by its severity, so only the question cap keeps it from `filtered`: it
+        // stays in the main list as `low_confidence` with `not every claim judged`.
+        let mut f = finding(Severity::Critical, Some(1));
+        let n = MAX_GATE_QUESTIONS_PER_FINDING + 1;
+        f.titles = (0..n).map(|i| format!("t{i}")).collect();
+        f.details = (0..n).map(|i| format!("d{i}")).collect();
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .times(MAX_GATE_QUESTIONS_PER_FINDING)
+            .returning(|r| answer(r.model().unwrap_or(""), "false_positive", 0.99));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let v = g.judge(&f, Some("x\nx\nx\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause),
+            (GateState::LowConfidence, Some("not every claim judged"))
+        );
+        assert!(g.per_model().is_empty(), "{:?}", g.per_model());
     }
 
     #[tokio::test]
@@ -2669,6 +2695,26 @@ mod tests {
             )
             .await;
         assert_eq!(plain.state, GateState::Filtered);
+    }
+
+    #[tokio::test]
+    async fn a_quoted_marker_is_never_filtered() {
+        // MAGI FIX (MS3 §6 loop14): the declared false trigger of the masked-code guard: clean
+        // code, but the finding's own title quotes the mask marker.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.99));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let mut f = finding(Severity::Warning, Some(1));
+        f.titles = vec![format!(
+            "the value {}github-token> is fine",
+            crate::review::secrets::REDACTED_OPEN
+        )];
+        let v = g.judge(&f, Some("let k = 1;\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause),
+            (GateState::LowConfidence, Some("masked code"))
+        );
     }
 
     #[tokio::test]
