@@ -504,6 +504,28 @@ class ReviewWorkspaceTests(unittest.TestCase):
             self.assertFalse(outside.exists())
 
 
+class RelayBeforeSetupTests(unittest.TestCase):
+    """MAGI FIX (MS3 §6 loop14, R7a1): a relay that cannot be staged is found before any setup."""
+
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_an_unstageable_relay_spends_no_setup_invocation(self) -> None:
+        definition = runs.RunDefinition(
+            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
+            stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+            records_requests=True,
+            setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = _executor(pathlib.Path(tmp))
+            spent = []
+            with mock.patch.object(executor, "_invoke", lambda d, s: spent.append(d)), \
+                    mock.patch.object(runs, "relay_upstream",
+                                      side_effect=runs.RelayUnavailable("two endpoints")):
+                executor._unrunnable_cause = ""
+                executor._prepare_review_workspace(definition)
+        self.assertEqual([], spent, "a setup review ran before the relay was known to stage")
+        self.assertEqual("two endpoints", executor._unrunnable_cause)
+
+
 class ReviewWorkspaceLinkTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 10, F1a-c4] links never steer what is copied in or deleted."""
 

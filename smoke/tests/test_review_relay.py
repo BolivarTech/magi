@@ -162,29 +162,36 @@ class RelayTests(unittest.TestCase):
                 runs.point_embedding_at(path, "http://127.0.0.1:9/v1")
             self.assertEqual(text, path.read_text(), "the file is left as it was")
 
-    def test_setup_clears_the_embedder_rewrite(self) -> None:
-        # MAGI FIX (MS3 §6 loop11, R7a Balthasar): a setup invocation inherited the run's flags.
-        seen = []
-        executor = runs.RunExecutor(binary=None, env={}, config=None)
-        definition = runs.RunDefinition(
-            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
-            stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
-            unreachable_embedder=True, setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
-        with unittest.mock.patch.object(executor, "_invoke", lambda d, s: seen.append(d)):
-            executor._run_setup(definition, pathlib.Path("."))
-        self.assertEqual([False], [d.unreachable_embedder for d in seen])
+    def test_setup_cannot_be_combined_with_a_run_the_harness_rewrites(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7a1): this replaces `test_setup_clears_the_embedder_rewrite`
+        # and `test_setup_clears_the_model_ban` (loops 11 and 13), which built definitions that
+        # inherited the run's flags into a setup invocation. The combination is refused when the
+        # definition is built, so a setup review can never run uncounted or against a live embedder.
+        base = dict(run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
+                    stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+                    setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
+        for extra in ({"forbids_model_calls": True}, {"unreachable_embedder": True}, {"rotates": True}):
+            with self.subTest(extra=extra), self.assertRaises(HarnessError):
+                runs.RunDefinition(**base, **extra)
 
-    def test_setup_clears_the_model_ban(self) -> None:
-        # MAGI FIX (MS3 §6 loop13, R7a Melchior): a setup invocation inherited forbids_model_calls.
+    def test_a_temporary_file_name_is_not_shared_between_writers(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7a1): the sibling was always `<name>.tmp`, so two writers of one
+        # file would collide on it.
         seen = []
-        executor = runs.RunExecutor(binary=None, env={}, config=None)
-        definition = runs.RunDefinition(
-            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
-            stdin=b"", needs_trio=False, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
-            forbids_model_calls=True, setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
-        with unittest.mock.patch.object(executor, "_invoke", lambda d, s: seen.append(d)):
-            executor._run_setup(definition, pathlib.Path("."))
-        self.assertEqual([False], [d.forbids_model_calls for d in seen])
+        real = runs.os.replace
+
+        def spy(source, target):
+            seen.append(pathlib.Path(source).name)
+            real(source, target)
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(runs.os, "replace", spy):
+            path = pathlib.Path(tmp) / "magi.toml"
+            path.write_bytes(b"a")
+            runs._replace_bytes(path, b"b", "first write")
+            runs._replace_bytes(path, b"c", "second write")
+            self.assertEqual(b"c", path.read_bytes())
+            self.assertEqual([], [p.name for p in pathlib.Path(tmp).iterdir() if p.name != "magi.toml"])
+        self.assertEqual(2, len(set(seen)), seen)
+        self.assertNotIn("magi.toml.tmp", seen)
 
     def test_setup_shares_the_run_clock(self) -> None:
         # MAGI FIX (MS3 §6 loop13, R7a Balthasar): the setup reviews drew a clock each, unbounded

@@ -206,6 +206,27 @@ class ProductOutputBoundaryTests(unittest.TestCase):
         self.assertEqual([Outcome.CANNOT_TEST], [f.outcome for f in findings])
         self.assertIn("two endpoints", findings[0].detail)
 
+    def test_every_unstaged_run_is_reported(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7a1): the loop returned at the first unstaged run, so a
+        # scenario on several runs dropped the other causes from its CANNOT_TEST detail.
+        first = _TimedOut("R18", timed_out=False, not_runnable="two endpoints")
+        second = _TimedOut("R19", timed_out=False, not_runnable="no relay")
+        self.invoked = []
+
+        @scenario("S7", run=("R18", "R19"), registry=self.registry)
+        def both(run):
+            self.invoked.append("S7")
+            yield Finding(assertion="read", outcome=Outcome.PASS, detail="", run_id="R18")
+
+        findings = Runner(self.registry, {"R18": first, "R19": second},
+                          backend_reachable=True, ambient=_NO_AMBIENT).run()
+        self.assertEqual([], self.invoked)
+        self.assertEqual([Outcome.CANNOT_TEST], [f.outcome for f in findings])
+        self.assertIn("R18", findings[0].detail)
+        self.assertIn("two endpoints", findings[0].detail)
+        self.assertIn("R19", findings[0].detail)
+        self.assertIn("no relay", findings[0].detail)
+
     def test_a_run_that_reached_no_model_runs_its_scenario(self) -> None:
         findings = self._run_with(_TimedOut("R13", timed_out=False), inspects=False)
         self.assertEqual(["S7"], self.invoked)
