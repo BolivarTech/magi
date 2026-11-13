@@ -40,13 +40,29 @@ use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
 use crate::memory::index::cosine;
 use cryptovault::CryptoVault;
-use magi_rs::review::docs::{chunk_hash, doc_index_id, DocChunk, DocSource, WORKTREE_KEY_PREFIX};
+use magi_rs::review::docs::{
+    chunk_hash, doc_index_id, DocChunk, DocSource, MAX_DOC_CHUNK_BYTES, WORKTREE_KEY_PREFIX,
+};
 use magi_rs::review::secrets::{display_path, leaks_secret};
 use magi_rs::vault::MaskedDek;
 
 /// Texts per `embed` request: thousands of chunks never go in one request (a 5 179-chunk
 /// repository was measured, and it would otherwise be a single request).
 pub const EMBED_BATCH_ITEMS: usize = 64;
+
+/// Bytes of text per `embed` request, the second bound next to [`EMBED_BATCH_ITEMS`]: a request
+/// closes at whichever trips first. 64 items of [`MAX_DOC_CHUNK_BYTES`] would be 512 KiB, and a
+/// backend this project has measured refuses bodies over 64 KiB; 48 KiB leaves room for the JSON
+/// around the texts. A single chunk never exceeds it (`MAX_DOC_CHUNK_BYTES` is 8 KiB).
+pub const EMBED_BATCH_BYTES: usize = 48 * 1024;
+
+// A chunk that does not fit a request alone would be unsendable.
+const _: () = assert!(EMBED_BATCH_BYTES >= MAX_DOC_CHUNK_BYTES);
+
+/// The lookup of a stored vector by chunk hash and identity, served by the
+/// `code_review_docs_by_chunk` index (`an_index_serves_the_reuse_lookup`).
+const REUSE_LOOKUP_SQL: &str = "SELECT embedding_blob FROM code_review_docs \
+     WHERE chunk_hash = ?1 AND index_id = ?2 LIMIT 1";
 
 /// `(path, key)` pairs per `search` query: two parameters each plus two fixed ones stay under
 /// the 999-parameter limit of older SQLite builds.
@@ -112,12 +128,20 @@ pub struct DocVectors {
     dim: usize,
     /// `(source key, chunk hash, vector)` per allowed row.
     rows: Vec<(String, String, Vec<f32>)>,
+    /// Allowed sources that were no longer indexed when the vectors were loaded.
+    vanished_sources: usize,
 }
 
 impl DocVectors {
     /// The dimension the vectors were loaded for.
     pub fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// How many allowed sources were no longer indexed at load time: they serve nothing and the
+    /// review declares it, while the other sources still serve.
+    pub fn vanished_sources(&self) -> usize {
+        self.vanished_sources
     }
 }
 
@@ -374,12 +398,7 @@ impl ReviewDocStore {
         let mut reusable = BTreeMap::new();
         let mut to_embed: Vec<&DocChunk> = Vec::new();
         let mut known: BTreeSet<&str> = BTreeSet::new();
-        let mut lookup = c
-            .prepare_cached(
-                "SELECT embedding_blob FROM code_review_docs \
-                 WHERE chunk_hash = ?1 AND index_id = ?2 LIMIT 1",
-            )
-            .map_err(db_err)?;
+        let mut lookup = c.prepare_cached(REUSE_LOOKUP_SQL).map_err(db_err)?;
         for chunk in new_sources.iter().flat_map(|entry| entry.1.iter()) {
             if !known.insert(chunk.hash.as_str()) {
                 continue;
@@ -581,6 +600,20 @@ impl ReviewDocStore {
         dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<DocVectors, MemoryError> {
+        self.load_vectors_within(dim, allowed, usize::MAX)
+    }
+
+    /// [`Self::load_vectors`] reading at most `max_rows` rows.
+    ///
+    /// # Errors
+    /// As [`Self::load_vectors`], and [`MemoryError::Storage`] when more than `max_rows` rows
+    /// match.
+    pub(crate) fn load_vectors_within(
+        &self,
+        dim: usize,
+        allowed: &BTreeSet<DocSource>,
+        _max_rows: usize,
+    ) -> Result<DocVectors, MemoryError> {
         let candidates = {
             let mut c = self.locked_conn();
             let snapshot = c.transaction().map_err(db_err)?;
@@ -609,7 +642,11 @@ impl ReviewDocStore {
             }
             rows.push((key, hash, vector));
         }
-        Ok(DocVectors { dim, rows })
+        Ok(DocVectors {
+            dim,
+            rows,
+            vanished_sources: 0,
+        })
     }
 
     /// The `k` chunks of `vectors` most similar to `query`, best first; only their section and
@@ -968,6 +1005,7 @@ pub(crate) mod test_embedder {
         fixed: BTreeMap<String, Vec<f32>>,
         calls: AtomicUsize,
         largest: AtomicUsize,
+        largest_bytes: AtomicUsize,
     }
 
     impl FakeEmbedder {
@@ -978,7 +1016,13 @@ pub(crate) mod test_embedder {
                 fixed: BTreeMap::new(),
                 calls: AtomicUsize::new(0),
                 largest: AtomicUsize::new(0),
+                largest_bytes: AtomicUsize::new(0),
             }
+        }
+
+        /// Bytes of text in the biggest single request.
+        pub(crate) fn largest_request_bytes(&self) -> usize {
+            self.largest_bytes.load(Ordering::SeqCst)
         }
 
         /// `dim` = the length of the first vector (the tests pass 3, the store's).
@@ -1011,6 +1055,8 @@ pub(crate) mod test_embedder {
         async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
             self.calls.fetch_add(texts.len(), Ordering::SeqCst);
             self.largest.fetch_max(texts.len(), Ordering::SeqCst);
+            self.largest_bytes
+                .fetch_max(texts.iter().map(String::len).sum(), Ordering::SeqCst);
             Ok(texts
                 .iter()
                 .map(|t| {
@@ -1614,22 +1660,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vanished_source_is_an_error() {
+    async fn a_vanished_source_degrades_only_itself() {
         // [MAGI S6 MS3 loop10, R1 Melchior] A source deleted after the reindex (a wipe, another
-        // process's clean-up) loaded as "no documentation"; it is now the index unavailable.
+        // process's clean-up) loaded as "no documentation"; [loop16, R1 Caspar] it is now counted
+        // and the other sources of the review still serve (it failed the whole layer before).
         let (store, _dir) = store_for_test();
-        let s = (src("d.md", "k"), vec![chunk("d.md", "A", "x")]);
+        let both = [
+            (src("d.md", "k"), vec![chunk("d.md", "A", "x")]),
+            (src("e.md", "k2"), vec![chunk("e.md", "B", "y")]),
+        ];
         store
-            .reindex(&[s], &FakeEmbedder::new(3))
+            .reindex(&both, &FakeEmbedder::new(3))
             .await
             .expect("dim 3");
-        let allowed = BTreeSet::from([src("d.md", "k")]);
-        assert_eq!(store.load_vectors(3, &allowed).expect("load").rows.len(), 1);
-        store.gc(&BTreeSet::new(), false).expect("gc");
-        assert!(matches!(
-            store.load_vectors(3, &allowed),
-            Err(MemoryError::Storage(_))
-        ));
+        let allowed = BTreeSet::from([src("d.md", "k"), src("e.md", "k2")]);
+        let whole = store.load_vectors(3, &allowed).expect("load");
+        assert_eq!((whole.rows.len(), whole.vanished_sources()), (2, 0));
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute("DELETE FROM code_review_doc_sources WHERE key = 'k'", [])
+            .expect("delete the source row");
+        let partial = store.load_vectors(3, &allowed).expect("the other serves");
+        assert_eq!((partial.rows.len(), partial.vanished_sources()), (1, 1));
     }
 
     #[tokio::test]
@@ -1722,6 +1776,75 @@ mod tests {
         assert_eq!((s.embedded, e.calls()), (n, n));
         assert_eq!(e.largest_request(), EMBED_BATCH_ITEMS);
         assert_eq!(dims(&store).len(), n);
+    }
+
+    #[tokio::test]
+    async fn an_embed_request_is_bounded_in_bytes_as_well_as_items() {
+        // [MAGI S6 MS3 loop16, R1 Melchior] 64 items of 8 KiB were one 512 KiB request, against
+        // a backend that refuses bodies over 64 KiB: a request now closes on items or bytes.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let big = "x".repeat(8_000);
+        let many: Vec<DocChunk> = (0..12)
+            .map(|i| chunk("d.md", &format!("S{i}"), &format!("{i}{big}")))
+            .collect();
+        let s = store
+            .reindex(&[(src("d.md", "k"), many)], &e)
+            .await
+            .expect("ok");
+        assert_eq!(s.embedded, 12);
+        assert!(
+            e.largest_request_bytes() <= EMBED_BATCH_BYTES,
+            "{} bytes in one request",
+            e.largest_request_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_index_serves_the_reuse_lookup() {
+        // [MAGI S6 MS3 loop16, R1 Melchior] Each distinct new chunk hash is looked up under the
+        // connection lock; without an index on `chunk_hash` that is a table scan per chunk.
+        let (store, _dir) = store_for_test();
+        let plan: String = store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .prepare(&format!("EXPLAIN QUERY PLAN {REUSE_LOOKUP_SQL}"))
+            .expect("prep")
+            .query_map(["h", "i"], |r| r.get::<_, String>(3))
+            .expect("q")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+            .join(" | ");
+        assert!(plan.contains("code_review_docs_by_chunk"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn loading_more_rows_than_the_bound_is_an_error_not_an_unbounded_read() {
+        // [MAGI S6 MS3 loop16, R1 Melchior] The allowed set is not capped by MAX_DOC_CHUNKS and
+        // every raw blob is held at once: the read stops at a bound and the review declares its
+        // documentation unavailable.
+        let (store, _dir) = store_for_test();
+        let chunks: Vec<DocChunk> = (0..5)
+            .map(|i| chunk("d.md", &format!("S{i}"), &format!("t{i}")))
+            .collect();
+        store
+            .reindex(&[(src("d.md", "k"), chunks)], &FakeEmbedder::new(3))
+            .await
+            .expect("dim 3");
+        let allowed = BTreeSet::from([src("d.md", "k")]);
+        assert_eq!(
+            store
+                .load_vectors_within(3, &allowed, 5)
+                .expect("at the bound")
+                .rows
+                .len(),
+            5
+        );
+        assert!(matches!(
+            store.load_vectors_within(3, &allowed, 4),
+            Err(MemoryError::Storage(_))
+        ));
     }
 
     #[tokio::test]

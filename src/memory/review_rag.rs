@@ -513,6 +513,7 @@ impl StoreRag<'_> {
             }
         };
         docs.search_loaded_counting(&vectors, query, DOC_SEARCH_K)
+            .map(|(hits, vanished)| (hits, vanished + vectors.vanished_sources()))
     }
 
     /// Whether `entry` may be served: `served_as_validated` on `HEAD` through
@@ -4327,6 +4328,46 @@ mod tests {
             declared,
             vec![(ContextKind::Documentation, INDEX_UNAVAILABLE.to_string())]
         );
+        // [MAGI S6 MS3 loop16, R2 Caspar] The loss touched one row: the next batch still serves
+        // the survivor and the declaration is not repeated.
+        let again = rag.documentation(&query, &mut declared);
+        assert_eq!(again.len(), 1, "documentation stays on for what survived");
+        assert_eq!(declared.len(), 1, "declared once: {declared:?}");
+    }
+
+    #[tokio::test]
+    async fn a_source_gone_before_the_load_serves_the_others_and_is_declared() {
+        // [MAGI S6 MS3 loop16, R1 Caspar / R2] One allowed source no longer indexed failed the
+        // whole documentation layer; only that source is lost now, declared once.
+        let f = RagFixture::new(&[]).await;
+        f.docs
+            .reindex(
+                &[
+                    (src("a.md", "k1"), vec![chunk("a.md", "A", "x")]),
+                    (src("b.md", "k2"), vec![chunk("b.md", "B", "y")]),
+                ],
+                &f.embedder,
+            )
+            .await
+            .expect("indexed");
+        let mut rag = f.rag(true);
+        rag.doc_sources = BTreeSet::from([src("a.md", "k1"), src("b.md", "k2")]);
+        f.docs
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute("DELETE FROM code_review_doc_sources WHERE key = 'k1'", [])
+            .expect("delete");
+        let query = [0.5, 0.5, 0.5];
+        let mut declared = Vec::new();
+        let hits = rag.documentation(&query, &mut declared);
+        assert_eq!(hits.len(), 1, "the other source serves");
+        assert_eq!(
+            declared,
+            vec![(ContextKind::Documentation, INDEX_UNAVAILABLE.to_string())]
+        );
+        let again = rag.documentation(&query, &mut declared);
+        assert_eq!((again.len(), declared.len()), (1, 1));
     }
 
     #[tokio::test]
