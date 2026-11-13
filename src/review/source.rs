@@ -1205,6 +1205,47 @@ mod tests {
     }
 
     #[test]
+    fn a_split_key_header_opens_a_block() {
+        // [MAGI S6 MS3 loop15, R6a2 CRITICAL] A hidden character inside the header words left
+        // `holds_key_block` false, so the body was masked line by line and served.
+        let body = "A".repeat(64);
+        for hidden in ["\u{200b}", "\u{202e}", "\u{7}", "\t"] {
+            let text = format!(
+                "{d}BEGIN RSA PRIVATE{hidden}KEY{d}\n{body}\n{d}END RSA PRIVATE KEY{d}\n",
+                d = "-----"
+            );
+            let held = held_side(Some(text.into_bytes()), MAX_MASKED_SIDE_BYTES);
+            assert!(held.raw_secret, "{hidden:?}");
+            assert!(held.mask.is_none(), "{hidden:?}");
+        }
+    }
+
+    #[test]
+    fn a_tab_split_token_is_held() {
+        // [MAGI S6 MS3 loop15, R6a2 Caspar] A tab (and a lone CR) inside a token ended its tail
+        // like a NUL does; the hidden-character pass now strips them too.
+        let tail = "A".repeat(40);
+        for blank in ["\t", "\r"] {
+            let text = format!("let t = \"ghp_AAAA{blank}{tail}\";\n"); // allow-secret-scan
+            assert!(
+                crate::review::secrets::find_secret(&text).is_none(),
+                "precondition: {blank:?}"
+            );
+            assert!(held_side(Some(text.into_bytes()), MAX_MASKED_SIDE_BYTES).raw_secret);
+        }
+        let crlf = "fn f() {}\r\n\tlet x = 1;\r\n".as_bytes().to_vec();
+        assert!(!held_side(Some(crlf), MAX_MASKED_SIDE_BYTES).raw_secret);
+    }
+
+    #[test]
+    fn a_nul_split_key_header_in_a_binary_side_is_held() {
+        // [MAGI S6 MS3 loop15, R6a2 Melchior] A NUL that ate the space after `BEGIN` left the
+        // `-----begin ` opening unmatched on the binary side.
+        let bin = b"\x7fELF\0-----BEGIN\0RSA PRIVATE KEY-----\n".to_vec(); // allow-secret-scan
+        assert!(held_side(Some(bin), MAX_MASKED_SIDE_BYTES).raw_secret);
+    }
+
+    #[test]
     fn a_benign_binary_with_an_opening_is_held() {
         // MAGI FIX (MS3 §6 loop12): the declared over-match of `held_side` for a binary side. An
         // opening (`sk-`, `://`) with no left boundary marks a harmless binary as raw secret, so
