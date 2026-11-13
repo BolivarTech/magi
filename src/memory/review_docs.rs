@@ -2368,6 +2368,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_secret_split_by_a_hidden_character_never_reaches_the_embedder() {
+        // [MAGI S6 MS3 loop16, R1 Caspar] The embedder request body is an egress point (RV22):
+        // a token split by a zero-width space is invisible to `find_secret` and travelled whole.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let text = "token = ghp_AAAAAAAAAAAAAAAAAA\u{200b}AAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let r = store
+            .reindex(
+                &[(src("leak.md", "k3"), vec![chunk("leak.md", "Setup", text)])],
+                &e,
+            )
+            .await;
+        assert!(matches!(&r, Ok(s) if s.refused == ["leak.md"]), "{r:?}");
+        assert_eq!(e.calls(), 0, "nothing embedded");
+    }
+
+    #[tokio::test]
     async fn a_refused_source_spares_others() {
         // [MAGI S6 MS3 loop8, R1 Caspar] One source with a secret refused the whole reindex, so
         // the revision lost all its documentation; now only that source is left out, by name.

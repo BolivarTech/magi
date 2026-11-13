@@ -2270,8 +2270,25 @@ mod tests {
             .collect();
         assert_eq!(
             (DOC_INDEX_VERSION, names.as_slice()),
-            (3, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
+            (4, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
             "the secret patterns changed: bump DOC_INDEX_VERSION and update this list"
         );
+    }
+
+    #[test]
+    fn a_secret_split_by_a_hidden_character_is_netted_with_its_source() {
+        // [MAGI S6 MS3 loop16, R1 Caspar] The documentation egress ran `mask_secrets` alone, so
+        // a token split by a zero-width space reached the embedder whole: the batch and gate
+        // paths strip hidden characters before the second look, and so must this one.
+        let split = "token = ghp_AAAAAAAAAAAAAAAAAA\u{200b}AAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        assert!(
+            find_secret(split).is_none(),
+            "the contiguous pass misses it"
+        );
+        let hidden = chunk_of("docs/a.md", "Setup".into(), split.into());
+        let clean = chunk_of("docs/b.md", "Setup".into(), "plain prose".into());
+        let (kept, dropped) = without_secrets(vec![hidden, clean]);
+        assert_eq!(dropped, ["docs/a.md"]);
+        assert!(kept.iter().all(|c| c.path == "docs/b.md"), "{kept:?}");
     }
 }
