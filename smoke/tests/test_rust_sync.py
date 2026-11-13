@@ -2102,6 +2102,19 @@ class ReviewMaskingSyncTests(unittest.TestCase):
                     product *= int(factor.replace("_", "").strip())
                 self.assertEqual(value, product, found)
 
+    def test_the_r18_requests_use_the_products_embedding_prefixes(self) -> None:
+        # MAGI FIX (MS3 §6 loop14): R18_HEALTHY_REQUESTS hand-copies the document and query prefixes
+        # the embedder prepends; a changed default left the healthy record untrue with the suite green.
+        from smoke.tests.support import R18_HEALTHY_REQUESTS
+        config_rs = without_comments(_source("src/memory/config.rs"))
+        doc_prefix = one_definition(config_rs, r'"(search_document: )"\.into\(\)', "src/memory/config.rs").group(1)
+        query_prefix = one_definition(config_rs, r'"(search_query: )"\.into\(\)', "src/memory/config.rs").group(1)
+        embeddings = [json.loads(body)["input"][0] for path, body in R18_HEALTHY_REQUESTS
+                      if path == "/v1/embeddings"]
+        self.assertEqual(2, len(embeddings), embeddings)
+        self.assertTrue(embeddings[0].startswith(doc_prefix), embeddings[0])
+        self.assertTrue(embeddings[1].startswith(query_prefix), embeddings[1])
+
     def test_the_readme_purge_tables_are_the_schemas_review_tables(self) -> None:
         schema = without_comments(_source("src/system/database.rs"))
         created = set(re.findall(r"CREATE TABLE IF NOT EXISTS (code_review_\w+)", schema))
