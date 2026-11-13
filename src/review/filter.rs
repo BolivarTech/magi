@@ -1254,6 +1254,39 @@ mod tests {
     }
 
     #[test]
+    fn a_path_left_out_as_secret_is_never_kept_by_a_later_listing() {
+        // [MAGI S6 MS3 loop16, R6a1 Melchior] The repeated-path guard ran one way: a kept path
+        // turned a later skip into a repeat, but a path left out as `secret` could be kept by a
+        // later listing, so the report held it both skipped and kept.
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let side = format!("aws_secret_key =\nfn f() {{}}\n\"{value}\"\n");
+        let diff = format!(
+            "@@ -1,5 +1,5 @@\n aws_secret_key =\n \"{value}\"\n fn f() {{}}\n fn f() {{}}\n fn f() {{}}\n"
+        );
+        let inner = MapSource::new(&[("a.rs", side.as_str())], &[("a.rs", side.as_str())]);
+        let src = CachedSource::new(&inner);
+        let file = |diff: Option<String>| ReviewFile {
+            path: "a.rs".into(),
+            diff,
+        };
+        let outcome = filter_files(
+            vec![file(Some(diff)), file(None)],
+            &src,
+            &LanguageRegistry::new(),
+            false,
+            &|_| false,
+        );
+        match outcome {
+            Err(ReviewError::NothingToReview { skipped }) => {
+                assert_eq!(skipped.len(), 2, "{skipped:?}");
+                assert_eq!(skipped[0].cause, SkipCause::Secret);
+                assert_eq!(skipped[1].cause, SkipCause::DuplicateSection);
+            }
+            other => panic!("a left-out path was kept again: {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_source_that_does_not_mask_still_never_lets_a_secret_through() {
         // [T3.7] the fallback: a source with no mask (no production path builds one) hands the
         // filter raw content, so a file that holds a secret is left out as before, and an
