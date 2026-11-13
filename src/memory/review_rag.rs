@@ -114,6 +114,14 @@ const DIMENSION_PROBE: &str = "dimension";
 
 /// The context source of one review, over the stores and the review's own content.
 ///
+/// MAGI FIX (MS3 §6 loop14), declared limitations. (1) The struct carries many fields (stores,
+/// git, per-review memos, once-per-review flags): they are one review's state and all live and die
+/// together, so splitting them would only move the same borrows into sub-structs; this is a style
+/// limit, not a behaviour one. (2) The stores are synchronous SQLite behind short locks and are
+/// never held across an `.await`; the query timeout ([`EMBED_QUERY_TIMEOUT_SECS`]) is a tokio
+/// timeout, so on a single-threaded runtime a store call delays the timer by its own (short,
+/// `busy_timeout`-bounded) duration and never by more. (3) Poisoned locks: see `relock`.
+///
 /// # Examples
 ///
 /// ```ignore
@@ -627,8 +635,15 @@ impl StoreRag<'_> {
                     (self.docs.is_some(), ContextKind::Documentation),
                     (self.history.is_some(), ContextKind::History),
                 ];
+                // MAGI FIX (MS3 §6 loop14): a prefix that holds a key block never reached the
+                // embedder, so it is not an embedder that "did not answer".
+                let cause = if holds_key_block(embedder.query_prefix()) {
+                    QUERY_WITHHELD
+                } else {
+                    EMBEDDER_DOWN
+                };
                 for (_, kind) in layers.into_iter().filter(|(on, _)| *on) {
-                    declared.push((kind, EMBEDDER_DOWN.to_string()));
+                    declared.push((kind, cause.to_string()));
                 }
             }
             return (None, None);
@@ -1573,6 +1588,13 @@ pub fn reclassify_budget(deadline: Option<std::time::Instant>) -> Duration {
 /// # Errors
 ///
 /// [`MemoryError::Storage`] with the cause redacted, for a git or store failure.
+///
+/// # Bounds
+///
+/// MAGI FIX (MS3 §6 loop14): the work is bounded by structure, not by a clock: at most
+/// `MAX_GC_REFS` ref-tree listings (past that the clean-up is skipped, never started) and one
+/// `DELETE` per dead source; it runs after the review has produced its report, and a failure only
+/// leaves rows that the next review's clean-up deletes (the index is derived data).
 pub fn collect_garbage(
     docs: &ReviewDocStore,
     git: Option<&dyn GitCommand>,
