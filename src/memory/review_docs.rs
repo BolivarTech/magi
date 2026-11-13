@@ -333,8 +333,10 @@ impl ReviewDocStore {
                 self.index_id
             )));
         }
-        refuse_inconsistent_chunks(sources)?;
+        // MAGI FIX (MS3 §6 loop15): the secret refusal runs first, so a source left out anyway
+        // cannot fail the others through its chunk hashes (R1 Melchior).
         let (safe, refused) = without_secret_sources(sources);
+        refuse_inconsistent_chunks(&safe)?;
         let plan = self.plan(&safe)?;
         let fresh = embed_all(&plan.to_embed, embedder).await?;
         let rows = self.encode_rows(&plan, &fresh, embedder.dim())?;
@@ -892,8 +894,8 @@ fn without_secret_sources(
 /// checks it at the storage boundary. All or nothing (a caller bug, not one source's content).
 /// O(total text). The message names the path through [`display_path`].
 // MAGI FIX (MS3 §6 loop6): the hash was trusted as given.
-fn refuse_inconsistent_chunks(sources: &[(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
-    for (source, chunks) in sources {
+fn refuse_inconsistent_chunks(sources: &[&(DocSource, Vec<DocChunk>)]) -> Result<(), MemoryError> {
+    for (source, chunks) in sources.iter().copied() {
         let bad = chunks
             .iter()
             .any(|c| c.path != source.path || c.hash != chunk_hash(&c.path, &c.section, &c.text));
@@ -1504,6 +1506,62 @@ mod tests {
             .missing(&[src("d.md", "k")])
             .expect("missing")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_index_identity_is_the_model_id_and_dimension_not_the_weights() {
+        // [MAGI S6 MS3 loop15, R1; declared on `ReviewDocStore`] a model re-published under the
+        // same id and dimension keeps its old vectors: the chunk is reused, never embedded again.
+        let (store, _dir) = store_for_test();
+        let first = FakeEmbedder::with_vectors(&[("x", vec![1.0, 0.0, 0.0])]);
+        store
+            .reindex(
+                &[(src("a.md", "k1"), vec![chunk("a.md", "A", "x")])],
+                &first,
+            )
+            .await
+            .expect("first");
+        let republished = FakeEmbedder::with_vectors(&[("x", vec![0.0, 1.0, 0.0])]);
+        let stats = store
+            .reindex(
+                &[(src("a.md", "k2"), vec![chunk("a.md", "A", "x")])],
+                &republished,
+            )
+            .await
+            .expect("second");
+        assert_eq!((stats.embedded, stats.reused), (0, 1));
+        assert_eq!(republished.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_undecryptable_reusable_blob_fails_that_indexing_and_writes_nothing() {
+        // [MAGI S6 MS3 loop15, R1; declared on `ReviewDocStore`] a stored vector that no longer
+        // decrypts is never copied forward or served: the indexing that would reuse it fails
+        // (the review then runs without documentation, declared), and nothing is written.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        store
+            .reindex(&[(src("a.md", "k1"), vec![chunk("a.md", "A", "x")])], &e)
+            .await
+            .expect("first");
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute(
+                "UPDATE code_review_docs SET embedding_blob = zeroblob(64)",
+                [],
+            )
+            .expect("tamper");
+        let b = src("a.md", "k2");
+        let r = store
+            .reindex(&[(b.clone(), vec![chunk("a.md", "A", "x")])], &e)
+            .await;
+        assert!(matches!(r, Err(MemoryError::Crypto(_))), "{r:?}");
+        assert_eq!(
+            store.missing(std::slice::from_ref(&b)).expect("missing"),
+            vec![b]
+        );
     }
 
     #[tokio::test]
