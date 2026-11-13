@@ -295,6 +295,8 @@ fn classify_files(
     // (path, diff hash) pairs already left out, so one skip is listed once.
     let mut kept_paths: HashSet<String> = HashSet::new();
     let mut skipped_seen: HashSet<(String, Option<u64>)> = HashSet::new();
+    // The paths left out as `secret`: a later listing of one is never kept (RV22).
+    let mut secret_paths: HashSet<String> = HashSet::new();
     for file in files {
         let sides = sides_of(&file);
         // MAGI FIX (MS3 §6 loop5): the diff moves into the verdict; it was copied for every file.
@@ -305,7 +307,9 @@ fn classify_files(
                 // MAGI FIX (MS3 §6 loop12): a path is kept once, whoever lists it again (the
                 // repeat reads the cached, masked side and would be reviewed and declared twice).
                 // MAGI FIX (MS3 §6 loop13): a repeat with another diff is declared, not dropped.
-                if kept_paths.contains(&path) {
+                // MAGI FIX (MS3 §6 loop16, R6a1): the guard runs both ways: a path already left
+                // out as `secret` is not kept by a later listing either.
+                if kept_paths.contains(&path) || secret_paths.contains(&path) {
                     // MAGI FIX (MS3 §6 loop15): always declared, whatever the diff's hash says:
                     // a collision or an honest repeat is never a silent drop.
                     filtered.skipped.push(Skipped {
@@ -360,6 +364,9 @@ fn classify_files(
                 // MAGI FIX (S6 loop 13, A2-m2 / A2-b1): side by side, and never a side a kept file
                 // was scanned with: a rename's old path can be a kept file's path.
                 release_unkept(source, &kept_sides, sides);
+                if cause == SkipCause::Secret {
+                    secret_paths.insert(path.clone());
+                }
                 if skipped_seen.insert((path.clone(), diff_key)) {
                     filtered.skipped.push(Skipped {
                         path: display_path(&path),
