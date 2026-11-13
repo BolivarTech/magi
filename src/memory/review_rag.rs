@@ -4281,6 +4281,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rows_deleted_mid_review_are_a_declared_degradation() {
+        // [MAGI S6 MS3 loop15, R1 Caspar] another process's clean-up deleted loaded rows
+        // mid-review and the hits were silently fewer; it is now declared once, like any other
+        // loss of the documentation index.
+        let f = RagFixture::new(&[]).await;
+        f.docs
+            .reindex(
+                &[
+                    (src("a.md", "k1"), vec![chunk("a.md", "A", "x")]),
+                    (src("b.md", "k2"), vec![chunk("b.md", "B", "y")]),
+                ],
+                &f.embedder,
+            )
+            .await
+            .expect("indexed");
+        let mut rag = f.rag(true);
+        rag.doc_sources = BTreeSet::from([src("a.md", "k1"), src("b.md", "k2")]);
+        let query = [0.5, 0.5, 0.5];
+        let mut declared = Vec::new();
+        assert_eq!(rag.documentation(&query, &mut declared).len(), 2);
+        assert!(declared.is_empty(), "{declared:?}");
+        f.docs
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute("DELETE FROM code_review_docs WHERE key = 'k1'", [])
+            .expect("delete");
+        let hits = rag.documentation(&query, &mut declared);
+        assert_eq!(hits.len(), 1, "the surviving hit still serves");
+        assert_eq!(
+            declared,
+            vec![(ContextKind::Documentation, INDEX_UNAVAILABLE.to_string())]
+        );
+    }
+
+    #[tokio::test]
     async fn no_query_is_embedded_once_both_layers_have_failed() {
         // [MAGI S6 MS3 loop7, R2 Caspar] With documentation and history both out for the rest of
         // the review, every later batch still spent an embedder call (and its bound) for nothing.
