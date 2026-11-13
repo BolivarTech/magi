@@ -4266,6 +4266,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn planning_makes_no_embedder_call() {
+        // [MAGI S6 MS3 loop15, loop14 ruling 8] The plan-time context source holds no embedder
+        // and no history store: with both wired into the runner, planning (a unit per batch,
+        // RV07(1)) still reaches neither, whatever `plan_review` grows.
+        let (_tmp, ws) = workspace_with_readme();
+        let (_db, _mem, memory) = review_memory();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake.clone();
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let plan = runner
+            .plan(&ReviewInput::File("src".into()))
+            .expect("plans");
+        assert!(plan.batches > 0, "a real plan, not an empty one");
+        assert_eq!(fake.calls(), 0, "planning never embeds");
+    }
+
+    #[tokio::test]
     async fn a_review_refused_for_its_budget_never_probes_the_embedder_dimension() {
         // [MAGI S6 MS3 loop1, R2 Melchior] `doc_store` probes an embedder that autodetects its
         // dimension: that probe is an outbound call too, so it must come after the budget check.

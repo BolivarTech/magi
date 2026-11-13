@@ -1502,6 +1502,19 @@ mod tests {
     }
 
     #[test]
+    fn a_distinct_key_climbs_past_every_taken_spelling() {
+        // [MAGI S6 MS3 loop15] `distinct_key` cannot overflow: by pigeonhole `taken.len()` keys
+        // block at most that many spellings, so with `k`, `k (2)` .. `k (1000)` taken it ends at
+        // `k (1001)`, `taken.len() + 1`, with no failure to report and no value repeated.
+        let mut taken = serde_json::Map::new();
+        taken.insert("k".into(), serde_json::json!(0));
+        for n in 2..=1000 {
+            taken.insert(format!("k ({n})"), serde_json::json!(n));
+        }
+        assert_eq!(distinct_key(&taken, "k".into()), "k (1001)");
+    }
+
+    #[test]
     fn two_model_names_masked_alike_keep_both_counts_in_the_summary_json() {
         // [MAGI S6 loop 11, C2-c1] masking keys must not merge two of them into one entry.
         let a = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
