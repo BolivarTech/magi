@@ -10366,6 +10366,39 @@ mod tests {
     }
 
     #[test]
+    fn no_memory_opens_no_review_store_even_when_a_store_is_handed_in() {
+        // [MAGI S6 MS3 loop16, R5b info] `--no-memory` used to be applied by each call site
+        // (`.filter(|_| !no_memory)`); it is one rule, so it lives inside `review_context_of`.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = EncryptedSqliteMemory::new(
+            tmp.path().join("review.db"),
+            Zeroizing::new("right-passphrase-0123456".to_string()),
+        )
+        .unwrap();
+        let cfg = MagiConfig::default();
+        let key = SectionKey::for_test(None, magi_rs::section_keys::KeySource::Absent);
+        let mut notices = Vec::new();
+        let (memory, embedder) =
+            review_context_of(Some(&store), &cfg, None, &key, true, &mut notices);
+        assert!(memory.is_none() && embedder.is_none());
+        assert!(notices.is_empty(), "a stateless run is not a failure");
+        let (memory, _) = review_context_of(Some(&store), &cfg, None, &key, false, &mut notices);
+        assert!(memory.is_some(), "a stateful run opens the review stores");
+    }
+
+    #[test]
+    fn no_call_site_filters_the_store_by_no_memory_itself() {
+        let source = include_str!("main.rs").replace('\r', "");
+        let (production, _) = source
+            .split_once(FIRST_TEST_MODULE)
+            .expect("this file has a test module");
+        for call in production.split("= review_context_of(").skip(1) {
+            let statement = call.split(';').next().unwrap_or("");
+            assert!(!statement.contains(".filter("), "{statement}");
+        }
+    }
+
+    #[test]
     fn review_setup_cause_strips_then_masks() {
         // [MAGI S6 MS3 loop16, R5b Caspar/Balthasar] The setup log lines and notices masked a
         // foreign error without stripping first, the claim went: a control byte inside a key
