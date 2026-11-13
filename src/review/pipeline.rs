@@ -640,6 +640,7 @@ pub async fn run_review(
             let bound = bind(rag, &index, &source);
             let given = rag;
             let rag = bound.as_deref().unwrap_or(rag);
+            ensure_bound_reserve(given, rag, planned)?;
             prepare_contexts(rag, given, &batches, limit, &mut summary).await?
         }
         None => vec![Vec::new(); batches.len()],
@@ -1058,6 +1059,34 @@ fn bind<'r>(
     sources: &'r dyn ContentSource,
 ) -> Option<Box<dyn RagSource + 'r>> {
     rag.for_review(ReviewMaterial { index, sources })
+}
+
+/// Fails closed when the bound source declares a longer outbound preparation than the source the
+/// budget check read ([`RagSource::outbound_reserve_secs`] is read from the given one only): its
+/// calls would run after a check that never counted them (§5.0 stage 4, "no byte out before the
+/// budget"). Asserted at bind time, before any [`RagSource::context_for`]. A source that is its
+/// own binding (`given` and `bound` the same object) always agrees. O(1).
+///
+/// # Errors
+///
+/// [`ReviewError::Io`] naming the two reserves.
+// MAGI FIX (MS3 §6 loop16): the contract was prose; a bound source could outspend the check.
+fn ensure_bound_reserve(
+    given: &dyn RagSource,
+    bound: &dyn RagSource,
+    batches: usize,
+) -> Result<(), ReviewError> {
+    let (declared, actual) = (
+        given.outbound_reserve_secs(batches),
+        bound.outbound_reserve_secs(batches),
+    );
+    if actual > declared {
+        return Err(ReviewError::Io(format!(
+            "the bound context source declares an outbound reserve of {actual} s, over the \
+             {declared} s the budget check reserved; nothing was sent"
+        )));
+    }
+    Ok(())
 }
 
 /// The review's total in seconds, read when the preparation ends, with the bound that set it:
@@ -1720,15 +1749,13 @@ async fn prepare_contexts(
         let reuse = !pre.is_empty() && brought == promised;
         // MAGI FIX (MS3 §6 loop15): RV07(1) makes the containing unit mandatory; one the source
         // promised and did not bring is declared as trimmed, never dropped unsaid.
+        // MAGI FIX (MS3 §6 loop16): its own declaration, not the optional-context `trimmed` list.
         if !reuse {
-            summary.trimmed.extend(
+            summary.undelivered_units.extend(
                 promised
                     .iter()
                     .filter(|id| brought.binary_search(id).is_err())
-                    .map(|(_, label)| TrimmedItem {
-                        kind: ContextKind::Unit,
-                        label: display_path(label),
-                    }),
+                    .map(|(_, label)| display_path(label)),
             );
         }
         if reuse {
@@ -1794,7 +1821,9 @@ async fn prepare_contexts(
     }
     // MAGI FIX (MS3 §6 loop4): the masked paths were trusted as the source shaped them; they
     // pass `display_path` here like every other path the summary carries (idempotent).
-    for (shown, pattern) in given.masked() {
+    // MAGI FIX (MS3 §6 loop16): read from both, like `skipped()`: a bound source's masked
+    // documentation went undeclared.
+    for (shown, pattern) in given.masked().into_iter().chain(rag.masked()) {
         declare_masked(summary, display_path(&shown), pattern);
     }
     Ok(contexts)

@@ -406,6 +406,20 @@ fn write_review_section(out: &mut String, s: &ReviewSummary, unshown: usize) -> 
             s.context_withheld
         )?;
     }
+    if !s.undelivered_units.is_empty() {
+        let shown: Vec<String> = s
+            .undelivered_units
+            .iter()
+            .take(MAX_OMISSIONS_SHOWN)
+            .map(|u| listed(u))
+            .collect();
+        writeln!(
+            out,
+            "{} containing units were not delivered: {}",
+            s.undelivered_units.len(),
+            shown.join(", ")
+        )?;
+    }
     if !s.trimmed.is_empty() {
         // MAGI FIX (MS3 §6 loop2): capped like the other omission lists; it grows with the batches.
         let mut trimmed: Vec<String> = s
