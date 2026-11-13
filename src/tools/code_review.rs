@@ -569,7 +569,8 @@ fn egress_safe(r: Rendered) -> Rendered {
         text: mask_secrets(&terminal_safe(&r.text)),
         json: masked_json(r.json),
         consult: masked_json(r.consult),
-        failure: r.failure.map(|f| mask_secrets(&terminal_safe(&f))),
+        // MAGI FIX (MS3 §6 loop14): the one error scrubber, so a URL credential is redacted too.
+        failure: r.failure.map(|f| egress_text(&f)),
     }
 }
 
@@ -608,7 +609,6 @@ fn terminal_safe(text: &str) -> String {
 /// # Returns
 /// The text with its credentials and secrets masked.
 // MAGI FIX (S6 loop 7, D-b1): one helper with both stages for every error path.
-// MAGI FIX (MS3 §6 loop13): the strip is a third stage inside it, not each call site's job.
 // MAGI FIX (MS3 §6 loop13): the strip is a third stage inside it, not seven call sites' job.
 pub(crate) fn egress_text(text: &str) -> String {
     mask_secrets(redact_foreign_text(&terminal_safe(text)).as_str())
@@ -680,9 +680,11 @@ pub(crate) fn envelope_fields(r: &Rendered) -> (String, Value, Value) {
     // MAGI FIX (MS3 §6 loop12): the RV22 mask too (strip, then mask), so a runner that skipped
     // `egress_safe` cannot leak a key through the backstop.
     (
-        mask_secrets(&terminal_safe(redact_foreign_text(&r.text).as_str())),
-        masked_json(redacted_json(r.consult.clone())),
-        masked_json(redacted_json(r.json.clone())),
+        // MAGI FIX (MS3 §6 loop14): the canonical order, strip first (a hidden character inside a
+        // credential would otherwise hide it from the redaction), then redact, then mask.
+        mask_secrets(redact_foreign_text(&terminal_safe(&r.text)).as_str()),
+        redacted_json(masked_json(r.consult.clone())),
+        redacted_json(masked_json(r.json.clone())),
     )
 }
 
@@ -1690,7 +1692,11 @@ impl CodeReviewRunner for ProductionReviewRunner {
         let is_ignored = |p: &str| ignored.contains(p);
         // The same context source the run gets, without its stores: planning only charges each
         // item's containing unit, so the count approved is the count run.
-        let rag = self.rag(None, DocPrep::default());
+        // MAGI FIX (MS3 §6 loop14): and without the history store or the embedder, which planning
+        // never reads: the plan cannot touch either by construction, whatever `plan_review` grows.
+        let mut rag = self.rag(None, DocPrep::default());
+        rag.history = None;
+        rag.embedder = None;
         let planned = plan_review(
             &input,
             &self.workspace,
@@ -2056,9 +2062,12 @@ fn record_history(
 ) -> Result<RecordStats, String> {
     // MAGI FIX (MS3 §6 loop3): the revision is an argument of `rev-parse`; one starting with
     // `-` would be read as an option (git's `--end-of-options` is not in every git it runs on).
+    // MAGI FIX (MS3 §6 loop14): the shared ref validation is the one gate (a space, `..` or a
+    // control character is refused like a leading `-`), before any git call.
     if rev.starts_with('-') {
         return Err(DASHED_REVISION.to_string());
     }
+    validate_ref(rev).map_err(|e| egress_text(&e.to_string()))?;
     let commit = format!("{rev}^{{commit}}");
     let sha = git
         .run(&["rev-parse", "--verify", commit.as_str()])
