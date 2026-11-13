@@ -5390,6 +5390,9 @@ async fn run_code_review_subcommand(
 /// * `magi_config` - The loaded configuration.
 /// * `secret_store` - The open vault, for the endpoint placeholders.
 /// * `embedding_key` - The `[embedding]` key chosen by origin.
+/// * `notices` - Out-parameter: a failed setup pushes its warning here, and the caller must
+///   announce the list with `emit_notices` (the TUI hands its startup list). It is the screen
+///   half of the log lines above (`review_setup_notices_are_emitted`).
 ///
 /// # Returns
 /// The stores and the embedder, each `None` when unavailable.
