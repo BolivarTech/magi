@@ -688,7 +688,20 @@ pub async fn run_review(
         t0: deps.clock.elapsed_secs(),
         total,
     };
-    let finished = run_batches(&batches, &prompts, deps.consult, &clock, &mut summary).await;
+    let min_wall = crate::magi::headless_consult_timeout_secs(
+        crate::magi::AGENT_TIMEOUT_ABSOLUTE_FLOOR_SECS,
+        req.max_rotations,
+        req.retry_disabled,
+    );
+    let finished = run_batches(
+        &batches,
+        &prompts,
+        deps.consult,
+        &clock,
+        min_wall,
+        &mut summary,
+    )
+    .await;
 
     // MAGI FIX (S6 loop 4): `planned` is never 0 here: a plan without a batch already failed in
     // `filter_and_plan` with `NothingToReview` naming the files left out (RV20), before any spend.
@@ -1294,6 +1307,7 @@ async fn run_batches(
     prompts: &[String],
     consult: &dyn BatchConsult,
     clock: &ReviewTimer<'_>,
+    min_wall_secs: u64,
     summary: &mut ReviewSummary,
 ) -> Vec<Finished> {
     let planned = batches.len();
@@ -1326,8 +1340,20 @@ async fn run_batches(
                 summary.batches.push(spent(batch.index, started.elapsed()));
                 summary
                     .failed_batches
-                    .extend((batch.index..planned).map(|k| (k, CLOCK_EXPIRED.to_string())));
-                break;
+                    .push((batch.index, CLOCK_EXPIRED.to_string()));
+                // MAGI FIX (MS3 §6 loop16, R4): a batch that used its own share leaves the rest
+                // `left / pending`; the others go on while each still gets the floor (RV06) and
+                // are cut, declared, only when they would get less (RV-S22).
+                let next = batch.index + 1;
+                let still_fits = clock.left_secs().is_some_and(|left| {
+                    batch_wall_clock_secs(left, planned.saturating_sub(next)) >= min_wall_secs
+                });
+                if !still_fits {
+                    summary
+                        .failed_batches
+                        .extend((next..planned).map(|k| (k, CLOCK_EXPIRED.to_string())));
+                    break;
+                }
             }
             Err(ConsultFailure::Other(message)) => {
                 summary.batches.push(spent(batch.index, started.elapsed()));
@@ -4428,7 +4454,9 @@ mod tests {
         // [MAGI §6 MS2 D loop 2] RV13: a batch that spent its clock and gave no report still
         // spent it. Batch 0 fails after 30 ms, batch 1 runs out of its wall clock after 30 ms,
         // batches 2-3 never start (no time spent, no metrics).
-        struct Slow(Mutex<VecDeque<ConsultFailure>>);
+        // MAGI FIX (MS3 §6 loop16, R4): an expired batch no longer cuts the rest while each still
+        // gets the floor, so the clock is spent by the time batch 1 expires.
+        struct Slow(Mutex<VecDeque<ConsultFailure>>, std::sync::Arc<FakeClock>);
         #[async_trait::async_trait]
         impl BatchConsult for Slow {
             async fn consult(
@@ -4437,22 +4465,30 @@ mod tests {
                 _: Option<Duration>,
             ) -> Result<MagiReport, ConsultFailure> {
                 tokio::time::sleep(Duration::from_millis(30)).await;
-                Err(self
+                let next = self
                     .0
                     .lock()
                     .expect("lock")
                     .pop_front()
-                    .unwrap_or(ConsultFailure::Other("no scripted reply".into())))
+                    .unwrap_or(ConsultFailure::Other("no scripted reply".into()));
+                if matches!(next, ConsultFailure::ClockExpired) {
+                    self.1.set(99_990);
+                }
+                Err(next)
             }
         }
         let dir = workspace(4);
-        let consult = Slow(Mutex::new(
-            vec![
-                ConsultFailure::Other("seat failed".into()),
-                ConsultFailure::ClockExpired,
-            ]
-            .into(),
-        ));
+        let spent_clock = std::sync::Arc::new(FakeClock::default());
+        let consult = Slow(
+            Mutex::new(
+                vec![
+                    ConsultFailure::Other("seat failed".into()),
+                    ConsultFailure::ClockExpired,
+                ]
+                .into(),
+            ),
+            std::sync::Arc::clone(&spent_clock),
+        );
         let git = FakeGit::from(&[(
             "ls-files --others --ignored --exclude-standard --directory -z -- .",
             Ok(""),
@@ -4482,7 +4518,7 @@ mod tests {
                 pool: &pool,
                 consult: &consult,
                 gate: Gate::new(&client, chain(), 61_000),
-                clock: &FakeClock::default(),
+                clock: &*spent_clock,
                 rag: None,
             },
         )
@@ -4711,18 +4747,22 @@ mod tests {
     #[tokio::test]
     async fn a_clock_that_runs_out_mid_review_consolidates_the_finished_batches() {
         let dir = workspace(4);
-        let consult = FakeConsult::new(vec![
+        // MAGI FIX (MS3 §6 loop16, R4): the clock is spent when batch 2 expires, so the floor no
+        // longer holds for batch 3 (with time left the rest runs, `an_expired_batch_does_not_...`).
+        let spent_clock = std::sync::Arc::new(FakeClock::default());
+        let mut consult = FakeConsult::new(vec![
             Ok(real_report(empty()).await),
             Ok(real_report(empty()).await),
             Err(ConsultFailure::ClockExpired),
             Ok(real_report(empty()).await),
         ]);
+        consult.advance_to = Some((std::sync::Arc::clone(&spent_clock), 99_990));
         let out = review(
             dir.path(),
             Some(100_000),
             &consult,
             &gate_always("real_defect"),
-            &FakeClock::default(),
+            &*spent_clock,
         )
         .await
         .expect("a partial review is still a review");
