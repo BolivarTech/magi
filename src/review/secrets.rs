@@ -1953,6 +1953,27 @@ mod tests {
     }
 
     #[test]
+    fn header_split_before_closing_dashes() {
+        // MAGI FIX (MS3 §6 loop16): the joiners and hidden characters a split puts between the
+        // last key word and the closing dashes opened no block.
+        let d = ARMOR_DASHES;
+        for gap in [
+            "\", \"",
+            "\"+\"",
+            "\u{200b}",
+            "\u{202e}",
+            "\u{7}",
+            "\t",
+            " \u{200b} ",
+        ] {
+            let text = format!("{PEM_BEGIN}RSA PRIVATE KEY{gap}{d}\nMIIBOg\n");
+            assert!(holds_key_block(&text), "gap {gap:?} still a block");
+        }
+        let free = format!("{PEM_BEGIN}RSA PRIVATE KEY and then {d}\nx\n");
+        assert!(!holds_key_block(&free), "prose between is no header");
+    }
+
+    #[test]
     fn joiners_only_in_type_words() {
         // [MAGI S6 MS3 loop13, R6a Melchior/Caspar] loop 12 dropped the joiners from the whole
         // line, so source that spells a header from constants (`concat!("-----", "BEGIN ", ..)`)
