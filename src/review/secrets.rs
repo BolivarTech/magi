@@ -1436,6 +1436,21 @@ pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
     stripped != normalized && (find_secret(&stripped).is_some() || holds_key_block(&stripped))
 }
 
+/// Whether `text`, already masked, still holds a secret to the eye of the detector or once its
+/// control and format characters are taken out: [`find_secret`] or
+/// [`hides_secret_behind_hidden_chars`]. The one question every egress that cannot hold a side
+/// raw asks (documentation chunks before their embedding). O(n · p).
+///
+/// # Arguments
+/// * `text` - A text already masked by [`mask_secrets`].
+///
+/// # Returns
+/// `true` when the text must be withheld.
+// MAGI FIX (MS3 §6 loop16): the documentation egress ran `find_secret` alone (R1 Caspar).
+pub fn leaks_secret(text: &str) -> bool {
+    find_secret(text).is_some() || hides_secret_behind_hidden_chars(text)
+}
+
 /// The characters that can break, reorder or hide text on a terminal or a log viewer: every
 /// format character (Unicode category Cf, as of Unicode 16; the unassigned code points of the
 /// tag block are included) and the line and paragraph separators (Zl, Zp, U+2028..U+2029).

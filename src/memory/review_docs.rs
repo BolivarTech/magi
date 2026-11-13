@@ -41,7 +41,7 @@ use crate::memory::error::MemoryError;
 use crate::memory::index::cosine;
 use cryptovault::CryptoVault;
 use magi_rs::review::docs::{chunk_hash, doc_index_id, DocChunk, DocSource, WORKTREE_KEY_PREFIX};
-use magi_rs::review::secrets::{display_path, find_secret};
+use magi_rs::review::secrets::{display_path, leaks_secret};
 use magi_rs::vault::MaskedDek;
 
 /// Texts per `embed` request: thousands of chunks never go in one request (a 5 179-chunk
@@ -874,11 +874,11 @@ fn without_secret_sources(
     sources: &[(DocSource, Vec<DocChunk>)],
 ) -> (Vec<&(DocSource, Vec<DocChunk>)>, Vec<String>) {
     let leaks = |(s, chunks): &(DocSource, Vec<DocChunk>)| {
-        find_secret(&s.path).is_some()
+        leaks_secret(&s.path)
             || chunks.iter().any(|c| {
                 [&c.path, &c.section, &c.text]
                     .iter()
-                    .any(|t| find_secret(t).is_some())
+                    .any(|t| leaks_secret(t))
             })
     };
     let (refused, safe): (Vec<_>, Vec<_>) = sources.iter().partition(|e| leaks(e));

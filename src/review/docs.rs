@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use crate::encoding::lower_hex;
 use crate::review::error::ReviewError;
 use crate::review::languages::LanguageRegistry;
-use crate::review::secrets::{display_path, find_secret, holds_key_block, mask_secrets};
+use crate::review::secrets::{display_path, holds_key_block, leaks_secret, mask_secrets};
 use crate::review::source::GitCommand;
 
 /// One documentation chunk: a Markdown section or the doc comment of one item.
@@ -100,9 +100,14 @@ pub const MAX_DOC_INDEX_BYTES: usize = 32 * 1024 * 1024;
 /// never the embedder path. Pinned by
 /// `a_change_to_the_secret_patterns_comes_with_a_doc_index_version_bump`.
 ///
+/// A change to the masking *implementation* counts too, not only to the pattern table: a chunk
+/// stored under the old algorithm would otherwise be served again to every later review.
+///
 /// 2 since sections are cut to [`MAX_DOC_SECTION_BYTES`] (MS3 §6 loop 5); 3 since
-/// [`chunk_hash`] length-prefixes its input (MS3 §6 loop 7). An index rebuild, not a DB change.
-pub const DOC_INDEX_VERSION: u32 = 3;
+/// [`chunk_hash`] length-prefixes its input (MS3 §6 loop 7); 4 since a chunk whose secret hides
+/// behind a control or format character is withheld with its source (MS3 §6 loop 16). An index
+/// rebuild, not a DB change.
+pub const DOC_INDEX_VERSION: u32 = 4;
 
 /// Bound on the local references (branches and tags) [`live_doc_sources`] reads; with more, the
 /// clean-up is skipped for that review (RV19: "more than `MAX_GC_REFS` references").
@@ -1046,7 +1051,7 @@ pub fn netted_chunks(
 ///
 /// The chunkers mask every one-line secret, so a chunk they built is dropped only for a
 /// private-key block (RV22's exception); a chunk whose path, section or text still matches
-/// [`find_secret`] (built by hand, or cut into a new match) is dropped too, before any
+/// [`leaks_secret`] (built by hand, or cut into a new match) is dropped too, before any
 /// embedding. O(total text) plus O(chunks log sources).
 ///
 /// **Source-scoped** (RV22 omits the *file*): once any chunk of a path is dropped, every chunk
@@ -1061,11 +1066,8 @@ pub fn netted_chunks(
 // kept; it is now per source.
 pub fn without_secrets(chunks: Vec<DocChunk>) -> (Vec<DocChunk>, Vec<String>) {
     // MAGI FIX (MS3 §6 loop3): the path travels with the chunk; RV22's tie-break omits it.
-    let holds = |c: &DocChunk| {
-        find_secret(&c.path).is_some()
-            || find_secret(&c.section).is_some()
-            || find_secret(&c.text).is_some()
-    };
+    let holds =
+        |c: &DocChunk| leaks_secret(&c.path) || leaks_secret(&c.section) || leaks_secret(&c.text);
     let tainted: BTreeSet<String> = chunks
         .iter()
         .filter(|c| holds(c))
@@ -1269,6 +1271,7 @@ pub fn live_doc_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::secrets::find_secret;
 
     #[test]
     fn markdown_is_chunked_by_heading_with_its_section_path() {
