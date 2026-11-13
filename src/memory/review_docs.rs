@@ -127,6 +127,17 @@ impl DocVectors {
 /// identity per database at a time: two embedding models used in turn rebuild the index on
 /// every switch, a full re-embedding declared each time (`identities_alternate_by_rebuild`); pin
 /// one `[embedding]` model per database.
+///
+/// MAGI FIX (MS3 §6 loop14), declared limitations (safe direction, each costs only a repeat
+/// embedding or an omitted chunk, never a leak or a wrong chunk served): (1) the index identity
+/// is the model id plus its dimension, not a digest of the weights, so a model re-published
+/// under the same id with the same dimension keeps its old vectors until the database is purged
+/// (`DELETE FROM`, README); (2) two processes indexing the same chunk at once may both embed it,
+/// the second write replacing the first with an equal vector (writes are keyed by content);
+/// (3) a reusable blob that no longer decrypts fails that indexing (`encode_rows`), so the
+/// review runs without documentation and says so; the blob is not quarantined, and the failure
+/// repeats for every review that would reuse it until the source is replaced or the index is
+/// purged (`DELETE FROM`, README). It is never copied forward or served.
 pub struct ReviewDocStore {
     conn: Arc<Mutex<Connection>>,
     vault: CryptoVault,
