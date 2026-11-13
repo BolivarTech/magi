@@ -1369,7 +1369,10 @@ pub fn outward_text(text: &str) -> String {
     let joined = plain.replace("\r\n", "\n").replace(['\t', '\r'], "");
     let masked_joined = mask_secrets(&joined);
     let masked_plain = mask_secrets(&plain);
-    if masked_joined != joined {
+    // MAGI FIX (MS3 §6 loop16): the joined copy is preferred only when the stripped pass found
+    // nothing itself (`masked_plain == plain`), so a secret that pass already masks keeps its
+    // CRLF breaks.
+    if masked_plain == plain && masked_joined != joined {
         escape_controls(&masked_joined)
     } else if masked_plain == plain {
         escape_controls(&masked)
