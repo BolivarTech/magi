@@ -2275,6 +2275,43 @@ mod tests {
     }
 
     #[test]
+    fn a_real_filter_pass_over_the_production_cache_seals_and_reports_masks() {
+        // [MAGI S6 MS3 loop16, R6a2 Melchior] `seal` and `masked` are defaulted no-ops on
+        // `ContentSource`: a wrapper that forgets to forward them compiles and silently opens the
+        // post-filter egress guard. Drive a real filter pass through the production `CachedSource`
+        // and assert both effects: an unclassified key-block path is refused afterwards, and the
+        // mask the cache applied is the one the filter declares.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let key = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n");
+        let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        let masked = format!("let t = \"{token}\";\n");
+        let inner = MapSource::new(
+            &[
+                ("a.rs", "fn a() {}\n"),
+                ("t.rs", masked.as_str()),
+                ("never.pem", key.as_str()),
+            ],
+            &[],
+        );
+        let src = CachedSource::new(&inner);
+        let files = ["a.rs", "t.rs"]
+            .iter()
+            .map(|p| ReviewFile {
+                path: (*p).into(),
+                diff: None,
+            })
+            .collect();
+        let filtered = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("filters");
+        assert_eq!(filtered.kept.len(), 2, "the masked file stays reviewed");
+        assert_eq!(filtered.masked.len(), 1, "the cache's mask is declared");
+        assert!(
+            matches!(src.read("never.pem"), Err(ReviewError::EgressSecret { .. })),
+            "a path the filter never classified was served raw after its pass"
+        );
+    }
+
+    #[test]
     fn many_hunks_stay_near_linear() {
         // [MAGI S6 MS3 loop10, R6a Balthasar] Each hunk's context scanned both whole sides.
         let n = 2_000usize;
