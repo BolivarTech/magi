@@ -343,6 +343,10 @@ def _judged(sid: str, result, texts) -> list:
     return [outcomes[a] for a in texts]
 
 
+#: A trio request carrying R20's reviewed commit's code (S56's second assertion reads it).
+_S56_TRIO = ("/api/chat", b"+pub fn answer() -> u32 " + runs.REVIEW_COMMITTED_DOC)
+
+
 class RelayScenarioTests(unittest.TestCase):
 
     def test_s53_reads_the_forwarded_requests(self) -> None:
@@ -392,17 +396,25 @@ class RelayScenarioTests(unittest.TestCase):
 
     def test_s56_never_reads_the_dirty_doc(self) -> None:
         good, dirty = _chunk(runs.REVIEW_COMMITTED_DOC.decode()), _chunk(runs.REVIEW_DIRTY_DOC.decode())
-        for bodies, want in (((good,), [P, P, P]), ((good, dirty), [P, P, F]), ((), [P, F, P]),
-                             (None, [P, C, C])):
+        for bodies, want in (((good, _S56_TRIO), [P, P, P]), ((good, _S56_TRIO, dirty), [P, P, F]),
+                             ((), [P, F, P]), (None, [P, C, C]),
+                             # [MAGI S6 MS3 loop15, R7a2] right docs, no trio request with the commit's code.
+                             ((good,), [P, F, P])):
             r = _with(_result("R20", 0, {}), request_bodies=bodies)
             self.assertEqual(want, _judged("S56", r, rc.S56_ASSERTIONS), bodies)
+        # ... and a dirty copy in a request header or target fails the third assertion too.
+        clean = _with(_result("R20", 0, {}), request_bodies=(good, _S56_TRIO))
+        for leaky in (_with(clean, request_headers=(b"X: " + runs.REVIEW_DIRTY_DOC,)),
+                      _with(clean, request_bodies=(good, _S56_TRIO,
+                                                   ("/q?d=" + runs.REVIEW_DIRTY_DOC.decode(), b"")))):
+            self.assertEqual([P, P, F], _judged("S56", leaky, rc.S56_ASSERTIONS))
 
     def test_s56_tells_head_from_parent(self) -> None:
         # MAGI FIX (MS3 §6 loop11, R7a Melchior): both setup commits wrote one doc comment, so
         # documentation read from HEAD^ passed; the parent's differs now and must stay out.
         self.assertNotEqual(runs.REVIEW_PARENT_DOC, runs.REVIEW_COMMITTED_DOC)
         good, parent = _chunk(runs.REVIEW_COMMITTED_DOC.decode()), _chunk(runs.REVIEW_PARENT_DOC.decode())
-        r = _with(_result("R20", 0, {}), request_bodies=(good, parent))
+        r = _with(_result("R20", 0, {}), request_bodies=(good, parent, _S56_TRIO))
         self.assertEqual([P, P, F], _judged("S56", r, rc.S56_ASSERTIONS))
         setup = runs.DEFINITIONS["R20"].setup
         self.assertIn(runs.REVIEW_PARENT_DOC, setup[0].files[0][1])
@@ -414,10 +426,12 @@ class RelayScenarioTests(unittest.TestCase):
         # in a trio prompt; only an embedded chunk or the dirty copy is another revision's doc.
         good = _chunk(runs.REVIEW_COMMITTED_DOC.decode())
         diff = ("/api/chat", b"-    /// " + runs.REVIEW_PARENT_DOC)
-        self.assertEqual([P, P, P], _judged("S56", _with(_result("R20", 0, {}), request_bodies=(good, diff)),
+        self.assertEqual([P, P, P], _judged("S56", _with(_result("R20", 0, {}),
+                                                         request_bodies=(good, diff, _S56_TRIO)),
                                             rc.S56_ASSERTIONS))
         gate = ("/v1/systemone", runs.REVIEW_DIRTY_DOC)
-        self.assertEqual([P, P, F], _judged("S56", _with(_result("R20", 0, {}), request_bodies=(good, gate)),
+        self.assertEqual([P, P, F], _judged("S56", _with(_result("R20", 0, {}),
+                                                         request_bodies=(good, gate, _S56_TRIO)),
                                             rc.S56_ASSERTIONS), "the dirty copy is in no request at all")
 
     def test_s56_allows_the_parents_lines_in_the_retrieval_query(self) -> None:
@@ -427,7 +441,8 @@ class RelayScenarioTests(unittest.TestCase):
         # chunk (the doc comment without that code) is another revision's documentation.
         good = _chunk(runs.REVIEW_COMMITTED_DOC.decode())
         query = _chunk("search_query: -    /// " + runs.REVIEW_PARENT_DOC.decode() + "\n+pub fn answer() {}")
-        self.assertEqual([P, P, P], _judged("S56", _with(_result("R20", 0, {}), request_bodies=(good, query)),
+        self.assertEqual([P, P, P], _judged("S56", _with(_result("R20", 0, {}),
+                                                         request_bodies=(good, query, _S56_TRIO)),
                                             rc.S56_ASSERTIONS))
 
     def test_trio_bodies_never_hold_gate_requests(self) -> None:
