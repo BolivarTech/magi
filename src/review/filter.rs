@@ -2369,6 +2369,32 @@ mod tests {
     }
 
     #[test]
+    fn an_identical_second_listing_is_declared() {
+        // [MAGI S6 MS3 loop15, R6a1 Caspar] A second listing of a kept path whose diff hashed
+        // the same (an honest repeat, or a collision) was dropped without a word, against the
+        // doc of `diff_hash`: it is always declared as a repeated section.
+        let diff = "@@ -1,1 +1,1 @@\n-fn a() {}\n+fn a() { 1; }\n";
+        let inner = MapSource::new(&[("a.rs", "fn a() { 1; }\n")], &[("a.rs", "fn a() {}\n")]);
+        let twice: Vec<ReviewFile> = (0..2)
+            .map(|_| ReviewFile {
+                path: "a.rs".into(),
+                diff: Some(diff.into()),
+            })
+            .collect();
+        let src = CachedSource::new(&inner);
+        let f = filter_files(twice, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("kept once");
+        assert_eq!(f.kept.len(), 1);
+        assert_eq!(
+            f.skipped,
+            vec![Skipped {
+                path: "a.rs".into(),
+                cause: SkipCause::DuplicateSection
+            }]
+        );
+    }
+
+    #[test]
     fn raw_diff_masks_hunk_context() {
         // MAGI FIX (MS3 §6 loop12): the `@@` line was masked alone, so a secret value in the
         // function context (its key on another line) left raw; the context is kept only when a
