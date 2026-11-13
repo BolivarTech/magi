@@ -2049,6 +2049,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_source_cannot_fail_the_whole_reindex_through_its_chunk_hash() {
+        // [MAGI S6 MS3 loop15, R1 Melchior] the consistency check ran before the secret refusal,
+        // so a source that was going to be left out anyway failed every other source with it.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let path = "docs/sk-ant-api03-AAAAAAAAAAAAAAAAAAAA.md"; // allow-secret-scan
+        let mut stale = chunk(path, "Usage", "harmless text");
+        stale.hash = "stale".into();
+        let r = store
+            .reindex(
+                &[
+                    (src(path, "k"), vec![stale]),
+                    (src("ok.md", "k2"), vec![chunk("ok.md", "A", "x")]),
+                ],
+                &e,
+            )
+            .await;
+        assert!(
+            matches!(&r, Ok(s) if s.refused.len() == 1 && s.sources == 1),
+            "{r:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn an_embedder_without_a_known_dimension_is_refused_even_with_nothing_to_embed() {
         // dim() == 0 (autodetect, nothing answered yet) would record sources under `#0#`.
         let tmp = tempfile::NamedTempFile::new().expect("tmp");
