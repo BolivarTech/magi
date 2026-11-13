@@ -1958,6 +1958,21 @@ mod tests {
     }
 
     #[test]
+    fn binary_side_knows_every_text_opening() {
+        // MAGI FIX (MS3 §6 loop16): the text path calls a spaceless four-dash SSH2 header a
+        // block; the binary path must refuse the same opening, plain or NUL-split.
+        for opening in [
+            "----BEGIN SSH2 PRIVATE KEY----",
+            "----begin ssh2 private key----",
+            "----\0BEGIN SSH2 PRIVATE KEY----",
+            "----BE\0GIN SSH2 PRIVATE KEY----",
+            "---- BEGIN SSH2 PRIVATE KEY ----",
+        ] {
+            assert!(holds_secret_prefix(opening), "{opening:?}");
+        }
+    }
+
+    #[test]
     fn header_split_before_closing_dashes() {
         // MAGI FIX (MS3 §6 loop16): the joiners and hidden characters a split puts between the
         // last key word and the closing dashes opened no block.
