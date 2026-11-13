@@ -3814,6 +3814,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_withheld_prefix_is_not_an_unanswered_embedder() {
+        // MAGI FIX (MS3 §6 loop14): the report said "the embedder did not answer" for a query that
+        // was never sent because its prefix holds a key block.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let prefix = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n{end}\n");
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let embedder = KeyPrefix(prefix, std::sync::Mutex::new(Vec::new()));
+        let mut rag = f.rag(true);
+        rag.embedder = Some(&embedder);
+        let out = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(
+            out.trimmed
+                .iter()
+                .all(|(_, label)| label != "the embedder did not answer"),
+            "{:?}",
+            out.trimmed
+        );
+        assert!(
+            out.trimmed
+                .iter()
+                .any(|(kind, label)| *kind == ContextKind::Documentation
+                    && label.contains("query prefix")),
+            "{:?}",
+            out.trimmed
+        );
+    }
+
+    #[tokio::test]
     async fn a_documentation_chunk_read_through_the_review_cache_is_embedded_masked() {
         // [T3.7] RV22 amended: the review's cache masks every secret it holds, so a README with
         // a key is indexed with the key masked, never withheld, and no byte of the key reaches
