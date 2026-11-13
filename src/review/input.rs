@@ -1639,11 +1639,64 @@ mod tests {
         let outside = file("@@ -1 +1 @@\n-a\n+b\n@@ -9 +9 @@\n-x\n+y\n");
         for now in [inside, outside] {
             let git = SeqGit(std::sync::Mutex::new(vec![now]));
-            let r = ensure_diff_current(&git, "c0ffee", &captured);
-            assert!(matches!(r, Err(ReviewError::Git(_))), "{r:?}");
+            let r = ensure_diff_current(&git, "c0ffee", &captured, &["a.rs"]);
+            // MAGI FIX (MS3 §6 loop14): its own typed variant, not a git failure.
+            assert!(matches!(r, Err(ReviewError::StaleDiff)), "{r:?}");
         }
         let same = SeqGit(std::sync::Mutex::new(vec![first]));
-        assert!(ensure_diff_current(&same, "c0ffee", &captured).is_ok());
+        assert!(ensure_diff_current(&same, "c0ffee", &captured, &["a.rs"]).is_ok());
+    }
+
+    /// Two files' diffs in the given order.
+    fn two_files(first: (&str, &str), second: (&str, &str)) -> Vec<u8> {
+        [first, second]
+            .iter()
+            .map(|(path, change)| {
+                format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-a\n+{change}\n")
+            })
+            .collect::<String>()
+            .into_bytes()
+    }
+
+    /// The captured `(path, diff)` pairs of a raw diff.
+    fn captured_of(raw: &[u8]) -> Vec<(String, String)> {
+        from_diff(raw, String::new(), None)
+            .files
+            .into_iter()
+            .filter_map(|f| f.diff.map(|d| (f.path, d)))
+            .collect()
+    }
+
+    #[test]
+    fn a_reordered_diff_is_still_current() {
+        // MAGI FIX (MS3 §6 loop14): the comparison is keyed by path, not by position.
+        let first = two_files(("a.rs", "b"), ("c.rs", "d"));
+        let captured = captured_of(&first);
+        let reordered = two_files(("c.rs", "d"), ("a.rs", "b"));
+        let git = SeqGit(std::sync::Mutex::new(vec![reordered]));
+        assert!(ensure_diff_current(&git, "c0ffee", &captured, &["a.rs", "c.rs"]).is_ok());
+    }
+
+    #[test]
+    fn a_file_the_review_left_out_may_move_without_staling_it() {
+        // MAGI FIX (MS3 §6 loop14): only the kept (post-filter) files were read and sent.
+        let first = two_files(("a.rs", "b"), ("c.rs", "d"));
+        let captured = captured_of(&first);
+        let moved = two_files(("a.rs", "b"), ("c.rs", "other"));
+        let git = SeqGit(std::sync::Mutex::new(vec![moved.clone()]));
+        assert!(ensure_diff_current(&git, "c0ffee", &captured, &["a.rs"]).is_ok());
+        let git = SeqGit(std::sync::Mutex::new(vec![moved]));
+        let r = ensure_diff_current(&git, "c0ffee", &captured, &["a.rs", "c.rs"]);
+        assert!(matches!(r, Err(ReviewError::StaleDiff)), "{r:?}");
+    }
+
+    #[test]
+    fn a_kept_file_gone_from_the_diff_is_stale() {
+        let first = two_files(("a.rs", "b"), ("c.rs", "d"));
+        let captured = captured_of(&first);
+        let git = SeqGit(std::sync::Mutex::new(vec![Vec::new()]));
+        let r = ensure_diff_current(&git, "c0ffee", &captured, &["a.rs"]);
+        assert!(matches!(r, Err(ReviewError::StaleDiff)), "{r:?}");
     }
 
     #[test]
