@@ -511,6 +511,14 @@ class RelayScenarioTests(unittest.TestCase):
         r = _with(_result("R21", 0, {}), request_bodies=served, setup_outputs=(first, first), output=None)
         self.assertEqual([C, C], _judged("S57", r, rc.S57_ASSERTIONS))
 
+    def test_s57_a_malformed_findings_value_is_cannot_test_not_a_crash(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7a2 Caspar): `findings or ()` iterated a non-list value.
+        for bad in (5, True, "x", {"file": "f"}):
+            first = ProductOutput(stdout=json.dumps({"code_review": {"findings": bad}}).encode(),
+                                  stderr=b"", exit_code=0, command=["m"])
+            r = _with(_result("R21", 0, {}), request_bodies=(), setup_outputs=(first, first))
+            self.assertEqual([P, C], _judged("S57", r, rc.S57_ASSERTIONS), bad)
+
     def test_s57_matches_utf8_and_separators(self) -> None:
         # MAGI FIX (MS3 §6 loop13, R7a): the product's JSON body keeps non-ASCII characters
         # (serde_json does not escape them) and may write the path with either separator.
