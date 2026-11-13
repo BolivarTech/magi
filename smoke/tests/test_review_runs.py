@@ -275,7 +275,13 @@ class ReviewRunDefinitionTests(unittest.TestCase):
             with mock.patch.object(runs.os, "stat", return_value=mode), \
                     mock.patch.object(runs.os, "chmod") as chmod:
                 runs.point_embedding_at(config, "http://127.0.0.1:1/v1")
-            chmod.assert_called_once_with(config.with_name("magi.toml.tmp"), 0o600)
+            # MAGI FIX (MS3 §6 loop14, R7a1): the sibling's name is random now (enumerated test change).
+            chmod.assert_called_once()
+            temporary, applied = chmod.call_args.args
+            self.assertEqual(0o600, applied)
+            self.assertEqual(config.parent, pathlib.Path(temporary).parent)
+            self.assertTrue(pathlib.Path(temporary).name.startswith("magi.toml.")
+                            and temporary.name.endswith(".tmp"), temporary)
 
     def test_a_config_without_an_embedding_table_gains_one(self) -> None:
         url = "http://127.0.0.1:1/v1"

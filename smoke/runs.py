@@ -549,6 +549,13 @@ class RunDefinition:
         if self.records_requests and (self.forbids_model_calls or self.unreachable_embedder):
             raise HarnessError("run %s records its requests through the relay, which rewrites "
                                "every endpoint the counter or the error backend needs" % self.run_id)
+        # MAGI FIX (MS3 §6 loop14, R7a1): setup invocations run before the counter, the embedder
+        # rewrite and the rotation guard are in place, so they would run uncounted, against a live
+        # embedder or with the credential unrotated.
+        if self.setup and (self.forbids_model_calls or self.unreachable_embedder or self.rotates):
+            raise HarnessError("run %s has setup steps and also counts model calls, points its "
+                               "embedder away or rotates a credential; the setup would run "
+                               "outside those guards" % self.run_id)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2501,7 +2508,9 @@ def _replace_bytes(path, data: bytes, what: str) -> None:
         HarnessError: When the temporary file cannot be written or replaced.
     """
     target = pathlib.Path(path)
-    temporary = target.with_name(target.name + ".tmp")
+    # MAGI FIX (MS3 §6 loop14, R7a1): a random name per call, so two writers of one file never
+    # share the sibling (no module-level counter: this module's only mutable state is write-once).
+    temporary = target.with_name("%s.%s.tmp" % (target.name, os.urandom(6).hex()))
     try:
         mode = stat.S_IMODE(os.stat(target).st_mode)
         temporary.write_bytes(data)
@@ -4550,6 +4559,14 @@ class RunExecutor:
             # captured stderr, so git's own reason was dropped (F1a1-b1).
             raise HarnessError("could not build the review workspace at %s: %s"
                                % (workspace, _error_detail(exc))) from exc
+        # MAGI FIX (MS3 §6 loop14, R7a1): a relay that cannot be staged is known before any setup
+        # review is paid for; the run is then reported unrunnable with no setup spent.
+        if definition.records_requests:
+            try:
+                relay_upstream(workspace.joinpath(*CONFIG_PATH_PARTS))
+            except RelayUnavailable as exc:
+                self._unrunnable_cause = str(exc)
+                return workspace
         self._run_setup(definition, workspace)
         self._write_files(definition, workspace)
         # A tracked file the run rewrites (R20's dirty copy) is no untracked file git lists.

@@ -322,18 +322,21 @@ class Runner:
                         run_id=run_id,
                     )
                 ], True
-        for run_id, result in self._runs_for(entry).items():
-            # MAGI FIX (MS3 §6 loop13): a run the environment could not stage says nothing.
-            cause = getattr(result, "not_runnable", "") if result is not None else ""
-            if cause:
-                return [
-                    Finding(
-                        assertion=_RUN_NOT_RUNNABLE,
-                        outcome=Outcome.CANNOT_TEST,
-                        detail=f"run {run_id} could not be staged: {cause}",
-                        run_id=run_id,
-                    )
-                ], True
+        # MAGI FIX (MS3 §6 loop13): a run the environment could not stage says nothing.
+        # MAGI FIX (MS3 §6 loop14, R7a1): every such run is named, not only the first.
+        unstaged = [(run_id, getattr(result, "not_runnable", ""))
+                    for run_id, result in self._runs_for(entry).items() if result is not None]
+        unstaged = [(run_id, cause) for run_id, cause in unstaged if cause]
+        if unstaged:
+            return [
+                Finding(
+                    assertion=_RUN_NOT_RUNNABLE,
+                    outcome=Outcome.CANNOT_TEST,
+                    detail="; ".join(f"run {run_id} could not be staged: {cause}"
+                                     for run_id, cause in unstaged),
+                    run_id=unstaged[0][0],
+                )
+            ], True
         if entry.needs_backend and not self._backend_reachable:
             # D-17: a down backend is not a product defect, so this is never FAIL.
             # It still blocks the gate, and the certificate is still not written.
