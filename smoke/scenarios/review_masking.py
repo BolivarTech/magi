@@ -138,8 +138,9 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodie
                                                   for t, b in run.request_bodies or ())),
                     # MAGI FIX (MS3 §6 loop11): the headers leave the process too.
                     ("a forwarded request's headers", run.request_headers or ()))
-    leaked = [name for name, bodies in outputs
-              if any(needle in body for needle in needles for body in bodies)]
+    # MAGI FIX (MS3 §6 loop14, R7a2): the loop variable no longer shadows the `bodies` parameter.
+    leaked = [name for name, captured in outputs
+              if any(needle in body for needle in needles for body in captured)]
     if leaked:
         return code_review.finding(texts, index, Outcome.FAIL, run_id,
                                     "%s appears in %s" % (what, ", ".join(leaked)))
@@ -214,7 +215,9 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
         for index in range(3):
             yield code_review.finding(texts, index, Outcome.CANNOT_TEST, "R18", "run R18 exceeded its timeout")
         leak = _s53_leak(run)
-        yield leak if leak.outcome is Outcome.FAIL else code_review.finding(
+        # MAGI FIX (MS3 §6 loop14, R7a2): the leak judge's own verdict stands unless it passed, so a
+        # CANNOT_TEST keeps its cause (a missing relay record) instead of the "holds no key" claim.
+        yield leak if leak.outcome is not Outcome.PASS else code_review.finding(
             texts, 3, Outcome.CANNOT_TEST, "R18", "run R18 exceeded its timeout; its capture holds no key")
         return
     code = run.output.exit_code

@@ -210,23 +210,6 @@ def _chunk_sent(bodies, doc, code):
     return any(doc in t and code not in t for t in _embedded_texts(bodies))
 
 
-def _chunk_sent_any(bodies, doc):
-    """Whether *doc* is inside any text the relay saw sent to the embedder.
-
-    Args:
-        bodies: The run's ``(path, body)`` record.
-        doc: The doc comment's text.
-
-    Returns:
-        bool: Whether some embedded text holds *doc*.
-
-    Example:
-        >>> _chunk_sent_any((("/v1/embeddings", b'{"input": ["a doc b"]}'),), "doc")
-        True
-    """
-    return any(doc in t for t in _embedded_texts(bodies))
-
-
 #: The run S55 reads: a review with the environment's own embedder.
 S55_RUN_ID = "R18"
 
@@ -270,6 +253,12 @@ def _degraded_labels(trimmed):
         return None
     return [t.get(TRIMMED_LABEL_KEY) for t in trimmed
             if t.get(TRIMMED_LABEL_KEY) in DEGRADED_LABELS]
+
+
+#: Said beside a failed "doc comment indexed" check (MAGI FIX, MS3 §6 loop14): the check holds
+#: only while the environment's database does not already carry R18's doc chunk.
+S55_PRECONDITION = (" (precondition: the environment's database must not already hold this doc chunk, "
+                    "which makes the product skip its embedding; run --reset-env and retry)")
 
 
 @scenario("S55", assertions=S55_ASSERTIONS, run=S55_RUN_ID, needs_backend=True)
@@ -326,9 +315,12 @@ def a_review_with_its_embedder_up_is_not_degraded(run):
     doc, code = runs.REVIEW_MASKED_DOC.decode(), _TOKEN_CODE
     indexed = _chunk_sent(run.request_bodies, doc, code)
     queried = any(code in t for t in _embedded_texts(run.request_bodies))
+    # MAGI FIX (MS3 §6 loop14, R7a2): the precondition travels with the failure, so a red S55 on a
+    # used environment names its own escape instead of reading as a product defect.
     yield _s55_finding(2, Outcome.PASS if indexed and queried else Outcome.FAIL,
                        "" if indexed and queried else
-                       "doc comment indexed: %s; query embedded: %s" % (indexed, queried))
+                       "doc comment indexed: %s; query embedded: %s%s" % (
+                           indexed, queried, "" if indexed else S55_PRECONDITION))
 
 
 #: Code only R18's batch carries, never its doc comment's chunk.
@@ -380,7 +372,10 @@ def documentation_comes_from_the_reviewed_commit(run):
     # REMOVED lines of the very diff under review (R20's fixture: parent commit, then HEAD), so
     # it is looked for in embedding requests only; the dirty working-tree copy is in no diff.
     dirty = [p for p, b in run.request_bodies if runs.REVIEW_DIRTY_DOC in b]
-    parent = _chunk_sent_any(run.request_bodies, runs.REVIEW_PARENT_DOC.decode())
+    # MAGI FIX (MS3 §6 loop14, R7a2): the retrieval query is an embedding request too, built from
+    # the batch's raw hunk, so it carries the parent's removed doc line beside the code. Only a
+    # chunk (the doc comment without the batch's code) is the parent's documentation.
+    parent = _chunk_sent(run.request_bodies, runs.REVIEW_PARENT_DOC.decode(), _ANSWER_CODE)
     yield code_review.verdict(texts, 2, "R20", not dirty and not parent,
                   "the working tree's doc comment went to %s, or the parent's was embedded: %s"
                   % (dirty, parent))

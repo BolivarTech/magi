@@ -4,6 +4,7 @@
 """Unit tests for S53-S54 (REQ-RV22: a secret in a file's content never leaves the process)."""
 
 import copy
+import dataclasses
 import pathlib
 import unittest
 
@@ -95,7 +96,7 @@ class S53Tests(unittest.TestCase):
         # MAGI FIX (MS3 §6 loop14, R7a2 Melchior): the leak judge's own CANNOT_TEST (here the relay's
         # record is missing) was replaced by "its capture holds no key", which claimed a check the
         # judge had refused to make.
-        hung = _result("R18", 0, None, timed_out=True)
+        hung = dataclasses.replace(_result("R18", 0, None, timed_out=True), request_bodies=None)
         findings = list(rm.a_key_in_a_files_content_is_masked_and_the_file_reviewed(hung))
         self.assertEqual(Outcome.CANNOT_TEST, findings[3].outcome)
         self.assertIn("relay's record", findings[3].detail)
