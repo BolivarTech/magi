@@ -26,7 +26,7 @@
 //! // ... read and chunk only `todo`, then:
 //! store.reindex(&chunked, &e).await?;
 //! let vectors = store.load_vectors(query_vector.len(), &allowed)?; // once per review
-//! let hits = store.search_loaded(&vectors, &query_vector, 5)?; // once per batch
+//! let (hits, vanished) = store.search_loaded_counting(&vectors, &query_vector, 5)?; // per batch
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -622,12 +622,32 @@ impl ReviewDocStore {
     /// # Errors
     /// [`MemoryError::Storage`] for such a query or a failing query;
     /// [`MemoryError::Crypto`] if decryption fails.
-    pub fn search_loaded(
+    #[cfg(test)]
+    pub(crate) fn search_loaded(
         &self,
         vectors: &DocVectors,
         query: &[f32],
         k: usize,
     ) -> Result<Vec<(DocChunk, f32)>, MemoryError> {
+        self.search_loaded_counting(vectors, query, k)
+            .map(|(hits, _)| hits)
+    }
+
+    /// [`Self::search_loaded`], also giving how many of the best `k` rows were deleted since
+    /// `vectors` was loaded (another process's clean-up): the review declares that loss.
+    ///
+    /// # Returns
+    /// The hits and the number of vanished rows.
+    ///
+    /// # Errors
+    /// As [`Self::search_loaded`].
+    // MAGI FIX (MS3 §6 loop15): a vanished row was one hit fewer with no signal (R1 Caspar).
+    pub fn search_loaded_counting(
+        &self,
+        vectors: &DocVectors,
+        query: &[f32],
+        k: usize,
+    ) -> Result<(Vec<(DocChunk, f32)>, usize), MemoryError> {
         // MAGI FIX (MS3 §6 loop8): a mismatch matched nothing in silence.
         // MAGI FIX (MS3 §6 loop9): a NaN query ranked arbitrary chunks first.
         if query.len() != vectors.dim || query.iter().any(|x| !x.is_finite()) {
@@ -638,7 +658,7 @@ impl ReviewDocStore {
             )));
         }
         if k == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let mut scored: Vec<(f32, &str, &str)> = vectors
             .rows
@@ -661,20 +681,24 @@ impl ReviewDocStore {
         let wanted: Vec<(&str, &str)> = scored.iter().map(|(_, k, h)| (*k, *h)).collect();
         let mut rows = self.load_chunks(&wanted)?;
         let mut hits = Vec::with_capacity(scored.len());
+        let mut vanished = 0usize;
         for (score, key, hash) in scored {
-            if let Some((path, section, text)) = rows.remove(&(key.to_string(), hash.to_string())) {
-                hits.push((
-                    DocChunk {
-                        path,
-                        section: self.unseal(&section)?.to_string(),
-                        text: self.unseal(&text)?.to_string(),
-                        hash: hash.to_string(),
-                    },
-                    score,
-                ));
-            }
+            let Some((path, section, text)) = rows.remove(&(key.to_string(), hash.to_string()))
+            else {
+                vanished += 1;
+                continue;
+            };
+            hits.push((
+                DocChunk {
+                    path,
+                    section: self.unseal(&section)?.to_string(),
+                    text: self.unseal(&text)?.to_string(),
+                    hash: hash.to_string(),
+                },
+                score,
+            ));
         }
-        Ok(hits)
+        Ok((hits, vanished))
     }
 
     /// `(key, chunk hash, encrypted vector)` of the allowed rows of this identity.

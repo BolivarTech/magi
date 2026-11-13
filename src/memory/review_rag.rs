@@ -452,7 +452,20 @@ impl StoreRag<'_> {
             return Vec::new();
         }
         match self.search_docs(docs, vector) {
-            Ok(hits) => hits.into_iter().map(|(chunk, _)| doc_item(chunk)).collect(),
+            Ok((hits, vanished)) => {
+                // MAGI FIX (MS3 §6 loop15): rows deleted since the vectors were loaded (another
+                // process's clean-up) are declared once; the surviving hits still serve.
+                if vanished > 0 && !self.docs_failed.swap(true, Ordering::SeqCst) {
+                    tracing::event!(
+                        target: LOG_TARGET,
+                        tracing::Level::WARN,
+                        vanished = vanished,
+                        "documentation rows vanished during the review: the index shrank under it"
+                    );
+                    declared.push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
+                }
+                hits.into_iter().map(|(chunk, _)| doc_item(chunk)).collect()
+            }
             Err(e) => {
                 if !self.docs_failed.swap(true, Ordering::SeqCst) {
                     let error = outward_text(&e.to_string());
@@ -489,7 +502,7 @@ impl StoreRag<'_> {
         &self,
         docs: &ReviewDocStore,
         query: &[f32],
-    ) -> Result<Vec<(DocChunk, f32)>, MemoryError> {
+    ) -> Result<(Vec<(DocChunk, f32)>, usize), MemoryError> {
         let cached = relock(&self.doc_vectors).clone();
         let vectors = match cached {
             Some(vectors) if vectors.dim() == query.len() => vectors,
@@ -499,7 +512,7 @@ impl StoreRag<'_> {
                 loaded
             }
         };
-        docs.search_loaded(&vectors, query, DOC_SEARCH_K)
+        docs.search_loaded_counting(&vectors, query, DOC_SEARCH_K)
     }
 
     /// Whether `entry` may be served: `served_as_validated` on `HEAD` through
