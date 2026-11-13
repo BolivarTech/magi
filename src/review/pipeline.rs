@@ -1262,6 +1262,15 @@ impl ReviewTimer<'_> {
 /// than many secrets, so RV04 holds on what is sent, not only on the accounting
 /// (`prompt_grown_by_masks_refused`). O(bytes).
 ///
+/// Fence asymmetry, on purpose: context items are framed and their text escaped ([`escape_fence`]),
+/// while the reviewed code is written unframed and unescaped. It cannot forge a frame because every
+/// reviewed line leaves behind a line-number prefix ([`BatchItem::rendered`]), so no line of it
+/// starts with a frame's `<<<`; the reviewed code is the subject of the review, and escaping it
+/// would change the text the findings quote. The code is sized on its masked text by
+/// construction (the cached read masks before planning,
+/// `a_credential_file_whose_masks_grow_it_is_planned_never_refused`), so the limit check below is a
+/// backstop that does not fire on the ordinary path.
+///
 /// # Errors
 ///
 /// [`ReviewError::NotReviewable`] (`secret`) for a prompt holding a private-key block, which
@@ -1387,7 +1396,7 @@ async fn run_batches(
             Err(ConsultFailure::Other(message)) => {
                 summary.batches.push(spent(batch.index, started.elapsed()));
                 // MAGI FIX (MS3 §6 loop13): redacted where it is stored, whatever the producer did.
-                // (URLs by edact_foreign_text, key-shaped text by mask_secrets.)
+                // (URLs by redact_foreign_text, key-shaped text by mask_secrets.)
                 let message = mask_secrets(redact_foreign_text(&message).as_str());
                 summary.failed_batches.push((batch.index, message));
             }
