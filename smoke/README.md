@@ -491,7 +491,7 @@ S55 adds two assertions (55 scenarios and 164 assertions when it was added) and 
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key, or a `trimmed` entry without a string `label`, is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes; the relay saw the doc comment embedded as a chunk and the batch's query | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
+| S55 | R18 (S53's run: the real trio and the environment's own embedder, the one S9 needs answering, nothing pointed away) prints JSON in which `code_review.without_embedder` is `false` and `code_review.trimmed` names neither `index unavailable` nor `the embedder did not answer`. A missing or ill-typed key, or a `trimmed` entry without a string `label`, is `FAIL`; a trim for room (`no room left in the batch`) is the budget at work and passes; the relay saw the doc comment embedded as a chunk and the batch's query. The chunk check needs an environment whose database does not already hold R18's doc chunk (a content-addressed hit skips the embedding, and the failure detail says so; `--reset-env` clears it) | `CANNOT_TEST` with no reachable backend; a timed-out R18 is `CANNOT_TEST` too |
 | S56 | R20 reviews `HEAD` of two commits whose doc comments differ, the file's working-tree copy dirty: exit 0, `HEAD`'s doc comment embedded as a chunk, the dirty one in no request and the parent's in no embedding request (RV21; the parent's lines may appear in a trio prompt as the removed lines of the diff under review) | `CANNOT_TEST` with no backend or an incomplete record |
 | S57 | R21 reviews a buggy commit, a commit rewriting it, and that commit again: every review exits 0, and a trio request of the third carries a `kind=history` item on `hist/calc.rs` with a first-review finding's title and `(attended)` (RV08; only the third review is relayed) | `CANNOT_TEST` with no backend, an incomplete record, or no located finding in the first review |
 
@@ -614,6 +614,20 @@ Anchor each scenario to a requirement or a documented invariant. One with no anc
 surplus. A checkable requirement with no scenario is a declared hole.
 
 ## Known limitations
+
+- **What S52-S57 do not prove (MAGI §6 MS3 loop 14, declared).** (1) S55 and S56 prove that the
+  documentation chunk and the query reached the embedder, not that a retrieved chunk reached the
+  trio's prompt: relevance is the model side and the relay record is the evidence the harness has.
+  (2) S52 trusts the product's own degradation declaration (the `trimmed` labels); the relay's
+  record of embedding requests is what S55 reads, so a declaration that lied about non-egress would
+  show there only when the embedder is up. (3) S54 reads the product's declaration that a key block
+  left its file out, and the leak oracle over every captured output; the harness cannot observe
+  network egress below the relay. (4) A `findings` that is not a list in S57 is read as no finding,
+  which is `CANNOT_TEST` ("no history to serve"), never a crash. (5) The leak oracle looks for the whole key, for each
+  fragment of at least six bytes of the key's body (`code_review.with_slices`), and for the product's
+  masked marker beside the raw value; a fragment shorter than six bytes is too common in ordinary
+  text to count as a leak. These are limits of what a black-box harness can see, each safe in that
+  it can only miss a leak, never invent one.
 
 - **`[backend].base_url` can hold exactly one value, and it is not free.** The preflight
   regenerates the environment's `magi.toml` from `magi init` on every run, so what the

@@ -406,6 +406,8 @@ def validated_history_reaches_the_trio(run):
         findings = run.setup_outputs[0].json().get(CODE_REVIEW_KEY, {}).get("findings")
     except (ProductOutputError, AttributeError):
         findings = None
+    # MAGI FIX (MS3 §6 loop14, R7a2): a `findings` that is not a list is no finding, not a crash.
+    findings = findings if isinstance(findings, list) else None
     located = [f for f in findings or () if isinstance(f, dict) and f.get("line") is not None
                and isinstance(f.get("file"), str)
                and f["file"].replace("\\", "/") == runs.REVIEW_HISTORY_FILE]
