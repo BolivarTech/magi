@@ -9,7 +9,7 @@
 //! byte cap, a binary and a text that is not UTF-8 are left out with their cause; everything
 //! else is kept, and a kept file with no language extractor is declared.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
@@ -291,9 +291,9 @@ fn classify_files(
     };
     // The sides a kept file was scanned with: never released, whoever else names their path.
     let mut kept_sides: HashSet<(Face, String)> = HashSet::new();
-    // The diff (by hash) a path was kept with, and the (path, diff) pairs already left out: a
-    // repeat is declared once, and a repeat with another diff is declared as a dropped section.
-    let mut kept_paths: HashMap<String, Option<u64>> = HashMap::new();
+    // The paths kept (a second listing of one is always declared as a repeated section) and the
+    // (path, diff hash) pairs already left out, so one skip is listed once.
+    let mut kept_paths: HashSet<String> = HashSet::new();
     let mut skipped_seen: HashSet<(String, Option<u64>)> = HashSet::new();
     for file in files {
         let sides = sides_of(&file);
@@ -305,19 +305,19 @@ fn classify_files(
                 // MAGI FIX (MS3 §6 loop12): a path is kept once, whoever lists it again (the
                 // repeat reads the cached, masked side and would be reviewed and declared twice).
                 // MAGI FIX (MS3 §6 loop13): a repeat with another diff is declared, not dropped.
-                if let Some(first) = kept_paths.get(&path) {
-                    if *first != diff_key {
-                        filtered.skipped.push(Skipped {
-                            path: display_path(&path),
-                            cause: SkipCause::DuplicateSection,
-                        });
-                    }
+                if kept_paths.contains(&path) {
+                    // MAGI FIX (MS3 §6 loop15): always declared, whatever the diff's hash says:
+                    // a collision or an honest repeat is never a silent drop.
+                    filtered.skipped.push(Skipped {
+                        path: display_path(&path),
+                        cause: SkipCause::DuplicateSection,
+                    });
                     // MAGI FIX (MS3 §6 loop14): the repeat's own sides (a rename's other path)
                     // are released like any left-out file's, but never one a kept file read.
                     release_unkept(source, &kept_sides, sides);
                     continue;
                 }
-                kept_paths.insert(path.clone(), diff_key);
+                kept_paths.insert(path.clone());
                 if registry.get(&path).is_none() {
                     filtered.no_extractor.push(display_path(&path));
                 }
@@ -351,7 +351,7 @@ fn classify_files(
             Verdict::Skip(cause) => {
                 // MAGI FIX (MS3 §6 loop14): a path already kept is not also skipped under its
                 // repeat's cause: the repeat is declared as the dropped section it is.
-                let cause = match kept_paths.contains_key(&path) {
+                let cause = match kept_paths.contains(&path) {
                     true => SkipCause::DuplicateSection,
                     false => cause,
                 };
@@ -377,9 +377,10 @@ fn classify_files(
 
 /// A hash of one diff section, to tell a repeated listing from a different one. O(len).
 ///
-/// `DefaultHasher::new()` is a fixed-key hasher: this is a guard against an honest repeat, not
-/// collision resistance against an adversary (two colliding sections would read as one repeated
-/// listing, and the second is declared as `repeated section`, never silently dropped).
+/// `DefaultHasher::new()` is a fixed-key hasher: it keys the (path, diff) pairs already left
+/// out, so one skip is listed once. It is not collision resistance against an adversary, and
+/// nothing rests on it for a kept path: every second listing of one is declared as a `repeated
+/// section` whatever the hashes say (`an_identical_second_listing_is_declared`).
 fn diff_hash(diff: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     diff.hash(&mut hasher);
@@ -2347,7 +2348,8 @@ mod tests {
             path: "a.rs".into(),
             cause: SkipCause::DuplicateSection,
         };
-        assert_eq!(f.skipped, vec![dropped]);
+        // MAGI FIX (MS3 §6 loop15): one entry per repeat, the identical one too (it was silent).
+        assert_eq!(f.skipped, vec![dropped.clone(), dropped]);
     }
     #[test]
     fn a_listed_twice_file_is_kept_once() {

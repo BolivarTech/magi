@@ -120,7 +120,10 @@ pub(super) fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>
 ///
 /// Subset of git's unified diff read: lines outside hunks verbatim; a hunk opens at
 /// `@@ -a[,b] +c[,d] @@` (`@@@` gives `None`); body lines start with ` `, `+`, `-` or `\`,
-/// anything else gives `None`, and the caller leaves the file out (`secret`).
+/// anything else gives `None`, and the caller masks the file by line ([`fallback_diff`]) and
+/// leaves it out (`secret`) only when that fallback is refused. `in_hunk` is not reset at a
+/// section boundary here: a section's own header lines end the hunk, as in the raw masker's
+/// parse, which reads one section.
 ///
 /// O(diff + sides) plus O(n log n) to index the n side lines once and O(log n × 80) per hunk for
 /// the function context (masked files only), plus O(diff × s) for the divergence test, which
