@@ -7442,6 +7442,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_promised_unit_the_context_lacks_is_declared() {
+        // [MAGI S6 MS3 loop15, R4 Caspar/Melchior] A containing unit `units_for` promised and
+        // `context_for` did not bring went unsent and unsaid. RV07(1) makes the unit mandatory,
+        // so the report declares each one that is missing, as trimmed.
+        struct Lacking;
+        #[async_trait::async_trait]
+        impl RagSource for Lacking {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                Ok(assembled(vec![]))
+            }
+            fn units_for(&self, _b: &ReviewBatch) -> Result<Vec<ContextItem>, ReviewError> {
+                Ok(vec![ctx(
+                    ContextKind::Unit,
+                    "promised.rs",
+                    "promised_unit",
+                    Some((1, 26)),
+                )])
+            }
+        }
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = review_with_rag(dir.path(), &Lacking, &consult, &gate_always("real_defect"))
+            .await
+            .expect("runs");
+        let labels: Vec<_> = out
+            .summary
+            .trimmed
+            .iter()
+            .filter(|t| t.kind == ContextKind::Unit)
+            .map(|t| t.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["promised_unit"]);
+    }
+
+    #[tokio::test]
     async fn over_limit_context_is_trimmed() {
         // [MAGI S6 MS3 loop9, R4] Optional context past the limit is trimmed, lowest first, and
         // declared; the batch runs.
