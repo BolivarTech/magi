@@ -1356,8 +1356,15 @@ pub fn outward_text(text: &str) -> String {
     // tabs are not stripped (they become escapes), so a multi-line field keeps its lines. Limit,
     // declared: a secret split by a raw line break is not read as one here.
     let plain = without_hidden_chars(&masked);
+    // MAGI FIX (MS3 §6 loop15): a tab or a lone CR splits a token like any control character, so
+    // a third copy without them is masked too; CRLF pairs stay line breaks. When it finds a
+    // secret the others missed, its masked form leaves (tabs and lone CRs lost, the safe side).
+    let joined = plain.replace("\r\n", "\n").replace(['\t', '\r'], "");
+    let masked_joined = mask_secrets(&joined);
     let masked_plain = mask_secrets(&plain);
-    if masked_plain == plain {
+    if masked_joined != joined {
+        escape_controls(&masked_joined)
+    } else if masked_plain == plain {
         escape_controls(&masked)
     } else {
         escape_controls(&masked_plain)
