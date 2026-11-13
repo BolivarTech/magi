@@ -1932,6 +1932,22 @@ mod tests {
     }
 
     #[test]
+    fn outward_text_keeps_the_cr_with_a_zwsp_secret() {
+        // MAGI FIX (MS3 §6 loop16, R6a2 Melchior): a secret the ZWSP-stripped pass already masks
+        // sent the output through the CR/tab-stripped copy, which lost every CRLF break.
+        let token = format!("ghp_AAAA\u{200b}{}", "A".repeat(40)); // allow-secret-scan
+        for text in [
+            format!("a\r\nb\n{token}"),
+            format!("a\tb\r\nc\n{token}"),
+            format!("x\r\n\n{token}\r\ny"),
+        ] {
+            let out = outward_text(&text);
+            assert!(out.contains("\\r\\n"), "{out}");
+            assert!(!out.contains("ghp_AAAA"), "{out}");
+        }
+    }
+
+    #[test]
     fn squeeze_drops_format_chars() {
         // [MAGI S6 MS3 loop14, R6a2 Melchior] A binary side whose opening a ZWSP or a
         // directional mark split was not counted; the squeeze drops format characters too.
