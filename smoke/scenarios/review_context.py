@@ -32,7 +32,8 @@ declare ``inspects_timeouts``, so the runner reports it as ``CANNOT_TEST``.
 
 * **S56** (R20, RV21, RV-S36): a commit review of a two-commit history whose
   working-tree copy of the file is left dirty. The embedder is sent the
-  commit's doc comment as a chunk, and no request carries the dirty one.
+  commit's doc comment as a chunk, the trio its code, and no request (body,
+  target or header) carries the dirty one.
 
 * **S57** (R21, RV08): a buggy commit is reviewed, every line of it fixed in
   the next, reviewed again (the reclassification marks the first entries
@@ -330,7 +331,7 @@ _TOKEN_CODE = "pub fn token"
 #: commit, never from the dirty working tree.
 S56_ASSERTIONS = (
     "exit 0",
-    "the embedder was sent the reviewed commit's doc comment as a chunk",
+    "the embedder was sent the reviewed commit's doc comment as a chunk, and the trio its code",
     "no request the relay forwarded carries the working tree's doc comment, and no embedding "
     "request carries the parent commit's",
 )
@@ -364,9 +365,15 @@ def documentation_comes_from_the_reviewed_commit(run):
     if run.request_bodies is None:
         yield from code_review.all_cannot_test(texts[1:], "R20", "the relay's record is missing or incomplete")
         return
+    # MAGI FIX (MS3 §6 loop15, R7a2 Melchior): the reviewed commit's CODE must reach the trio too,
+    # not only its documentation: a review of the wrong revision's code passed with the right docs.
+    code_to_trio = any(_ANSWER_CODE.encode() in body and runs.REVIEW_COMMITTED_DOC in body
+                       for body in runs.trio_bodies(run.request_bodies))
     yield code_review.verdict(texts, 1, "R20",
-                  _chunk_sent(run.request_bodies, runs.REVIEW_COMMITTED_DOC.decode(), _ANSWER_CODE),
-                  "no embedded text is the committed doc comment alone")
+                  _chunk_sent(run.request_bodies, runs.REVIEW_COMMITTED_DOC.decode(), _ANSWER_CODE)
+                  and code_to_trio,
+                  "no embedded text is the committed doc comment alone, or no trio request "
+                  "carries the commit's code")
     # MAGI FIX (MS3 §6 loop12): RV21/RV22 forbid another revision's DOCUMENTATION, which reaches a
     # model as an embedded chunk. The parent's doc comment may appear in a trio prompt as the
     # REMOVED lines of the very diff under review (R20's fixture: parent commit, then HEAD), so
