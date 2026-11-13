@@ -102,6 +102,16 @@ class S53Tests(unittest.TestCase):
         self.assertIn("relay's record", findings[3].detail)
         self.assertNotIn("holds no key", findings[3].detail)
 
+    def test_the_mask_marker_beside_the_raw_key_still_fails_the_oracle(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7b2): a request carrying BOTH the mask marker and the raw key
+        # (the product masked one copy and sent another) is a leak on the model path and on the
+        # embedder path; the oracle must not read the marker as proof of masking.
+        for path in ("/api/chat", "/v1/embeddings"):
+            with self.subTest(path=path):
+                body = b'{"content": "<redacted: anthropic-key> and ' + runs.REVIEW_MASKED_KEY + b'"}'
+                run = _result("R18", 0, _doc(), requests=((path, body),))
+                self.assertEqual(Outcome.FAIL, self._judge(3, run))
+
     def test_the_masked_prompt_claim_is_s53s_own(self) -> None:
         # MAGI FIX (MS3 §6 loop13, R7a Balthasar): the generic leak judge no longer carries it.
         run = _result("R18", 0, _doc(), requests=(("/api/chat", b"{}"),))

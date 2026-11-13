@@ -2102,6 +2102,18 @@ class ReviewMaskingSyncTests(unittest.TestCase):
                     product *= int(factor.replace("_", "").strip())
                 self.assertEqual(value, product, found)
 
+    def test_the_readme_lists_exactly_the_products_pattern_names(self) -> None:
+        # MAGI FIX (MS3 §6 loop14, R7b2): the published name list is the product's, verbatim.
+        secrets_rs = without_comments(_source("src/review/secrets.rs"))
+        product = set(re.findall(r'^\s+name: "([a-z0-9-]+)",', secrets_rs, re.MULTILINE))
+        readme = _source("README.md")
+        marker = "The pattern names that appear in `masked` and inside `<redacted: …>` are exactly these: "
+        self.assertEqual(1, readme.count(marker))
+        tail = readme.split(marker, 1)[1].split("; a mask that could not be built", 1)[0]
+        listed = set(re.findall(r"`([a-z0-9-]+)`", tail))
+        self.assertEqual(12, len(product), product)
+        self.assertEqual(product, listed)
+
     def test_the_fixtures_write_the_products_mask_marker(self) -> None:
         # MAGI FIX (MS3 §6 loop14, R7b1): the healthy R18 record hand-writes `<redacted: NAME>`;
         # a reshaped marker left it untrue with the suite green.
