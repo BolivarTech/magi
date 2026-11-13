@@ -4544,6 +4544,56 @@ mod tests {
     }
 
     #[test]
+    fn the_gate_read_failure_log_escapes_control_characters_in_the_path() {
+        // [MAGI S6 MS3 loop16, R4 Melchior] A file name with an ESC or a line break reached the
+        // run log raw through `file = file`; it goes through `display_path` like every other
+        // path the review shows.
+        use std::sync::Arc;
+        use tracing_subscriber::layer::SubscriberExt;
+        struct Failing;
+        impl ContentSource for Failing {
+            fn read(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Err(ReviewError::Io("gone".into()))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        struct Capture(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if let Ok(mut lines) = self.0.lock() {
+                    lines.push(crate::logging::render::render_event(event));
+                }
+            }
+        }
+        let name = "src/a\u{1b}[2J\nFAKE.rs";
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&lines)));
+        let faces = HashMap::from([(
+            name,
+            Faces {
+                whole: true,
+                ..Faces::default()
+            },
+        )]);
+        tracing::subscriber::with_default(subscriber, || {
+            gate_code(Some(name), Some(7), &faces, &HashMap::new(), &Failing)
+        });
+        let lines = lines.lock().expect("lock");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            !lines[0].contains('\u{1b}') && !lines[0].contains('\n'),
+            "{:?}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn the_gate_sees_no_code_for_a_line_of_a_unit_whose_batch_did_not_complete() {
         // [MAGI S6 loop 5, D-c1] a unit-split file is whole for the gate only when every batch
         // holding one of its units completed, as `reviewed_of` decides; otherwise only its
