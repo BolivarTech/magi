@@ -1002,8 +1002,8 @@ fn listed(text: &str) -> String {
 /// MAGI FIX (MS3 §6 loop14): there is no overflow to report. The counter climbs one at a time and
 /// stops at the first free spelling, so it reaches at most `taken.len() + 2`; `taken` is held in
 /// memory, so that is far below `usize::MAX` and the loop ends before a saturating add could
-/// repeat a value. No panic is possible (no unchecked arithmetic, no indexing), which is why the
-/// function stays infallible instead of returning a typed failure nobody could trigger.
+/// repeat a value. The counter is still `checked_add`: running out is a typed
+/// [`KeySuffixesExhausted`] from [`distinct_key_from`], which this function maps to a fixed key.
 ///
 /// # Arguments
 /// * `taken` - The object the key goes into.
@@ -1027,14 +1027,41 @@ pub fn distinct_key(taken: &serde_json::Map<String, Value>, base: String) -> Str
     if !taken.contains_key(&base) {
         return base;
     }
-    let mut n = 2_usize;
-    let mut key = format!("{base} ({n})");
-    n = n.saturating_add(1);
-    while taken.contains_key(&key) {
-        key = format!("{base} ({n})");
-        n = n.saturating_add(1);
+    // MAGI FIX (MS3 §6 loop15): the counter is checked, not saturating; running out of
+    // suffixes (unreachable in memory) is a typed failure that lands on a fixed key.
+    distinct_key_from(taken, &base, 2)
+        .unwrap_or_else(|KeySuffixesExhausted| KEY_SUFFIXES_EXHAUSTED_KEY.to_string())
+}
+
+/// The key a `base` whose suffixes ran out is written under (see [`KeySuffixesExhausted`]).
+const KEY_SUFFIXES_EXHAUSTED_KEY: &str = "(too many colliding keys)";
+
+/// Every ` (n)` suffix from the first one tried to `usize::MAX` was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeySuffixesExhausted;
+
+/// The first free `base (n)` key with `n >= first`; O(taken) for a sane `first`.
+///
+/// # Arguments
+/// * `taken` - The object the key goes into.
+/// * `base` - The key without a suffix.
+/// * `first` - The first suffix to try.
+///
+/// # Returns
+/// The free key, or [`KeySuffixesExhausted`] when the counter would pass `usize::MAX`.
+pub fn distinct_key_from(
+    taken: &serde_json::Map<String, Value>,
+    base: &str,
+    first: usize,
+) -> Result<String, KeySuffixesExhausted> {
+    let mut n = first;
+    loop {
+        let key = format!("{base} ({n})");
+        if !taken.contains_key(&key) {
+            return Ok(key);
+        }
+        n = n.checked_add(1).ok_or(KeySuffixesExhausted)?;
     }
-    key
 }
 
 /// Redacts every string of `value` in place, object keys included: besides field names, the
@@ -1512,6 +1539,21 @@ mod tests {
             taken.insert(format!("k ({n})"), serde_json::json!(n));
         }
         assert_eq!(distinct_key(&taken, "k".into()), "k (1001)");
+    }
+
+    #[test]
+    fn running_out_of_key_suffixes_is_a_typed_failure_not_a_repeat() {
+        // [MAGI S6 MS3 loop15] the counter used to saturate, repeating `usize::MAX` forever.
+        let mut taken = serde_json::Map::new();
+        taken.insert(format!("k ({})", usize::MAX), serde_json::json!(0));
+        assert_eq!(
+            distinct_key_from(&taken, "k", usize::MAX),
+            Err(KeySuffixesExhausted)
+        );
+        assert_eq!(
+            distinct_key_from(&taken, "k", usize::MAX - 1),
+            Ok(format!("k ({})", usize::MAX - 1))
+        );
     }
 
     #[test]
