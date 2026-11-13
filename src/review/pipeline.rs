@@ -2506,6 +2506,42 @@ mod tests {
     }
 
     #[test]
+    fn a_credential_file_whose_masks_grow_it_is_planned_never_refused() {
+        // [MAGI S6 MS3 loop16, R4] A mask is longer than a short key, so a file of credential
+        // lines grows once masked. The planner sizes batches on the masked text (the cached read
+        // is masked before planning), so the rendered prompts never outgrow the limit and no
+        // review is refused after preparation (`prompt_grown_by_masks_refused` is a backstop).
+        let key = "AKIAABCDEFGHIJKLMNOP"; // allow-secret-scan
+        let text: String = (0..60)
+            .map(|i| format!("fn f{i}() {{ let k = \"{key}\"; }}\n"))
+            .collect();
+        let raw_tokens = estimate_tokens(&text);
+        let files = || {
+            vec![ReviewFile {
+                path: "a.rs".into(),
+                diff: None,
+            }]
+        };
+        let inner = crate::review::test_support::MapSource::new(&[("a.rs", text.as_str())], &[]);
+        let registry = LanguageRegistry::new();
+        // The smallest window whose limit takes the raw text whole: the masked text then needs
+        // more than one batch, and a planner that measured the raw text would pack it in one.
+        let pool = (1_000..400_000)
+            .step_by(64)
+            .map(|w| vec![("m".to_string(), Some(w))])
+            .find(|p| prompt_limit_tokens(&pool_window(p)) >= raw_tokens)
+            .expect("a window takes the raw text");
+        let source = CachedSource::new(&inner);
+        let planned =
+            filter_and_plan_with(files(), &source, false, &registry, &|_| false, &pool, None)
+                .expect("planned, not refused");
+        assert!(planned.batches.len() >= 2, "{}", planned.batches.len());
+        let contexts = vec![vec![]; planned.batches.len()];
+        let limit = prompt_limit_tokens(&planned.window);
+        render_prompts(&planned.batches, &contexts, limit).expect("no refusal after preparation");
+    }
+
+    #[test]
     fn batch_index_is_its_position() {
         // [MAGI S6 MS3 loop13, R4] Prompts, contexts and metrics pair with batches by position
         // (`zip`, `contexts.get(i)`), so the planner's `index` must equal the position.
