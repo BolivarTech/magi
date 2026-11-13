@@ -142,6 +142,13 @@ pub trait GitCommand: Send + Sync {
 /// does not fit a batch it is a typed error (RV03), never a silent cut. Pinned by
 /// `a_lone_carriage_return_is_not_a_line_break` and
 /// `a_crlf_source_still_splits_into_its_real_lines` (`review::languages::python`).
+///
+/// # Egress guard
+///
+/// The egress guard (masking, the post-filter seal) lives in [`CachedSource`]. `seal` and
+/// `masked` default to no-ops, so a wrapper around a source must forward both; one that does not
+/// compiles and silently opens the guard
+/// (`a_real_filter_pass_over_the_production_cache_seals_and_reports_masks`, `review::filter`).
 // MAGI FIX (B2b2): the lone-`\r` behaviour was undeclared; normalizing it here would number
 // lines differently from git's hunks.
 pub trait ContentSource: Send + Sync {
