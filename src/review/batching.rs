@@ -364,6 +364,8 @@ fn push_line_prefix(out: &mut String, number: Option<u32>) {
     use std::fmt::Write;
     // Writing to a `String` cannot fail; the prefix goes straight into the output buffer, with no
     // per-line temporary.
+    // MAGI FIX (MS3 §6 loop14): format strings capture any identifier in scope, consts included
+    // (`{x:>W$}` and `{SEP}`), since the 2021 edition's implicit captures; this compiles as is.
     let _ = match number {
         Some(n) => write!(out, "{n:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}"),
         None => write!(out, "{:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}", ""),
@@ -372,7 +374,10 @@ fn push_line_prefix(out: &mut String, number: Option<u32>) {
 
 /// The bytes `text` takes once every line carries its prefix (a number of up to
 /// [`LINE_NUMBER_WIDTH`] digits and the separator): one buffer, never regrown for a file of short
-/// lines. O(bytes).
+/// lines. A line is one `split_inclusive('\n')` piece, as [`number_lines`] walks them, and the
+/// sums saturate, so the hint is an upper bound for numbers below `10^LINE_NUMBER_WIDTH` and only
+/// a capacity hint beyond (a wider number widens its prefix; `wide_number_widens_prefix`). Pure.
+/// O(bytes).
 // MAGI FIX (MS3 §6 loop12): the hint was an eighth of the text; each line gains a whole prefix.
 fn numbered_capacity(text: &str) -> usize {
     let lines = text.split_inclusive('\n').count();
@@ -474,7 +479,9 @@ impl<'a> HunkLines<'a> {
         // shape `parse_hunks` writes (an optional file-header pair, then body lines); one led by
         // anything else (`diff --git`, `index`, a combined diff's `@@@`) would be numbered by
         // position and off by the lines before its body, so no counter runs for it.
-        let start = start.filter(|_| headerless_shape(text, file_header));
+        // MAGI FIX (MS3 §6 loop14): the shape is read only for a headerless text (a headed one
+        // counts from its own headers and never uses `start`), so the headed walk pays nothing.
+        let start = start.filter(|_| !headed && headerless_shape(text, file_header));
         Self {
             lines: text.split_inclusive('\n'),
             counters: if headed { None } else { start },
@@ -490,6 +497,8 @@ fn headerless_shape(text: &str, file_header: bool) -> bool {
     let skip = if file_header { 2 } else { 0 };
     text.lines()
         .skip(skip)
+        // MAGI FIX (MS3 §6 loop14): `[char; N]` is a `Pattern` since Rust 1.58 (this compiles on
+        // the pinned toolchain); a `&[char]` would work the same.
         .all(|line| line.is_empty() || line.starts_with([' ', '+', '-', '\\', '\r']))
 }
 
@@ -1131,11 +1140,12 @@ mod tests {
         }
         let needle = ["batch_limit", "_tokens("].concat();
         let mut hits = Vec::new();
-        walk(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-            &mut hits,
-            &needle,
-        );
+        // MAGI FIX (MS3 §6 loop14): kept as a walk, not `include_str!` (which cannot enumerate
+        // the files a future consumer adds). `CARGO_MANIFEST_DIR` is fixed at compile time and
+        // `src/` ships in the package; a tree without it fails loudly here, never passes empty.
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert!(src.is_dir(), "the guardian needs {src:?} on disk");
+        walk(&src, &mut hits, &needle);
         assert!(hits.is_empty(), "the raw batch limit is read in {hits:?}");
     }
 
@@ -1189,7 +1199,10 @@ mod tests {
     fn headerless_shape_is_refused() {
         // [MAGI S6 MS3 loop13, R6b] A headerless text led by anything but the `---`/`+++` pair
         // (here a `diff --git` preamble, as `git show` prints one) is not a shape `parse_hunks`
-        // writes: no counter runs, so no line is numbered by position and no anchor is made up.
+        // writes: no counter runs, so no line is numbered by position (every prefix is blank).
+        // MAGI FIX (MS3 §6 loop14): the anchors are not made up from counting either: with no
+        // counter, `hunk_change` falls back to the item's own range and reports its first line as
+        // added, which is what the assertions below pin.
         let item = BatchItem::Hunk {
             file: "a.rs".into(),
             text: "diff --git a/a.rs b/a.rs\nindex 1..2\n--- a/a.rs\n+++ b/a.rs\n a\n-b\n".into(),
