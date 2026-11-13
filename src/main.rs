@@ -2345,6 +2345,7 @@ async fn run(secrets: ConsumedSecrets) -> anyhow::Result<ExitCode> {
         &magi_config,
         secret_store.as_ref(),
         section_keys.embedding(),
+        false, // the TUI has no `--no-memory`
         &mut startup_notices,
     );
     match memory_store {
@@ -5251,10 +5252,11 @@ async fn run_code_review_subcommand(
     // `--no-memory` opens no review store either: no documentation, no history (RV07).
     let mut setup_notices = Vec::new();
     let (review_memory, review_embedder) = review_context_of(
-        memory.as_ref().filter(|_| !args.no_memory),
+        memory.as_ref(),
         &magi_config,
         secret_store.as_ref(),
         section_keys.embedding(),
+        args.no_memory,
         &mut setup_notices,
     );
     emit_notices(setup_notices);
@@ -5390,6 +5392,8 @@ async fn run_code_review_subcommand(
 /// * `magi_config` - The loaded configuration.
 /// * `secret_store` - The open vault, for the endpoint placeholders.
 /// * `embedding_key` - The `[embedding]` key chosen by origin.
+/// * `no_memory` - `--no-memory`: a stateless run opens no review store and builds no embedder
+///   even when a database is handed in (no documentation, no history; RV07). One rule, here.
 /// * `notices` - Out-parameter: a failed setup pushes its warning here, and the caller must
 ///   announce the list with `emit_notices` (the TUI hands its startup list). It is the screen
 ///   half of the log lines above (`review_setup_notices_are_emitted`).
@@ -5401,12 +5405,13 @@ fn review_context_of(
     magi_config: &MagiConfig,
     secret_store: Option<&SharedSecretStore>,
     embedding_key: &SectionKey,
+    no_memory: bool,
     notices: &mut Vec<Notice>,
 ) -> (
     Option<Arc<crate::memory::review_rag::ReviewMemory>>,
     Option<Arc<dyn crate::memory::embedding::EmbeddingProvider>>,
 ) {
-    let Some(store) = store else {
+    let Some(store) = store.filter(|_| !no_memory) else {
         return (None, None);
     };
     let opened = store
@@ -7244,10 +7249,11 @@ async fn prepare_headless(
         // embedder that failed to open was silent on `query`; every surface announces them now.
         let mut review_notices = Vec::new();
         let (review_memory, review_embedder) = review_context_of(
-            memory.as_ref().filter(|_| !h.no_memory),
+            memory.as_ref(),
             &magi_config,
             secret_store.as_ref(),
             section_keys.embedding(),
+            h.no_memory,
             &mut review_notices,
         );
         emit_notices(review_notices);
