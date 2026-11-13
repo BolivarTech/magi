@@ -2486,6 +2486,55 @@ mod tests {
     }
 
     #[test]
+    fn a_secret_skip_through_the_cache_refusal_is_logged_with_a_pattern() {
+        // [MAGI S6 MS3 loop15, R6a1] the refusal arm of `read_side` skipped a file silently; every
+        // `secret` skip logs the shown path and a pattern name (never the value).
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Infos(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        struct Pattern(Option<String>);
+        impl tracing::field::Visit for Pattern {
+            fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
+                if f.name() == "pattern" {
+                    self.0 = Some(v.to_string());
+                }
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Infos {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if e.metadata().target() == LOG_TARGET
+                    && *e.metadata().level() == tracing::Level::INFO
+                {
+                    let mut p = Pattern(None);
+                    e.record(&mut p);
+                    if let (Some(p), Ok(mut seen)) = (p.0, self.0.lock()) {
+                        seen.push(p);
+                    }
+                }
+            }
+        }
+        let infos = Infos::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(infos.clone()));
+        let side = read_side(
+            Err(ReviewError::EgressSecret {
+                path: "k.pem".into(),
+            }),
+            "k.pem",
+            false,
+        )
+        .expect("a skip");
+        assert!(matches!(side, Side::Skip(SkipCause::Secret)));
+        let seen = infos.0.lock().expect("lock").clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+    }
+
+    #[test]
     fn unrebuilt_diff_warns_and_masks() {
         // [MAGI S6 MS3 loop4, R6a Balthasar] The fallback branch itself: a masked file whose diff
         // disagrees with its sides (a body line without a marker) is left out, the safe

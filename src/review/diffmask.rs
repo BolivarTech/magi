@@ -449,6 +449,20 @@ mod tests {
     }
 
     #[test]
+    fn crlf_side_lines_match_a_crlf_diff_without_a_divergence() {
+        // [MAGI S6 MS3 loop15, R6a1] a side line keeps its `\r` as git shows it, so a CRLF file's
+        // diff lines (which carry the same `\r`) match their side lines: no divergence is
+        // counted and the rebuilt diff is the diff.
+        let new = b"a\r\nc\r\n";
+        let old = b"a\r\nb\r\n";
+        let diff = "@@ -1,2 +1,2 @@\n a\r\n-b\r\n+c\r\n";
+        assert_eq!(
+            rebuilt_diff(diff, Some(new), Some(old)),
+            Some((diff.to_string(), 0))
+        );
+    }
+
+    #[test]
     fn a_new_file_header_ends_the_hunk() {
         // [MAGI S6 MS3 loop14, R6a1 Balthasar] `in_hunk` was never reset: a header line after a
         // hunk was read as a body line and redacted whole instead of masked as a header.
