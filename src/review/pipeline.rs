@@ -2096,7 +2096,7 @@ fn reviewed_of(
                     tracing::event!(
                         target: LOG_TARGET,
                         tracing::Level::WARN,
-                        file = file,
+                        file = display_path(file).as_str(),
                         error = error.as_str(),
                         "a reviewed file could not be read again: only its units count as reviewed"
                     );
@@ -2250,7 +2250,7 @@ fn gate_code(
             tracing::event!(
                 target: LOG_TARGET,
                 tracing::Level::WARN,
-                file = file,
+                file = display_path(file).as_str(),
                 line = line,
                 error = error.as_str(),
                 "the gate could not read the code of a finding"
