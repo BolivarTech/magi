@@ -42,6 +42,7 @@ import stat
 import string
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -3493,6 +3494,37 @@ def relay_upstream(config_path, environ=None) -> str:
     return root
 
 
+#: The address the staging dry run points a copy of the configuration at; nothing listens there.
+_STAGING_DRY_RUN_URL = "http://127.0.0.1:1/v1"
+
+
+def relay_staging_problems(config_path) -> list:
+    """What :meth:`Executor._recorded_requests` would refuse, found on a copy before any setup.
+
+    MAGI FIX (MS3 §6 loop15, R7a1 Melchior): the checks that run once the relay is up
+    (:func:`point_config_at`, :func:`endpoints_off_the_counter`,
+    :func:`changes_besides_endpoints`) ran after the setup reviews were paid for; the same checks
+    run here on a temporary copy aimed at a placeholder address.
+
+    Args:
+        config_path: The review workspace's ``magi.toml``; it is only read.
+
+    Returns:
+        list: One text per problem; empty when the relay can be staged.
+    """
+    try:
+        original = pathlib.Path(config_path).read_bytes()
+        original_text = original.decode("utf-8")
+        with tempfile.TemporaryDirectory() as scratch:
+            copy = pathlib.Path(scratch) / "magi.toml"
+            copy.write_bytes(original)
+            point_config_at(copy, _STAGING_DRY_RUN_URL)
+            return list(endpoints_off_the_counter(copy, _STAGING_DRY_RUN_URL)
+                        + changes_besides_endpoints(original_text, copy))
+    except (OSError, UnicodeError, HarnessError) as exc:
+        return ["could not stage %s: %s" % (config_path, exc)]
+
+
 def commit_files(workspace, commit: Commit) -> None:
     """Write *commit*'s files under *workspace* and commit exactly them.
 
@@ -4562,10 +4594,18 @@ class RunExecutor:
         # MAGI FIX (MS3 §6 loop14, R7a1): a relay that cannot be staged is known before any setup
         # review is paid for; the run is then reported unrunnable with no setup spent.
         if definition.records_requests:
+            config = workspace.joinpath(*CONFIG_PATH_PARTS)
             try:
-                relay_upstream(workspace.joinpath(*CONFIG_PATH_PARTS))
+                relay_upstream(config)
             except RelayUnavailable as exc:
                 self._unrunnable_cause = str(exc)
+                return workspace
+            # MAGI FIX (MS3 §6 loop15, R7a1 Melchior): the rest of the relay's staging checks run
+            # now too, on a copy, so a configuration they would refuse costs no setup review and
+            # is reported unrunnable instead of failing the harness after the spend.
+            problems = relay_staging_problems(config)
+            if problems:
+                self._unrunnable_cause = "the relay cannot be staged: " + "; ".join(problems)
                 return workspace
         self._run_setup(definition, workspace)
         self._write_files(definition, workspace)

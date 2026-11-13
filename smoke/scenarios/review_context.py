@@ -371,7 +371,7 @@ def documentation_comes_from_the_reviewed_commit(run):
     # model as an embedded chunk. The parent's doc comment may appear in a trio prompt as the
     # REMOVED lines of the very diff under review (R20's fixture: parent commit, then HEAD), so
     # it is looked for in embedding requests only; the dirty working-tree copy is in no diff.
-    dirty = [p for p, b in run.request_bodies if runs.REVIEW_DIRTY_DOC in b]
+    dirty = _dirty_doc_sent(run)
     # MAGI FIX (MS3 §6 loop14, R7a2): the retrieval query is an embedding request too, built from
     # the batch's raw hunk, so it carries the parent's removed doc line beside the code. Only a
     # chunk (the doc comment without the batch's code) is the parent's documentation.
@@ -408,7 +408,9 @@ def validated_history_reaches_the_trio(run):
         findings = None
     # MAGI FIX (MS3 §6 loop14, R7a2): a `findings` that is not a list is no finding, not a crash.
     findings = findings if isinstance(findings, list) else None
-    located = [f for f in findings or () if isinstance(f, dict) and f.get("line") is not None
+    # MAGI FIX (MS3 §6 loop15, R7a2): a located finding has an integer line (a bool is no line).
+    located = [f for f in findings or () if isinstance(f, dict)
+               and isinstance(f.get("line"), int) and not isinstance(f.get("line"), bool)
                and isinstance(f.get("file"), str)
                and f["file"].replace("\\", "/") == runs.REVIEW_HISTORY_FILE]
     if not located:
@@ -456,10 +458,37 @@ def _history_served(request_bodies, located) -> bool:
               for shown in (path, path.replace("/", "\\"), path.replace("/", "\\\\"))]
     titles = [json.dumps(f["title"], ensure_ascii=False)[1:-1].encode("utf-8")
               for f in located if isinstance(f.get("title"), str)]
+    # MAGI FIX (MS3 §6 loop15, R7a2 Caspar): every frame of the file in a body is read (a body can
+    # carry several history frames), and an item ends at the next frame, never at a bare `<<<`,
+    # which a finding title may contain.
     for body in runs.trio_bodies(request_bodies):
         for frame in frames:
-            _, _, after = body.partition(frame)
-            item = after.split(b"<<<", 1)[0]
-            if any(title and title + b" (attended)" in item for title in titles):
-                return True
+            for after in body.split(frame)[1:]:
+                item = after.split(_FRAME_OPEN, 1)[0]
+                if any(title and title + b" (attended)" in item for title in titles):
+                    return True
     return False
+
+
+#: How the product opens any context frame (``context_frame`` in ``src/review/pipeline.rs``).
+_FRAME_OPEN = b"<<<context kind="
+
+
+def _dirty_doc_sent(run) -> list:
+    """Where the working tree's doc comment left the process, in a request the relay recorded.
+
+    MAGI FIX (MS3 §6 loop15, R7a2 Caspar): only request bodies were read; the doc comment could
+    also leave in a request target or a header.
+
+    Args:
+        run: A ``RunResult`` whose ``request_bodies`` is not ``None``.
+
+    Returns:
+        list: The places that carry it (a target, ``"a header"``); empty when none does.
+    """
+    needle = runs.REVIEW_DIRTY_DOC
+    places = [target for target, body in run.request_bodies
+              if needle in body or needle.decode("utf-8", "replace") in target]
+    if any(needle in header for header in run.request_headers or ()):
+        places.append("a header")
+    return places

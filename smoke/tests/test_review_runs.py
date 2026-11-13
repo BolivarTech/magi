@@ -531,6 +531,32 @@ class RelayBeforeSetupTests(unittest.TestCase):
         self.assertEqual([], spent, "a setup review ran before the relay was known to stage")
         self.assertEqual("two endpoints", executor._unrunnable_cause)
 
+    @unittest.skipUnless(_git_available(), "git is required")
+    def test_a_staging_problem_found_by_the_dry_run_spends_no_setup_invocation(self) -> None:
+        # [MAGI S6 MS3 loop15, R7a1 Melchior] the checks that ran once the relay was up now run first.
+        definition = runs.RunDefinition(
+            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
+            stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+            records_requests=True,
+            setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = _executor(pathlib.Path(tmp))
+            spent = []
+            with mock.patch.object(executor, "_invoke", lambda d, s: spent.append(d)), \
+                    mock.patch.object(runs, "relay_upstream", return_value="http://a/v1"), \
+                    mock.patch.object(runs, "relay_staging_problems", return_value=["off the relay"]):
+                executor._unrunnable_cause = ""
+                executor._prepare_review_workspace(definition)
+        self.assertEqual([], spent)
+        self.assertIn("off the relay", executor._unrunnable_cause)
+
+    def test_a_plain_configuration_stages_and_an_unreadable_one_is_a_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "magi.toml"
+            config.write_text('base_url = "http://a/v1"\n\n[magi]\nkind = "ollama"\n', encoding="utf-8")
+            self.assertEqual([], runs.relay_staging_problems(config))
+            self.assertEqual(1, len(runs.relay_staging_problems(pathlib.Path(tmp) / "missing.toml")))
+
 
 class ReviewWorkspaceLinkTests(unittest.TestCase):
     """[MAGI §6 MS2 loop 10, F1a-c4] links never steer what is copied in or deleted."""
