@@ -808,6 +808,7 @@ pub(crate) fn review_error_cause_name(e: &ReviewError) -> &'static str {
         ReviewError::PlanChanged { .. } => "plan_changed",
         // MAGI FIX (S6 loop 8, D2-b2): a content change is its own failure mode.
         ReviewError::ContentChanged => "content_changed",
+        ReviewError::StaleDiff => "stale_diff",
     }
 }
 

@@ -9,7 +9,7 @@
 //! commits. Diffs are split per file on bytes, so one section that is not UTF-8 is set aside
 //! without sinking the rest.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use super::error::ReviewError;
@@ -887,28 +887,40 @@ fn resolve_uncommitted(
 /// * `git` - The workspace's git.
 /// * `head` - The pinned `HEAD` the diff is taken against.
 /// * `captured` - The diffed files as the review captured them.
+/// * `kept` - The paths the review kept after filtering: only these are compared, by path.
 ///
 /// # Errors
-/// [`ReviewError::Git`] when it differs, or when git fails.
+/// [`ReviewError::StaleDiff`] when a kept file's diff differs or is gone;
+/// [`ReviewError::Git`] when git fails.
 // MAGI FIX (MS3 §6 loop11): a stale diff was reviewed as if it matched the sides read.
 pub fn ensure_diff_current(
     git: &dyn GitCommand,
     head: &str,
     captured: &[(String, String)],
+    kept: &[&str],
 ) -> Result<(), ReviewError> {
     let now = from_diff(&worktree_diff(git, head)?, String::new(), None).files;
-    let mut now = now.into_iter().filter_map(|f| f.diff.map(|d| (f.path, d)));
-    let same = captured.iter().all(|c| now.next().as_ref() == Some(c)) && now.next().is_none();
+    let now: BTreeMap<String, String> = now
+        .into_iter()
+        .filter_map(|f| f.diff.map(|d| (f.path, d)))
+        .collect();
+    let then: BTreeMap<&str, &str> = captured
+        .iter()
+        .map(|(path, diff)| (path.as_str(), diff.as_str()))
+        .collect();
+    // MAGI FIX (MS3 §6 loop14): keyed by path (a reorder is not a change) and restricted to the
+    // kept files, the only ones whose sides were read and sent. A kept file with no captured diff
+    // (an untracked one, read whole) has nothing to compare and is not stale by this check.
+    let same = kept.iter().all(|path| match then.get(path) {
+        Some(diff) => now.get(*path).map(String::as_str) == Some(*diff),
+        None => true,
+    });
     if same {
         Ok(())
     } else {
-        Err(ReviewError::Git(STALE_DIFF.to_string()))
+        Err(ReviewError::StaleDiff)
     }
 }
-
-/// Why a working-tree review stops when its diff moved while it read the sides.
-const STALE_DIFF: &str =
-    "the working tree changed while the review read it: its diff no longer matches; run it again";
 
 /// Whether `path` is a link (or a junction) whose target does not exist. Such a link reads as a
 /// file that does not exist, so an enumeration leaves it out the way it leaves out a tracked

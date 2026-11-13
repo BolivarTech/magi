@@ -584,7 +584,8 @@ pub async fn run_review(
         &resolved.not_utf8,
     )?;
     if let Some(head) = &worktree_head {
-        ensure_diff_current(deps.git, head, &captured)?;
+        let kept: Vec<&str> = filtered.kept.iter().map(|f| f.path.as_str()).collect();
+        ensure_diff_current(deps.git, head, &captured, &kept)?;
     }
     let limit = prompt_limit_tokens(&window);
     summary.skipped = filtered.skipped;
@@ -1615,6 +1616,14 @@ fn unit_identity<'a>(items: impl Iterator<Item = &'a ContextItem>) -> Vec<(Strin
 /// (`precheck_budget`, the caller's contract documented on [`RagSource::index_ms`]); the second
 /// check in `run_review` covers what preparation spent (`a_preparation_that_overran_its_reserve_runs_on_what_is_left_never_refused`).
 ///
+/// Declared (MS3 §6 loop14): (1) the context trimming here counts tokens one item at a time and
+/// is a style choice (a greedy pass in item order, whose result the report declares as trimmed),
+/// not a tuned packing. (2) The documentation layer is identified per revision by the stores
+/// (RV19); a working-tree review keys each source by its content hash, so an edit between two
+/// reviews is a new key and no fingerprint of the tree is needed here. (3) The few repeated
+/// per-batch scans (names, callers) cost O(batch) each and are not memoized: the batch bound
+/// (RV04) caps them, and a cache would add invalidation state for no measured gain.
+///
 /// # Errors
 ///
 /// The first error of `rag`, and [`ReviewError::TooLargeForBatch`] when a batch's containing
@@ -2093,15 +2102,15 @@ fn reviewed_of(
     reviewed
 }
 
-/// The faces each file showed in the completed batches: both ranges of each hunk, each whole
-/// file, and each unit-split file whole only when every batch holding one of its units
-/// completed (as [`reviewed_of`] decides), else only its finished units, as new-side ranges.
-/// O(items).
+/// The faces each file showed in the completed batches: both ranges of each hunk with the lines
+/// that hunk deleted from the old side, each whole file, and each unit-split file whole only when
+/// every batch holding one of its units completed (as [`reviewed_of`] decides), else only its
+/// finished units, as new-side ranges. O(items).
 ///
 /// Within a face the gate's state is RV10's ±40 lines around the finding's line, read from the
 /// revision (RV21): as for a hunk, that window may reach lines no batch reviewed. They are lines
-/// of a file that passed RV22 whole (a file with a secret is never sent) and the state itself is
-/// scanned for a secret before any call.
+/// of a file that passed RV22 (one-line secrets masked, a private-key block omitted whole, so
+/// neither reaches a state raw) and the state itself is scanned for a secret before any call.
 // MAGI FIX (S6 loop 5): a unit-split file with an unfinished unit is not whole for the gate.
 fn faces_of<'b>(
     batches: &'b [ReviewBatch],
@@ -3290,11 +3299,7 @@ mod tests {
             },
         )
         .await;
-        assert!(
-            matches!(&r, Err(ReviewError::Git(m)) if m.contains("changed")),
-            "{:?}",
-            r.err()
-        );
+        assert!(matches!(&r, Err(ReviewError::StaleDiff)), "{:?}", r.err());
         assert_eq!(consult.calls(), 0);
     }
 

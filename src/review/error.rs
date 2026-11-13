@@ -169,6 +169,11 @@ pub enum ReviewError {
     // MAGI FIX (S6 loop 6): an unchanged batch count no longer stands for unchanged content.
     #[error("the review changed since it was approved: its content is not what was approved; ask for it again")]
     ContentChanged,
+    /// The working tree moved between the capture of its diff and the reads of its sides, so the
+    /// diff no longer describes what was read. Raised before any trio call.
+    // MAGI FIX (MS3 §6 loop14): a stale diff was reported as a git failure.
+    #[error("the working tree changed while the review read it: its diff no longer matches; run it again")]
+    StaleDiff,
     /// A secret found in what was about to be sent.
     #[error(
         "{} holds a secret at batching time: it changed during the review or was not filtered",

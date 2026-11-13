@@ -5015,7 +5015,8 @@ fn review_error_exit(e: &magi_rs::review::error::ReviewError) -> i32 {
         | E::Cancelled
         | E::EgressSecret { .. }
         | E::PlanChanged { .. }
-        | E::ContentChanged => 1,
+        | E::ContentChanged
+        | E::StaleDiff => 1,
     }
 }
 
