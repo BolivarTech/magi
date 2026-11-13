@@ -6398,11 +6398,62 @@ mod tests {
             total: Some(1),
         };
         let mut summary = ReviewSummary::default();
-        let done = run_batches(&batches, &prompts, &consult, &timer, &mut summary).await;
+        let done = run_batches(&batches, &prompts, &consult, &timer, 1, &mut summary).await;
         assert!(done.is_empty());
         assert_eq!(consult.calls(), 0, "the trio was called with no time left");
         let cut: Vec<usize> = summary.failed_batches.iter().map(|(k, _)| *k).collect();
         assert_eq!(cut, vec![0, 1]);
+    }
+
+    /// Runs three empty batches whose first call expires its share and leaves the clock at
+    /// `after_first`, under a total of `total` and a per-batch floor of `min_wall`.
+    async fn three_batches_first_expires(
+        total: u64,
+        after_first: u64,
+        min_wall: u64,
+    ) -> (usize, usize, Vec<usize>) {
+        let batch = |index| ReviewBatch {
+            index,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![],
+        };
+        let batches = vec![batch(0), batch(1), batch(2)];
+        let prompts = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let clock = std::sync::Arc::new(FakeClock::default());
+        let mut consult = FakeConsult::new(vec![
+            Err(ConsultFailure::ClockExpired),
+            Ok(real_report(empty()).await),
+            Ok(real_report(empty()).await),
+        ]);
+        consult.advance_to = Some((std::sync::Arc::clone(&clock), after_first));
+        let timer = ReviewTimer {
+            clock: &*clock,
+            t0: 0,
+            total: Some(total),
+        };
+        let mut summary = ReviewSummary::default();
+        let done = run_batches(&batches, &prompts, &consult, &timer, min_wall, &mut summary).await;
+        let cut = summary.failed_batches.iter().map(|(k, _)| *k).collect();
+        (done.len(), consult.calls(), cut)
+    }
+
+    #[tokio::test]
+    async fn an_expired_batch_does_not_abandon_the_rest_while_each_still_gets_the_floor() {
+        // [MAGI S6 MS3 loop16, R4] RV06: a batch that used its share leaves `left / pending` for
+        // the others; with 9000 s left over two batches (4500 s each, floor 100 s) they run.
+        let (done, calls, cut) = three_batches_first_expires(10_000, 1_000, 100).await;
+        assert_eq!((done, calls), (2, 3));
+        assert_eq!(cut, vec![0], "only the batch that expired is declared");
+    }
+
+    #[tokio::test]
+    async fn an_expired_batch_stops_the_rest_when_they_would_get_less_than_the_floor() {
+        // [MAGI S6 MS3 loop16, R4] RV-S22: 150 s left over two batches is 75 s each, under a
+        // floor of 100 s: stop and declare every batch not run.
+        let (done, calls, cut) = three_batches_first_expires(250, 100, 100).await;
+        assert_eq!((done, calls), (0, 1));
+        assert_eq!(cut, vec![0, 1, 2]);
     }
 
     #[tokio::test]
