@@ -1186,7 +1186,8 @@ const MAX_SPACELESS_HEADER_RUN: usize = 96;
 
 /// The characters [`spaceless_key_header`] skips between `BEGIN` and the closing dashes: the
 /// spaces, and what joins two string literals on one line (quotes, comma, plus). Errs toward a
-/// block, inside the type words only.
+/// block, inside the type words and before the closing dashes only (where hidden format and
+/// control characters are skipped as well).
 const HEADER_JOINERS: [char; 6] = [' ', '\t', '"', '\'', ',', '+'];
 
 /// Whether `line`, with its spaces and literal joiners ([`HEADER_JOINERS`]) removed, holds a
@@ -1229,12 +1230,16 @@ fn spaceless_key_header(line: &str) -> bool {
             words.push(c);
             end = i + c.len_utf8();
         }
-        let after = rest.get(end..).unwrap_or_default();
+        // MAGI FIX (MS3 §6 loop16): the same gap characters a split puts before the closing
+        // dashes (joiners, hidden format and control characters) are skipped there too.
+        let after = rest
+            .get(end..)
+            .unwrap_or_default()
+            .trim_start_matches(|c: char| {
+                HEADER_JOINERS.contains(&c) || is_hidden_format_char(c) || c.is_control()
+            });
         (words.ends_with("PRIVATEKEY") || words.ends_with("PRIVATEKEYBLOCK"))
-            && after
-                .strip_prefix(' ')
-                .unwrap_or(after)
-                .starts_with(SSH2_ARMOR_DASHES)
+            && after.starts_with(SSH2_ARMOR_DASHES)
     })
 }
 /// `text` masked as [`mask_secrets`] masks it, but with every line break a masked span held
