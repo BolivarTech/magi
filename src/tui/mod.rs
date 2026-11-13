@@ -1377,9 +1377,10 @@ impl Default for TuiCodeReviewCommand {
     }
 }
 
-/// A `/code-review` error as the transcript may show it: the tool path's two stages (URL
-/// credentials, then the RV22 detector, `egress_text`), then the transcript sanitizer. One
-/// helper for the plan and the run arms (`plan_refusal_is_masked`).
+/// A `/code-review` error as the transcript may show it: the transcript sanitizer first, then
+/// the tool path's `egress_text` (control characters stripped again, URL credentials redacted,
+/// the RV22 detector last), so a control byte inside a key cannot hide it from the detector.
+/// One helper for the plan, the run and the post-report warning arms (`plan_refusal_is_masked`).
 // MAGI FIX (MS3 §6 loop8): the plan arm redacted URL credentials alone.
 fn code_review_error_text(e: &dyn std::fmt::Display) -> String {
     // MAGI FIX (MS3 §6 loop11): sanitized, then masked, as `egress_safe` orders it, so a control
@@ -9456,6 +9457,50 @@ end"
             as_ptr(&session),
             "without the flag, the session's"
         );
+    }
+
+    #[test]
+    fn a_stateless_runner_that_cannot_be_built_refuses_the_review() {
+        // [MAGI S6 MS3 loop15, R5b Melchior] `--no-memory` never falls back to the runner with
+        // its stores: a build error is the command's error, and without the flag the same
+        // runner is used, its `stateless` never asked.
+        struct Refusing(FakeTuiRunner);
+        #[async_trait::async_trait]
+        impl crate::tools::code_review::CodeReviewRunner for Refusing {
+            fn plan(
+                &self,
+                input: &magi_rs::review::input::ReviewInput,
+            ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
+            {
+                self.0.plan(input)
+            }
+            async fn run(
+                &self,
+                plan: crate::tools::code_review::ReviewPlan,
+                budget: crate::tools::code_review::ReviewBudget,
+                c: &tokio_util::sync::CancellationToken,
+            ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
+            {
+                self.0.run(plan, budget, c).await
+            }
+            fn stateless(
+                &self,
+            ) -> Result<
+                Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
+                magi_rs::review::error::ReviewError,
+            > {
+                Err(magi_rs::review::error::ReviewError::Io("no twin".into()))
+            }
+        }
+        let session: Arc<dyn crate::tools::code_review::CodeReviewRunner> =
+            Arc::new(Refusing(FakeTuiRunner::default()));
+        let cmd = parse_tui_code_review("/code-review src --no-memory").expect("parses");
+        assert!(matches!(
+            runner_for_command(&cmd, Arc::clone(&session)),
+            Err(magi_rs::review::error::ReviewError::Io(_))
+        ));
+        let plain = parse_tui_code_review("/code-review src").expect("parses");
+        assert!(runner_for_command(&plain, session).is_ok());
     }
 
     #[test]
