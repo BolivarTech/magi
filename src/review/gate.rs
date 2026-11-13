@@ -2718,6 +2718,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_critical_with_masked_code_carries_both_causes() {
+        // [MAGI S6 MS3 loop15, R6b2 Melchior/Caspar] `critical never filtered` replaced the
+        // guard the state itself raised (a mask marker): both are named, the critical one first.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.60));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let mut f = finding(Severity::Critical, Some(1));
+        f.titles = vec![format!(
+            "the value {}github-token> is fine",
+            crate::review::secrets::REDACTED_OPEN
+        )];
+        let v = g.judge(&f, Some("let k = 1;\n"), None).await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("critical never filtered"),
+                vec!["critical never filtered", "masked code"]
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn an_ambiguous_side_turns_a_confident_false_positive_into_low_confidence() {
         // [MAGI S6 loop 9, C1-m2] RV10's replaced-line amendment, pinned at the gate: on a line
         // whose number also names a deleted line, a confident `false_positive` is never filtered.
