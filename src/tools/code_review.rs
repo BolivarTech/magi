@@ -4141,7 +4141,9 @@ mod tests {
         let embedder: Arc<dyn EmbeddingProvider> =
             Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
         let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
-        let doc = runner.prepare_documentation(&ReviewInput::Uncommitted).await;
+        let doc = runner
+            .prepare_documentation(&ReviewInput::Uncommitted)
+            .await;
         assert!(doc.prep.docs_unavailable, "the failed listing is declared");
         assert!(doc.docs.is_some(), "the store is still handed back");
         assert!(doc.prep.doc_sources.is_empty(), "nothing was indexed");
