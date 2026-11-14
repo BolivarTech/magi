@@ -520,7 +520,9 @@ class RunDefinition:
                 ``forbids_model_calls`` is set, and ``argv`` does not carry
                 :data:`REVIEW_WORKSPACE_TOKEN`: only the review workspace is
                 written, so the files would silently never exist and the ban
-                would guard nothing.
+                would guard nothing. Also when the combinations below are
+                refused, or when the setup invocations' timeouts leave the
+                measured invocation under :data:`MIN_MEASURED_ALLOWANCE_S`.
         """
         # MAGI FIX (S6 loop 14): such files were ignored, and the run executed
         # without its declared input (F1a1-m1).
@@ -559,6 +561,13 @@ class RunDefinition:
         if self.setup and (self.forbids_model_calls or self.rotates):
             raise HarnessError("run %s has setup steps and also counts model calls or rotates a "
                                "credential; the setup would run outside those guards" % self.run_id)
+        # MAGI FIX (MS3 §6 loop17, R7a1): last, so the refusals above keep their own cause.
+        invoked = [step.timeout_s for step in self.setup if isinstance(step, Invocation)]
+        left = self.timeout_s - sum(invoked)
+        if invoked and left < MIN_MEASURED_ALLOWANCE_S:
+            raise HarnessError("run %s leaves its measured invocation %d s after its setup invocations' "
+                               "timeouts, under MIN_MEASURED_ALLOWANCE_S (%d s)"
+                               % (self.run_id, left, MIN_MEASURED_ALLOWANCE_S))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -4197,7 +4206,8 @@ class RunExecutor:
                     not_runnable=self._unrunnable_cause)
             if definition.setup and self._setup_expired is None:
                 # MAGI FIX (MS3 §6 loop16, R7a1): one review's allowance, never what the setup left.
-                runnable = dataclasses.replace(runnable, timeout_s=measured_allowance(definition))
+                # The setup already ran: the measured copy carries none, so it is not re-checked.
+                runnable = dataclasses.replace(runnable, timeout_s=measured_allowance(definition), setup=())
             try:
                 if self._setup_expired is not None:
                     # MAGI FIX (MS3 §6 loop9): a setup review that hung is the run's hang.
