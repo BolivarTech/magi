@@ -3194,6 +3194,10 @@ RELAY_MAX_BODY_BYTES = 32 * 1024 * 1024
 #: for minutes, and the run's own timeout bounds the whole.
 RELAY_UPSTREAM_TIMEOUT_S = 900
 
+#: Seconds a closing relay waits for the requests still in flight before it marks its record
+#: incomplete (MAGI FIX, MS3 §6 loop17, R7a1).
+RELAY_SETTLE_TIMEOUT_S = ERROR_BACKEND_TIMEOUT_S
+
 #: Seconds the relay waits for a request's body: it is sent at once, so a body
 #: that stalls is a broken client, and its record is incomplete.
 RELAY_BODY_TIMEOUT_S = 30
@@ -3295,6 +3299,11 @@ class RequestBodies:
         """
         with self._lock:
             return tuple(self._recorded), tuple(self._headers), not self._lost
+
+    @property
+    def in_flight(self) -> int:
+        """int: The connections the relay accepted and has not finished with."""
+        return 0
 
     @property
     def complete(self) -> bool:

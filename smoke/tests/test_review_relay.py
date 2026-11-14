@@ -8,12 +8,15 @@ import http.server
 import json
 import pathlib
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import unittest.mock
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from smoke import runs
@@ -33,6 +36,22 @@ class _Echo(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(reply)))
         self.end_headers()
         self.wfile.write(reply)
+
+    def log_message(self, *args) -> None:
+        """Keep the test output quiet."""
+
+
+class _Short(http.server.BaseHTTPRequestHandler):
+    """An upstream whose reply declares more body than it sends, then closes (a dropped stream)."""
+
+    def do_POST(self) -> None:  # noqa: N802 - the http.server hook name
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(200)
+        self.send_header("Content-Length", "100")
+        self.end_headers()
+        self.wfile.write(b"cut")
+        self.wfile.flush()
+        self.close_connection = True
 
     def log_message(self, *args) -> None:
         """Keep the test output quiet."""
@@ -726,6 +745,49 @@ class LoopSeventeenClockTests(unittest.TestCase):
             self.assertEqual(runs.measured_allowance(definition), granted[-1], run_id)
         # The measured review's allowance is one review like R20's, so the declared 3 x R20 holds.
         self.assertEqual(runs.DEFINITIONS["R20"].timeout_s, runs.measured_allowance(runs.DEFINITIONS["R21"]))
+
+
+class LoopSeventeenRelayTests(unittest.TestCase):
+    """MAGI FIX (MS3 §6 loop17, R7a1/R7b1): what the relay's record can be trusted for."""
+
+    def _upstream(self, handler) -> str:
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d/v1" % server.server_address[1]
+
+    def test_a_request_in_flight_when_the_relay_closes_marks_the_record_incomplete(self) -> None:
+        # A body still arriving when the run ends was neither recorded nor lost by the snapshot.
+        upstream = self._upstream(_Echo)
+        with unittest.mock.patch.object(runs, "RELAY_SETTLE_TIMEOUT_S", 0.5), \
+                unittest.mock.patch.object(runs, "RELAY_BODY_TIMEOUT_S", 120), \
+                runs.recording_relay(upstream) as (url, rec):
+            client = socket.create_connection(("127.0.0.1", urllib.parse.urlsplit(url).port), timeout=5)
+            self.addCleanup(client.close)
+            client.sendall(b"POST /v1/embeddings HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nhalf")
+            deadline = time.monotonic() + 30
+            while not rec.in_flight and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual((), rec.recorded)
+        self.assertFalse(rec.complete)
+
+    def test_an_upstream_reply_cut_short_marks_the_record_incomplete(self) -> None:
+        upstream = self._upstream(_Short)
+        with runs.recording_relay(upstream) as (url, rec):
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            self.assertEqual(b"cut", opener.open(urllib.request.Request(url + "/api/chat", data=b"x"),
+                                                 timeout=5).read())
+        self.assertEqual((("/v1/api/chat", b"x"),), rec.recorded)
+        self.assertFalse(rec.complete)
+
+    def test_a_whole_reply_leaves_the_record_complete(self) -> None:
+        upstream = self._upstream(_Echo)
+        with runs.recording_relay(upstream) as (url, rec):
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            self.assertEqual(b"echo:x", opener.open(urllib.request.Request(url + "/api/chat", data=b"x"),
+                                                    timeout=5).read())
+        self.assertTrue(rec.complete)
 
 
 if __name__ == "__main__":
