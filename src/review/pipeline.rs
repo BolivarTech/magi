@@ -5205,10 +5205,25 @@ mod tests {
             companion_tokens: 0,
         };
         let mut summary = ReviewSummary::default();
-        let contexts =
-            prepare_contexts(&GrowingRag, &GrowingRag, &[batch], usize::MAX, &mut summary)
-                .await
-                .expect("prepare");
+        // MAGI FIX (S6 loop 17, R4): the room is the batch limit (RV04), not the source's charge:
+        // here exactly the code, the heading and the masked definition, so the documentation
+        // does not fit (`context_is_trimmed_to_the_batch_room_never_to_the_source_charge`).
+        let masked_def = ContextItem {
+            kind: ContextKind::Definition,
+            file: "a.rs".into(),
+            label: "f".into(),
+            text: mask_secrets("let u = \"a://u:p@h\";"),
+            candidate: false,
+            lines: None,
+            old_side: false,
+        };
+        let limit = batch
+            .tokens
+            .saturating_add(estimate_tokens(CONTEXT_HEADING))
+            .saturating_add(item_cost(&masked_def));
+        let contexts = prepare_contexts(&GrowingRag, &GrowingRag, &[batch], limit, &mut summary)
+            .await
+            .expect("prepare");
         let sent = &contexts[0];
         assert_eq!(sent.len(), 1, "{sent:?}");
         assert!(sent[0].kind == ContextKind::Definition && !sent[0].text.contains("u:p@"));
@@ -5223,6 +5238,57 @@ mod tests {
             "{:?}",
             summary.trimmed
         );
+    }
+
+    #[tokio::test]
+    async fn context_is_trimmed_to_the_batch_room_never_to_the_source_charge() {
+        // [MAGI S6 MS3 loop17, R4 Melchior/Balthasar] A mask that grows an item past what the
+        // source charged is paid only when the sent context passes what the batch limit leaves
+        // (RV04); with room to spare nothing optional is dropped.
+        use crate::review::rag::{ContextItem, ContextKind};
+        struct GrowingRag;
+        #[async_trait::async_trait]
+        impl RagSource for GrowingRag {
+            async fn context_for(&self, _b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+                let item = |kind, file: &str, label: &str, text: &str| ContextItem {
+                    kind,
+                    file: file.into(),
+                    label: label.into(),
+                    text: text.into(),
+                    candidate: false,
+                    lines: None,
+                    old_side: false,
+                };
+                Ok(Assembled {
+                    items: vec![
+                        item(
+                            ContextKind::Definition,
+                            "a.rs",
+                            "f",
+                            "let u = \"a://u:p@h\";",
+                        ),
+                        item(ContextKind::Documentation, "README.md", "Usage", "run it"),
+                    ],
+                    trimmed: vec![],
+                    without_embedder: false,
+                    without_memory: false,
+                    withheld: 0,
+                })
+            }
+        }
+        let batch = ReviewBatch {
+            index: 0,
+            items: vec![],
+            tokens: 1,
+            companion_tokens: 0,
+        };
+        let mut summary = ReviewSummary::default();
+        let contexts =
+            prepare_contexts(&GrowingRag, &GrowingRag, &[batch], usize::MAX, &mut summary)
+                .await
+                .expect("prepare");
+        assert_eq!(contexts[0].len(), 2, "{:?}", contexts[0]);
+        assert!(summary.trimmed.is_empty(), "{:?}", summary.trimmed);
     }
 
     #[test]
