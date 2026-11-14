@@ -1060,13 +1060,18 @@ impl<'a> Gate<'a> {
                         continue;
                     };
                     if spec.min_confidence.is_some_and(|min| confidence < min) {
-                        lean = Some(Outcome::answered(
-                            GateState::LowConfidence,
-                            None,
-                            &spec.model,
-                            choice,
-                            confidence,
-                        ));
+                        // MAGI FIX (MS3 §6 loop17, R6b2 Melchior): a lean that ended the walk lost
+                        // the guard the state raised.
+                        lean = Some(Outcome {
+                            guard_also: masked,
+                            ..Outcome::answered(
+                                GateState::LowConfidence,
+                                None,
+                                &spec.model,
+                                choice,
+                                confidence,
+                            )
+                        });
                         continue;
                     }
                     // T3.7-fix1: the critical rule yields to a confident answer; `guard` does not.
