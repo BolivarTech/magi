@@ -1060,9 +1060,15 @@ pub fn distinct_key(taken: &serde_json::Map<String, Value>, base: String) -> Str
     if !taken.contains_key(&base) {
         return base;
     }
+    distinct_key_after(taken, &base, 2)
+}
+
+/// [`distinct_key`] from the suffix `first` on: the first free `base (n)`, `n >= first`, or,
+/// once the suffixes run out, a free spelling of [`KEY_SUFFIXES_EXHAUSTED_KEY`]. O(taken).
+fn distinct_key_after(taken: &serde_json::Map<String, Value>, base: &str, first: usize) -> String {
     // MAGI FIX (MS3 §6 loop15): the counter is checked, not saturating; running out of
     // suffixes (unreachable in memory) is a typed failure that lands on a fixed key.
-    distinct_key_from(taken, &base, 2)
+    distinct_key_from(taken, base, first)
         .unwrap_or_else(|KeySuffixesExhausted| KEY_SUFFIXES_EXHAUSTED_KEY.to_string())
 }
 
@@ -1644,6 +1650,18 @@ mod tests {
             distinct_key_from(&taken, "k", usize::MAX - 1),
             Ok(format!("k ({})", usize::MAX - 1))
         );
+    }
+
+    #[test]
+    fn the_exhaustion_key_is_itself_kept_distinct() {
+        // [MAGI S6 MS3 loop17, R6b2 Balthasar] The fallback for exhausted suffixes was one fixed
+        // key: when `taken` already held it, the insert overwrote the count it exists to keep.
+        let mut taken = serde_json::Map::new();
+        taken.insert(format!("k ({})", usize::MAX), serde_json::json!(0));
+        taken.insert(KEY_SUFFIXES_EXHAUSTED_KEY.into(), serde_json::json!(1));
+        let key = distinct_key_after(&taken, "k", usize::MAX);
+        assert!(!taken.contains_key(&key), "{key:?} is taken");
+        assert_eq!(key, format!("{KEY_SUFFIXES_EXHAUSTED_KEY} (2)"));
     }
 
     #[test]
