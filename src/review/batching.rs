@@ -59,12 +59,6 @@ const HUNK_MARKER: &str = "@@";
 /// for a merge commit shown against all its parents.
 const COMBINED_HUNK_MARKER: &str = "@@@";
 
-/// The Unicode line separator, which a model may read as a line break.
-const LINE_SEPARATOR: char = '\u{2028}';
-
-/// The Unicode paragraph separator, which a model may read as a line break.
-const PARAGRAPH_SEPARATOR: char = '\u{2029}';
-
 /// Digits of the line-number prefix of a reviewed line (right-aligned). A number of seven or more
 /// digits (a file past 999 999 lines, which the 8 MiB per-file cap allows) widens its own prefix:
 /// the columns no longer line up, but the `|` still ends the number and the diff marker still
@@ -627,15 +621,10 @@ pub fn file_header(path: &str) -> String {
 /// and is discarded by REQ-RV09 (the fail-closed direction), which only a hostile or broken
 /// file name can reach.
 fn header_path(path: &str) -> String {
-    path.chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, LINE_SEPARATOR | PARAGRAPH_SEPARATOR) {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    // MAGI FIX (S6 loop 17, R4): the header is a prompt path like every other: a name that
+    // quotes a secret is not written at all, and the hidden-character set is the shared one
+    // (the line and paragraph separators U+2028/U+2029 are in it).
+    display_path(path)
 }
 
 /// Packs `files` into batches of at most `limit_tokens`, with no companion.
@@ -769,6 +758,9 @@ pub fn plan_batches_with(
         if items.is_empty() {
             continue;
         }
+        // The header shows the path as `display_path` does (a secret-shaped name is not written),
+        // so the net scans the name itself: such a file still fails closed, never reviewed.
+        scan(&file.path, &file.path)?;
         scan(&file.path, &header)?;
         for item in items {
             packer.add(item, header_tokens)?;

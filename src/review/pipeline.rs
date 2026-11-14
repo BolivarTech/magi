@@ -1386,7 +1386,9 @@ async fn run_batches(
                 let still_fits = clock.left_secs().is_some_and(|left| {
                     batch_wall_clock_secs(left, planned.saturating_sub(next)) >= min_wall_secs
                 });
-                if !still_fits {
+                // MAGI FIX (S6 loop 17, R4): the last batch expiring has no pending batch to
+                // size; there is nothing to continue or to cut.
+                if next < planned && !still_fits {
                     summary
                         .failed_batches
                         .extend((next..planned).map(|k| (k, CLOCK_EXPIRED.to_string())));
@@ -1406,15 +1408,20 @@ async fn run_batches(
     finished
 }
 
-/// A failure's text as the report declares it: URLs redacted ([`redact_foreign_text`]).
-// Behaviour-preserving seam for the loop-17 R4 guard (the masking lands with its fix).
+/// A failure's text as the report declares it: URLs redacted ([`redact_foreign_text`]), then
+/// key-shaped text masked ([`mask_secrets`]). The one composition of the batch-failure and the
+/// consolidation-failure arms. O(n).
+// MAGI FIX (S6 loop 17, R4): the consolidation arm redacted URLs only.
 fn declared_failure_text(message: &str) -> String {
-    redact_foreign_text(message).as_str().to_string()
+    mask_secrets(redact_foreign_text(message).as_str())
 }
 
-/// Whether a finding's line is off the reviewed revision for the history (RV08).
+/// Whether a finding's line is off the reviewed revision for the history (RV08): its code says
+/// so (a removed line), or there is no code to say otherwise. History anchors by the revision's
+/// line numbers, so a finding whose side is unknown is not recorded: the conservative default.
+// MAGI FIX (S6 loop 17, R4): a finding with no readable code was anchored as if it were live.
 fn is_off_revision(code: Option<&GateCode>) -> bool {
-    code.is_some_and(|c| !c.names_a_revision_line())
+    code.is_none_or(|c| !c.names_a_revision_line())
 }
 
 /// Records the gate's verdicts in `summary`: the counts per state and cause, the fraction
@@ -1784,7 +1791,18 @@ async fn prepare_contexts(
         }
         let mut kept = Vec::with_capacity(assembled.items.len().saturating_add(pre.len()));
         let egress = assembled.items.into_iter().map(context_egress);
-        let pre = if reuse { pre } else { Vec::new() };
+        // MAGI FIX (S6 loop 17, R4): a promised unit withheld for a secret stays declared when the
+        // source brought other units (it is not sent either way, so it is not counted twice).
+        let pre = if reuse {
+            pre
+        } else {
+            for e in &pre {
+                if let ContextEgress::Withhold(file) = e {
+                    skip_for_secret(summary, file);
+                }
+            }
+            Vec::new()
+        };
         for e in pre.into_iter().chain(egress) {
             match e {
                 ContextEgress::Withhold(file) => {
