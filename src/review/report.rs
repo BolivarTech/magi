@@ -1396,6 +1396,43 @@ mod tests {
     }
 
     #[test]
+    fn the_json_lists_at_most_the_cap_of_undelivered_units_and_declares_the_rest() {
+        // [MAGI S6 MS3 loop17, R6b2] The list grows with the reviewed tree like its siblings.
+        let extra = 3;
+        let s = ReviewSummary {
+            undelivered_units: (0..MAX_OMISSIONS_SHOWN + extra)
+                .map(|i| format!("unit_{i}"))
+                .collect(),
+            ..ReviewSummary::default()
+        };
+        let v = summary_json(&s);
+        assert_eq!(
+            v["undelivered_units"].as_array().map(Vec::len),
+            Some(MAX_OMISSIONS_SHOWN)
+        );
+        assert_eq!(v["undelivered_units_unlisted"], extra);
+        assert_eq!(
+            summary_json(&ReviewSummary::default())["undelivered_units_unlisted"],
+            0
+        );
+    }
+
+    #[test]
+    fn every_field_of_the_summary_reaches_the_json() {
+        // [MAGI S6 MS3 loop17, R6b2] The list is derived from the default summary's own keys, so
+        // a field added to `ReviewSummary` cannot be forgotten here.
+        let v = summary_json(&ReviewSummary::default());
+        let derived = to_json(&ReviewSummary::default(), "summary");
+        let Value::Object(fields) = derived else {
+            panic!("the summary serializes to an object");
+        };
+        assert!(fields.contains_key("undelivered_units"), "precondition");
+        for k in fields.keys() {
+            assert!(v.get(k).is_some(), "missing {k}: {v}");
+        }
+    }
+
+    #[test]
     fn only_findings_on_a_line_of_the_reviewed_revision_are_anchored() {
         // [MAGI S6 MS3 loop2, R6b Caspar/Balthasar/Melchior] RV08: a removed-line finding never
         // reaches the history; an unlocated one and one on the same number of another file do.
