@@ -98,6 +98,17 @@ pub const MAX_DEFINITIONS_PER_NAME: usize = 5;
 /// cannot fill the room that documentation and history are served from.
 pub const MAX_DEFINITIONS_TOTAL: usize = 24;
 
+/// What a retrieval cap cut in one batch, for the caller to declare: each cause apart, so a
+/// name cut by the batch's total is never declared as one with too many entries of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetrievalCuts {
+    /// The names cut by the per-name cap, in the order they were met.
+    pub per_name: Vec<String>,
+    /// Whether the batch's total cap was reached with a later name still to serve: the scan
+    /// stopped there, so the names after it are not listed (one bounded declaration).
+    pub total: bool,
+}
+
 /// The tracing target of this module's WARNs (the pipeline's).
 const LOG_TARGET: &str = "magi_rs::review";
 
@@ -562,7 +573,7 @@ pub fn definitions_for(
     index: &LexicalIndex,
     sources: &dyn ContentSource,
     unread: &mut Vec<String>,
-) -> (Vec<ContextItem>, Vec<String>) {
+) -> (Vec<ContextItem>, RetrievalCuts) {
     let mut names = HashSet::new();
     let mut files: HashMap<&str, Option<String>> = HashMap::new();
     let mut items = Vec::new();
@@ -600,7 +611,13 @@ pub fn definitions_for(
             });
         }
     }
-    (items, capped)
+    (
+        items,
+        RetrievalCuts {
+            per_name: capped,
+            total: false,
+        },
+    )
 }
 
 /// The units that name any of `names` (the changed units), one item per `(file, unit)`, never
@@ -2032,7 +2049,8 @@ mod tests {
         let src = MapSource::new(&borrowed, &[]);
         let (defs, capped) = definitions_for("new();", &index, &src, &mut Vec::new());
         assert_eq!(defs.len(), MAX_DEFINITIONS_PER_NAME);
-        assert_eq!(capped, ["new"]);
+        assert_eq!(capped.per_name, ["new"]);
+        assert!(!capped.total, "five definitions never reach the total");
         // The kept ones are the first by (file, line), whatever the listing order.
         let mut kept: Vec<&str> = defs.iter().map(|d| d.file.as_str()).collect();
         let sorted = {
@@ -2057,10 +2075,35 @@ mod tests {
             .collect();
         let (defs, capped) = definitions_for(&call, &index, &src, &mut Vec::new());
         assert_eq!(defs.len(), MAX_DEFINITIONS_TOTAL);
+        // [MAGI S6 MS3 loop17, R2 all three] A name cut by the total was declared as one with
+        // more than MAX_DEFINITIONS_PER_NAME definitions, once per later name.
         assert!(
-            !capped.is_empty(),
-            "the names cut by the total are declared"
+            capped.per_name.is_empty(),
+            "a one-definition name is never declared as over the per-name cap: {:?}",
+            capped.per_name
         );
+        assert!(capped.total, "the total cut is declared, once");
+    }
+
+    #[test]
+    fn a_spent_total_with_no_later_definition_declares_no_cut() {
+        // [MAGI S6 MS3 loop17, R2] The scan stops at the first later name that would have
+        // served; names without a definition (keywords, outside symbols) cut nothing.
+        use crate::review::test_support::MapSource;
+        let many: Vec<(String, String)> = (0..MAX_DEFINITIONS_TOTAL)
+            .map(|i| (format!("g{i:02}.rs"), format!("fn name{i}() {{}}\n")))
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            many.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+        let index = LexicalIndex::build(&many, &LanguageRegistry::new());
+        let src = MapSource::new(&borrowed, &[]);
+        let call: String = (0..MAX_DEFINITIONS_TOTAL)
+            .map(|i| format!("name{i}();\n"))
+            .chain(["let outside = 1;\n".to_string()])
+            .collect();
+        let (defs, capped) = definitions_for(&call, &index, &src, &mut Vec::new());
+        assert_eq!(defs.len(), MAX_DEFINITIONS_TOTAL);
+        assert_eq!(capped, RetrievalCuts::default());
     }
 
     #[test]

@@ -45,7 +45,7 @@ use magi_rs::review::rag::{
     assemble, callers_for, charged_tokens, containing_units_cached, declare_index, declare_lexical,
     definitions_for, doc_search_query, item_cost, Assembled, ContextItem, ContextKind,
     IndexDeclarations, UnitCache, CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
-    MAX_DEFINITIONS_PER_NAME, UNREADABLE_CONTEXT,
+    MAX_DEFINITIONS_PER_NAME, MAX_DEFINITIONS_TOTAL, UNREADABLE_CONTEXT,
 };
 use magi_rs::review::secrets::{
     display_path, find_secret, holds_key_block, mask_secrets, masked_pattern, outward_text,
@@ -872,12 +872,24 @@ impl RagSource for StoreRag<'_> {
                 format!("{name}: more than {MAX_CALLERS_PER_NAME} callers"),
             )
         }));
-        a.trimmed.extend(capped_defs.into_iter().map(|name| {
-            (
+        a.trimmed
+            .extend(capped_defs.per_name.into_iter().map(|name| {
+                (
+                    ContextKind::Definition,
+                    format!("{name}: more than {MAX_DEFINITIONS_PER_NAME} definitions"),
+                )
+            }));
+        // MAGI FIX (MS3 §6 loop17, R2): the total cut was declared as the per-name one, once
+        // per later name; it is its own cause, declared once per batch.
+        if capped_defs.total {
+            a.trimmed.push((
                 ContextKind::Definition,
-                format!("{name}: more than {MAX_DEFINITIONS_PER_NAME} definitions"),
-            )
-        }));
+                format!(
+                    "definitions cut at MAX_DEFINITIONS_TOTAL ({MAX_DEFINITIONS_TOTAL}) for this \
+                     batch: the later names were left out"
+                ),
+            ));
+        }
         a.trimmed.extend(declared);
         let unread = (unread_defs
             .into_iter()
@@ -2040,6 +2052,42 @@ mod tests {
         );
         assert!(!served(Some(&OFF)).await, "served off HEAD's line");
         assert!(!served(None).await, "served with no git to check it");
+    }
+
+    #[tokio::test]
+    async fn a_batch_cut_by_the_definition_total_declares_that_cut_once_and_nothing_else() {
+        // [MAGI S6 MS3 loop17, R2 Caspar/Melchior/Balthasar] Every name after the total was
+        // declared "more than MAX_DEFINITIONS_PER_NAME definitions", one entry per name: false
+        // for a name with one definition, and unbounded.
+        let names = MAX_DEFINITIONS_TOTAL * 2;
+        let owned: Vec<(String, String)> = (0..names)
+            .map(|i| (format!("g{i:02}.rs"), format!("fn name{i}() {{}}\n")))
+            .chain([("a.rs".to_string(), "fn a() {}\n".to_string())])
+            .collect();
+        let borrowed: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(p, t)| (p.as_str(), t.as_str()))
+            .collect();
+        let f = RagFixture::new(&borrowed).await;
+        let call: String = (0..names).map(|i| format!("name{i}();\n")).collect();
+        let a = f
+            .rag(false)
+            .context_for(&batch_on("a.rs", &call))
+            .await
+            .expect("context");
+        let defs: Vec<&str> = a
+            .trimmed
+            .iter()
+            .filter(|(k, _)| *k == ContextKind::Definition)
+            .map(|(_, label)| label.as_str())
+            .collect();
+        assert_eq!(
+            defs,
+            vec![format!(
+                "definitions cut at MAX_DEFINITIONS_TOTAL ({MAX_DEFINITIONS_TOTAL}) for this \
+                 batch: the later names were left out"
+            )],
+        );
     }
 
     fn batch_on(file: &str, text: &str) -> ReviewBatch {
