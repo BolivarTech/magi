@@ -2016,6 +2016,38 @@ mod tests {
     static ON_HEADS_LINE: OnHeadsLine = OnHeadsLine;
 
     #[tokio::test]
+    async fn a_stored_reviewed_commit_that_is_not_a_sha_never_reaches_git() {
+        // [MAGI S6 MS3 loop17, R2 Caspar] False positive, pinned: a stored `reviewed_commit` is
+        // validated by `on_heads_line` (`is_commit_id`) before any git argument is built, so a
+        // hand-edited row holding an option (`--output=x`) is never passed to git.
+        struct Recording(std::sync::Mutex<Vec<String>>);
+        impl GitCommand for Recording {
+            fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                if let Ok(mut calls) = self.0.lock() {
+                    calls.push(a.join(" "));
+                }
+                Ok(Vec::new())
+            }
+        }
+        let git = Recording(std::sync::Mutex::new(Vec::new()));
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let mut rag = f.rag(false);
+        rag.history_git = Some(&git);
+        for hostile in ["--output=x", "-c", "HEAD", "c1 --all", ""] {
+            let entry = HistoryEntry {
+                reviewed_commit: hostile.into(),
+                ..attended("h", "d")
+            };
+            assert!(!rag.served_on_heads_line(&entry), "{hostile:?}");
+        }
+        assert_eq!(
+            git.0.lock().map(|c| c.clone()).unwrap_or_default(),
+            Vec::<String>::new(),
+            "no git call for a stored commit that is not a SHA"
+        );
+    }
+
+    #[tokio::test]
     async fn memo_shares_no_verdict() {
         // MAGI FIX (MS3 §6 loop11): the memo keyed by commit cached the whole verdict, so a
         // pending entry sharing a validated one's commit decided for it.
