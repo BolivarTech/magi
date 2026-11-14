@@ -178,6 +178,18 @@ class S53Tests(unittest.TestCase):
         bad = [dict(rm.S53_EXPECTED_MASKED[0], line=3)]
         self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, _doc(masked=bad))))
 
+    def test_a_masked_entry_may_carry_the_products_optional_count(self) -> None:
+        # The product serializes `redacted_lines` only when non-zero; S53 declares it optional.
+        ok = [dict(rm.S53_EXPECTED_MASKED[0], redacted_lines=2)]
+        self.assertEqual(Outcome.PASS, self._judge(1, _result("R18", 0, _doc(masked=ok))))
+
+    def test_an_optional_count_of_the_wrong_kind_or_an_unknown_key_fails(self) -> None:
+        for extra in ({"redacted_lines": "2"}, {"redacted_lines": 0}, {"redacted_lines": True},
+                      {"bogus": 1}):
+            with self.subTest(extra=extra):
+                bad = [dict(rm.S53_EXPECTED_MASKED[0], **extra)]
+                self.assertEqual(Outcome.FAIL, self._judge(1, _result("R18", 0, _doc(masked=bad))))
+
     def test_a_null_masked_list_fails(self) -> None:
         doc = _doc()
         doc["code_review"]["masked"] = None

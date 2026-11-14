@@ -2066,7 +2066,13 @@ class ReviewMaskingSyncTests(unittest.TestCase):
         expected, = review_masking.S53_EXPECTED_MASKED
         filter_rs = without_comments(_source("src/review/filter.rs"))
         body = one_definition(filter_rs, r"pub struct Masked \{([^}]*)\}", "src/review/filter.rs").group(1)
-        self.assertEqual(sorted(expected), sorted(re.findall(r"pub (\w+):", body)))
+        # A field serialized conditionally (`skip_serializing_if`) is an optional key: required keys
+        # are counted exactly, optional ones are a closed set S53 declares.
+        fields = re.findall(r"((?:\s*#\[[^\]]*\]\n)*)\s*pub (\w+):", body)
+        optional = {name for attrs, name in fields if "skip_serializing_if" in attrs}
+        required = [name for attrs, name in fields if "skip_serializing_if" not in attrs]
+        self.assertEqual(sorted(expected), sorted(required))
+        self.assertEqual(set(review_masking.S53_OPTIONAL_MASKED_KEYS), optional)
         one_definition(filter_rs, r'Self::Secret => "%s"' % re.escape(expected["cause"]),
                        "src/review/filter.rs")
         secrets_rs = without_comments(_source("src/review/secrets.rs"))
