@@ -45,7 +45,7 @@ use magi_rs::review::rag::{
     assemble, callers_for, charged_tokens, containing_units_cached, declare_index, declare_lexical,
     definitions_for, doc_search_query, item_cost, Assembled, ContextItem, ContextKind,
     IndexDeclarations, UnitCache, CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
-    UNREADABLE_CONTEXT,
+    MAX_DEFINITIONS_PER_NAME, UNREADABLE_CONTEXT,
 };
 use magi_rs::review::secrets::{
     display_path, find_secret, holds_key_block, mask_secrets, masked_pattern, outward_text,
@@ -735,7 +735,8 @@ impl RagSource for StoreRag<'_> {
         let units = self.units_for(batch)?;
         // MAGI FIX (MS3 §6 loop9): an unreadable file costs its own items, declared.
         let (mut unread_defs, mut unread_callers) = (Vec::new(), Vec::new());
-        let mut code = definitions_for(&text, self.index, self.sources, &mut unread_defs);
+        let (mut code, capped_defs) =
+            definitions_for(&text, self.index, self.sources, &mut unread_defs);
         let names = changed_names(batch, &units, self.registry);
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let (callers, capped) = callers_for(
@@ -779,6 +780,12 @@ impl RagSource for StoreRag<'_> {
             (
                 ContextKind::Caller,
                 format!("{name}: more than {MAX_CALLERS_PER_NAME} callers"),
+            )
+        }));
+        a.trimmed.extend(capped_defs.into_iter().map(|name| {
+            (
+                ContextKind::Definition,
+                format!("{name}: more than {MAX_DEFINITIONS_PER_NAME} definitions"),
             )
         }));
         a.trimmed.extend(declared);
@@ -4161,6 +4168,180 @@ mod tests {
             .await
             .expect("context");
         assert!(f.embedder.calls() > 0, "the next batch is still served");
+    }
+
+    #[test]
+    fn a_unit_keeps_one_numbered_line_per_source_line_over_escaped_text() {
+        // [MAGI S6 MS3 loop16, R2 Balthasar] RV09 accepts the number shown for a containing
+        // unit: escaping the frame (fences, tags) must neither add nor drop a line.
+        let item = ContextItem {
+            kind: ContextKind::Unit,
+            file: "a.rs".into(),
+            label: "f".into(),
+            text: "fn f() {\n    // ```\n    // </code>\n}".into(),
+            candidate: false,
+            lines: Some((10, 13)),
+            old_side: false,
+        };
+        let rendered = escaped(item).rendered();
+        let numbers: Vec<&str> = rendered
+            .lines()
+            .map(|l| l.trim_start().split(|c: char| !c.is_ascii_digit()).next())
+            .map(|n| n.unwrap_or(""))
+            .collect();
+        assert_eq!(numbers, ["10", "11", "12", "13"], "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_withheld_batch_declares_its_own_cause_and_is_not_a_missing_embedder() {
+        // [MAGI S6 MS3 loop16, R2 Caspar/Melchior] A batch withheld by its own text was reported
+        // as `without_embedder` with no cause at all: the embedder answered nothing because it
+        // was never asked, which the report must say, per batch and apart from a down embedder.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let key = format!("{begin}\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n{end}");
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let rag = f.rag(true);
+        let a = rag
+            .context_for(&batch_on("a.rs", &key))
+            .await
+            .expect("context");
+        assert!(!a.without_embedder, "the embedder is up: {:?}", a.trimmed);
+        for kind in [ContextKind::Documentation, ContextKind::History] {
+            assert!(
+                a.trimmed
+                    .iter()
+                    .any(|(k, label)| *k == kind && label.contains("private-key block")),
+                "{kind:?} declared: {:?}",
+                a.trimmed
+            );
+        }
+        let next = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(
+            next.trimmed
+                .iter()
+                .all(|(_, label)| !label.contains("private-key block")),
+            "the withhold does not outlive its batch: {:?}",
+            next.trimmed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_review_without_git_declares_that_history_was_not_served() {
+        // [MAGI S6 MS3 loop16, R2 Caspar] Without a git no entry can be checked against HEAD, so
+        // none is served; that was said nowhere.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let mut rag = f.rag(true);
+        rag.history_git = None;
+        let a = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(
+            a.trimmed
+                .iter()
+                .any(|(k, label)| *k == ContextKind::History && label.contains("no git")),
+            "{:?}",
+            a.trimmed
+        );
+        let again = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(
+            again
+                .trimmed
+                .iter()
+                .all(|(_, label)| !label.contains("no git")),
+            "declared once: {:?}",
+            again.trimmed
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_history_rows_are_declared_per_review_not_per_store() {
+        // [MAGI S6 MS3 loop16, R2 Balthasar] `corrupt_rows` counts for the store's lifetime, so in
+        // the TUI a row skipped by an earlier review made every later review declare it.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        f.history.record(&[attended("bad", "d")]).expect("record");
+        f.history
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute(
+                "UPDATE code_review_history SET finding_blob = x'00' WHERE id = 'bad'",
+                [],
+            )
+            .expect("corrupt");
+        f.history
+            .validated_on_files(&["a.rs".to_string()])
+            .expect("an earlier review reads it");
+        assert!(f.history.corrupt_rows() > 0);
+        f.history
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute("DELETE FROM code_review_history", [])
+            .expect("delete");
+        let rag = f.rag(true);
+        let a = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert!(
+            a.trimmed.iter().all(|(_, label)| label != CORRUPT_HISTORY),
+            "this review skipped none: {:?}",
+            a.trimmed
+        );
+    }
+
+    #[tokio::test]
+    async fn homonym_definitions_leave_room_for_documentation() {
+        // [MAGI S6 MS3 loop16, R2 Caspar/Melchior/Balthasar] A batch naming `new` built every
+        // definition of it, charged them all, and the room check then skipped documentation and
+        // history for the batch (`no room left`), the layers MS3 exists to add.
+        let body = format!("fn new() {{\n{}}}\n", "    let x = 1;\n".repeat(30));
+        let files: Vec<(String, String)> = (0..40)
+            .map(|i| (format!("f{i:02}.rs"), body.clone()))
+            .chain([("a.rs".to_string(), "fn a() {\n    new();\n}\n".to_string())])
+            .collect();
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, t)| (p.as_str(), t.as_str()))
+            .collect();
+        let f = RagFixture::new(&borrowed).await;
+        f.docs
+            .reindex(
+                &[(
+                    src("README.md", "k1"),
+                    vec![chunk("README.md", "A", "about new")],
+                )],
+                &f.embedder,
+            )
+            .await
+            .expect("indexed");
+        let mut rag = f.rag(true);
+        rag.doc_sources = BTreeSet::from([src("README.md", "k1")]);
+        rag.limit_tokens = 1_800;
+        let a = rag
+            .context_for(&batch_on("a.rs", "    new();"))
+            .await
+            .expect("context");
+        assert!(
+            a.items.iter().any(|i| i.kind == ContextKind::Documentation),
+            "{:?}",
+            a.trimmed
+        );
+        assert!(
+            a.trimmed
+                .iter()
+                .any(|(k, label)| *k == ContextKind::Definition && label.contains("new")),
+            "the cut is declared: {:?}",
+            a.trimmed
+        );
     }
 
     #[tokio::test]

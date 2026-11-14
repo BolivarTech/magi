@@ -1028,6 +1028,32 @@ mod tests {
     }
 
     #[test]
+    fn the_ancestry_check_runs_with_the_connection_lock_free() {
+        // [MAGI S6 MS3 loop16, R2 Balthasar] `on_line` is a git subprocess in production; it must
+        // never run while the connection shared with the whole database is held.
+        let (store, _tmp) = store_for_test();
+        store
+            .record(&[stored("e1", Some(1), "c1")])
+            .expect("record");
+        store
+            .update_status("e1", HistoryStatus::Attended)
+            .expect("attend");
+        let calls = std::cell::Cell::new(0usize);
+        let on_line = |_: &str| {
+            calls.set(calls.get() + 1);
+            assert!(
+                store.connection_for_test().try_lock().is_ok(),
+                "the connection lock was held while git ran"
+            );
+            true
+        };
+        store
+            .validated_on_line(&["src/a.rs".to_string()], &on_line)
+            .expect("read");
+        assert!(calls.get() > 0, "the check ran");
+    }
+
+    #[test]
     fn corrupt_rows_never_starve_the_valid_ones() {
         // [MAGI S6 MS3 loop14, R3 Caspar] A row that does not decode is never in the caller's
         // `touched`, so it stayed first in the due queue and took a slot of every review. Reading

@@ -90,6 +90,14 @@ pub struct Assembled {
 /// Callers kept per name.
 pub const MAX_CALLERS_PER_NAME: usize = 10;
 
+/// Definitions kept per name by [`definitions_for`]: the first by `(file, line)`; homonyms such as
+/// `new` or `from` have hundreds, all marked `candidate`.
+pub const MAX_DEFINITIONS_PER_NAME: usize = 5;
+
+/// Definitions kept per batch by [`definitions_for`], over all names, so the names of a batch
+/// cannot fill the room that documentation and history are served from.
+pub const MAX_DEFINITIONS_TOTAL: usize = 24;
+
 /// The tracing target of this module's WARNs (the pipeline's).
 const LOG_TARGET: &str = "magi_rs::review";
 
@@ -525,13 +533,14 @@ impl FileUnits {
 ///
 /// # Returns
 ///
-/// The `Definition` items; a file that is gone or cannot be read gives none.
+/// The `Definition` items; a file that is gone or cannot be read gives none. And the names whose
+/// definitions a cap cut, for the caller to declare.
 pub fn definitions_for(
     text: &str,
     index: &LexicalIndex,
     sources: &dyn ContentSource,
     unread: &mut Vec<String>,
-) -> Vec<ContextItem> {
+) -> (Vec<ContextItem>, Vec<String>) {
     let mut names = HashSet::new();
     let mut files: HashMap<&str, Option<String>> = HashMap::new();
     let mut items = Vec::new();
@@ -558,7 +567,7 @@ pub fn definitions_for(
             });
         }
     }
-    items
+    (items, Vec::new())
 }
 
 /// The units that name any of `names` (the changed units), one item per `(file, unit)`, never
@@ -1302,7 +1311,7 @@ mod tests {
         ];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let mut unread = Vec::new();
-        let defs = definitions_for("parse();", &index, &Broken, &mut unread);
+        let (defs, _) = definitions_for("parse();", &index, &Broken, &mut unread);
         assert!(defs.is_empty());
         let reg = LanguageRegistry::new();
         let (callers, _) = callers_for(&["parse"], &index, &Broken, &reg, &mut unread);
@@ -1326,7 +1335,9 @@ mod tests {
         let files = vec![("a.rs".to_string(), "fn parse() {}\n".to_string())];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let mut unread = Vec::new();
-        assert!(definitions_for("parse();", &index, &Sealed, &mut unread).is_empty());
+        assert!(definitions_for("parse();", &index, &Sealed, &mut unread)
+            .0
+            .is_empty());
         assert_eq!(unread, vec!["a.rs".to_string()]);
     }
 
@@ -1930,7 +1941,7 @@ mod tests {
             ],
             &[],
         );
-        let defs = definitions_for(
+        let (defs, _) = definitions_for(
             "call `parse` and `only` here",
             &index,
             &src,
@@ -1947,6 +1958,55 @@ mod tests {
     }
 
     #[test]
+    fn homonym_definitions_are_capped_per_name_and_in_total_and_declared() {
+        // [MAGI S6 MS3 loop16, R2 Caspar/Melchior/Balthasar] `definitions_for` was the one layer
+        // with no cap: a batch naming `new` read and built every definition of it, charged them
+        // all, and left no room for documentation and history.
+        use crate::review::test_support::MapSource;
+        let body = "fn new() {}\n";
+        let files: Vec<(String, String)> = (0..40)
+            .map(|i| (format!("f{i:02}.rs"), body.to_string()))
+            .collect();
+        let borrowed: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(p, t)| (p.as_str(), t.as_str()))
+            .collect();
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        let src = MapSource::new(&borrowed, &[]);
+        let (defs, capped) = definitions_for("new();", &index, &src, &mut Vec::new());
+        assert_eq!(defs.len(), MAX_DEFINITIONS_PER_NAME);
+        assert_eq!(capped, ["new"]);
+        // The kept ones are the first by (file, line), whatever the listing order.
+        let mut kept: Vec<&str> = defs.iter().map(|d| d.file.as_str()).collect();
+        let sorted = {
+            let mut s = kept.clone();
+            s.sort_unstable();
+            s
+        };
+        kept.sort_unstable();
+        assert_eq!(kept, sorted);
+        assert_eq!(kept.first().copied(), Some("f00.rs"));
+
+        // Many names, a few definitions each: the total bounds the batch.
+        let many: Vec<(String, String)> = (0..MAX_DEFINITIONS_TOTAL * 2)
+            .map(|i| (format!("g{i:02}.rs"), format!("fn name{i}() {{}}\n")))
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            many.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+        let index = LexicalIndex::build(&many, &LanguageRegistry::new());
+        let src = MapSource::new(&borrowed, &[]);
+        let call: String = (0..MAX_DEFINITIONS_TOTAL * 2)
+            .map(|i| format!("name{i}();\n"))
+            .collect();
+        let (defs, capped) = definitions_for(&call, &index, &src, &mut Vec::new());
+        assert_eq!(defs.len(), MAX_DEFINITIONS_TOTAL);
+        assert!(
+            !capped.is_empty(),
+            "the names cut by the total are declared"
+        );
+    }
+
+    #[test]
     fn definitions_are_found_from_raw_batch_code_without_backticks() {
         // [CP2 MS3 loop 2] The input is the batch's raw code: every identifier counts, quoted or
         // not.
@@ -1954,7 +2014,7 @@ mod tests {
         let files = vec![("a.rs".to_string(), "fn parse() {}\n".to_string())];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let src = MapSource::new(&[("a.rs", "fn parse() {}\n")], &[]);
-        let defs = definitions_for(
+        let (defs, _) = definitions_for(
             "fn caller() {\n    parse();\n    parse();\n}\n",
             &index,
             &src,
@@ -1980,7 +2040,7 @@ mod tests {
         ];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let src = MapSource::new(&[("a.rs", rs), ("c.py", py)], &[]);
-        let defs = definitions_for("s.run(); c.go()", &index, &src, &mut Vec::new());
+        let (defs, _) = definitions_for("s.run(); c.go()", &index, &src, &mut Vec::new());
         let got: Vec<_> = defs.iter().map(|d| (d.label.as_str(), d.lines)).collect();
         assert_eq!(got, vec![("run", Some((4, 4))), ("go", Some((2, 3)))]);
     }
@@ -2082,7 +2142,7 @@ mod tests {
         )];
         let index = LexicalIndex::build(&files, &LanguageRegistry::new());
         let src = MapSource::new(&[("a.rs", "struct Config {\n    n: u32,\n}\n")], &[]);
-        let defs = definitions_for(
+        let (defs, _) = definitions_for(
             "fn f(c: Config) -> u32 {\n    c.n\n}\n",
             &index,
             &src,
