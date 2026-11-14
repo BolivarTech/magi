@@ -155,6 +155,9 @@ pub struct StoreRag<'a> {
     pub embedder_down: AtomicBool,
     /// A documentation read failed once: no later batch searches.
     pub docs_failed: AtomicBool,
+    /// Documentation rows or sources that vanished mid-review were declared once; unlike
+    /// `docs_failed` it leaves the rest of the documentation serving.
+    pub docs_shrunk: AtomicBool,
     /// A history read failed once: no later batch reads it.
     pub history_failed: AtomicBool,
     /// Skipped history rows (they did not decode) were declared once.
@@ -455,7 +458,9 @@ impl StoreRag<'_> {
             Ok((hits, vanished)) => {
                 // MAGI FIX (MS3 §6 loop15): rows deleted since the vectors were loaded (another
                 // process's clean-up) are declared once; the surviving hits still serve.
-                if vanished > 0 && !self.docs_failed.swap(true, Ordering::SeqCst) {
+                // MAGI FIX (MS3 §6 loop16): the loss touched those rows or sources only; the rest
+                // keeps serving (it switched the whole layer off for the review).
+                if vanished > 0 && !self.docs_shrunk.swap(true, Ordering::SeqCst) {
                     tracing::event!(
                         target: LOG_TARGET,
                         tracing::Level::WARN,
@@ -972,6 +977,7 @@ impl RagSource for ReviewRag<'_> {
             docs_unavailable: false,
             embedder_down: AtomicBool::new(false),
             docs_failed: AtomicBool::new(false),
+            docs_shrunk: AtomicBool::new(false),
             history_failed: AtomicBool::new(false),
             corrupt_declared: AtomicBool::new(false),
             doc_sources: BTreeSet::new(),
@@ -1706,6 +1712,7 @@ mod tests {
                 docs_unavailable: false,
                 embedder_down: Default::default(),
                 docs_failed: Default::default(),
+                docs_shrunk: Default::default(),
                 history_failed: Default::default(),
                 corrupt_declared: Default::default(),
                 doc_sources: BTreeSet::new(),
@@ -1813,7 +1820,12 @@ mod tests {
             .expect("indexed");
         let mut rag = f.rag(true);
         rag.doc_sources = BTreeSet::from([src("d.md", "k"), src("cut.md", "k2")]);
-        assert!(rag.search_docs(&f.docs, &[0.5, 0.5, 0.5]).is_err());
+        // [loop16, R1 Caspar] ... and it loses that source only: the other serves, the loss is
+        // counted for the review to declare.
+        let (hits, vanished) = rag
+            .search_docs(&f.docs, &[0.5, 0.5, 0.5])
+            .expect("the indexed source serves");
+        assert_eq!((hits.len(), vanished), (1, 1));
     }
 
     /// A git for which every reviewed commit is on `HEAD`'s line (the fixture's history is).

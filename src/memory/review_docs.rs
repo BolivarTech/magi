@@ -41,7 +41,8 @@ use crate::memory::error::MemoryError;
 use crate::memory::index::cosine;
 use cryptovault::CryptoVault;
 use magi_rs::review::docs::{
-    chunk_hash, doc_index_id, DocChunk, DocSource, MAX_DOC_CHUNK_BYTES, WORKTREE_KEY_PREFIX,
+    chunk_hash, doc_index_id, DocChunk, DocSource, MAX_DOC_CHUNKS, MAX_DOC_CHUNK_BYTES,
+    WORKTREE_KEY_PREFIX,
 };
 use magi_rs::review::secrets::{display_path, leaks_secret};
 use magi_rs::vault::MaskedDek;
@@ -585,8 +586,17 @@ impl ReviewDocStore {
     ///
     /// With rows of another identity stored, a non-empty `allowed` is an error, never an empty
     /// answer (another identity's rebuild may have wiped this review's rows); the review declares
-    /// its documentation unavailable; so is an allowed source no longer indexed
-    /// (`vanished_source_is_an_error`). One snapshot. O(stored sources) plus O(r) decryptions.
+    /// its documentation unavailable. An allowed source no longer indexed loses only itself: it
+    /// is counted in [`DocVectors::vanished_sources`] and the rest serve
+    /// (`a_vanished_source_degrades_only_itself`). One snapshot. O(stored sources) plus O(r)
+    /// decryptions.
+    ///
+    /// Peak, declared: at most [`MAX_DOC_CHUNKS`] rows (more is an error, `max_rows`), each a raw
+    /// vector blob of about 12 KB at 768 dimensions (JSON floats, sealed), so about 240 MB of
+    /// ciphertext at the bound, held together before they are decrypted; the connection lock is
+    /// held for that raw read only. The decrypted vectors are about 3 KB per row. `encode_rows`
+    /// declares its own peak the same way; the two do not overlap in one review (a review
+    /// indexes, then loads).
     /// So the caller builds `allowed` from what it indexed: after `bounded`, without the sources
     /// `netted_chunks` dropped and those [`ReindexStats::refused`] names (`allowed_excludes_refused`).
     ///
@@ -600,7 +610,7 @@ impl ReviewDocStore {
         dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<DocVectors, MemoryError> {
-        self.load_vectors_within(dim, allowed, usize::MAX)
+        self.load_vectors_within(dim, allowed, MAX_DOC_CHUNKS)
     }
 
     /// [`Self::load_vectors`] reading at most `max_rows` rows.
@@ -612,22 +622,23 @@ impl ReviewDocStore {
         &self,
         dim: usize,
         allowed: &BTreeSet<DocSource>,
-        _max_rows: usize,
+        max_rows: usize,
     ) -> Result<DocVectors, MemoryError> {
-        let candidates = {
+        let (candidates, vanished_sources) = {
             let mut c = self.locked_conn();
             let snapshot = c.transaction().map_err(db_err)?;
             if !allowed.is_empty() && self.has_foreign_rows(&snapshot)? {
                 return Err(identity_conflict());
             }
             // MAGI FIX (MS3 §6 loop10): a source deleted after its reindex loaded as none.
+            // MAGI FIX (MS3 §6 loop16): it now loses that source only, counted; the rest serve.
             let indexed = self.indexed_sources(&snapshot)?;
-            if !allowed.iter().all(|s| indexed.contains(s)) {
-                return Err(MemoryError::Storage(
-                    "a documentation source of this review is no longer indexed".to_string(),
-                ));
-            }
-            self.allowed_vectors(&snapshot, allowed)?
+            let (present, gone): (BTreeSet<DocSource>, BTreeSet<DocSource>) =
+                allowed.iter().cloned().partition(|s| indexed.contains(s));
+            (
+                self.allowed_vectors(&snapshot, &present, max_rows)?,
+                gone.len(),
+            )
         };
         let mut rows = Vec::with_capacity(candidates.len());
         for (key, hash, blob, stored_dim) in candidates {
@@ -645,7 +656,7 @@ impl ReviewDocStore {
         Ok(DocVectors {
             dim,
             rows,
-            vanished_sources: 0,
+            vanished_sources,
         })
     }
 
@@ -749,6 +760,7 @@ impl ReviewDocStore {
         &self,
         c: &Connection,
         allowed: &BTreeSet<DocSource>,
+        max_rows: usize,
     ) -> Result<Vec<RawVector>, MemoryError> {
         let pairs: Vec<&DocSource> = allowed.iter().collect();
         let mut out = Vec::new();
@@ -770,11 +782,18 @@ impl ReviewDocStore {
                 })
                 .map_err(db_err)?;
             for row in rows {
+                if out.len() >= max_rows {
+                    return Err(MemoryError::Storage(format!(
+                        "the documentation of this review holds more than {max_rows} rows: \
+                         left unread"
+                    )));
+                }
                 out.push(row.map_err(db_err)?);
             }
         }
         Ok(out)
     }
+
     /// The raw `(path, section blob, text blob)` of each `(key, chunk hash)` in `wanted` that
     /// still exists, read under one lock and decrypted by the caller off it (R-V08). A pair whose
     /// row was deleted is simply absent. No `index_id` filter, and none is needed: `chunk_hash`
@@ -947,8 +966,31 @@ fn refuse_inconsistent_chunks(sources: &[&(DocSource, Vec<DocChunk>)]) -> Result
     Ok(())
 }
 
-/// Embeds `chunks` (document prefix applied) in requests of at most [`EMBED_BATCH_ITEMS`]
-/// texts, returning one vector per chunk, in order. No lock is held by this function.
+/// `chunks` cut into consecutive requests that close at [`EMBED_BATCH_ITEMS`] texts or at
+/// [`EMBED_BATCH_BYTES`] of text (each text counts `prefix_len` more bytes), whichever trips
+/// first; a chunk alone over the byte bound still forms its own request. O(chunks).
+// MAGI FIX (MS3 §6 loop16): the items bound alone allowed a 512 KiB body (R1 Melchior).
+fn embed_batches<'a, 'b>(chunks: &'a [&'b DocChunk], prefix_len: usize) -> Vec<&'a [&'b DocChunk]> {
+    let mut batches = Vec::new();
+    let (mut start, mut bytes) = (0usize, 0usize);
+    for (i, chunk) in chunks.iter().enumerate() {
+        let size = prefix_len + chunk.text.len();
+        let full =
+            i > start && (i - start >= EMBED_BATCH_ITEMS || bytes + size > EMBED_BATCH_BYTES);
+        if full {
+            batches.push(&chunks[start..i]);
+            (start, bytes) = (i, 0);
+        }
+        bytes += size;
+    }
+    if start < chunks.len() {
+        batches.push(&chunks[start..]);
+    }
+    batches
+}
+
+/// Embeds `chunks` (document prefix applied) in requests bounded by [`embed_batches`],
+/// returning one vector per chunk, in order. No lock is held by this function.
 ///
 /// # Errors
 /// [`MemoryError::Embedding`] if the embedder fails; [`MemoryError::Storage`] if it answers
@@ -961,7 +1003,7 @@ async fn embed_all(
     let dim = embedder.dim();
     let prefix = embedder.document_prefix();
     let mut out = Vec::with_capacity(chunks.len());
-    for batch in chunks.chunks(EMBED_BATCH_ITEMS) {
+    for batch in embed_batches(chunks, prefix.len()) {
         let texts: Vec<String> = batch
             .iter()
             .map(|c| format!("{prefix}{}", c.text))
@@ -1816,7 +1858,10 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("rows")
             .join(" | ");
-        assert!(plan.contains("code_review_docs_by_chunk"), "{plan}");
+        assert!(
+            plan.contains("code_review_docs_by_chunk (chunk_hash=?"),
+            "{plan}"
+        );
     }
 
     #[tokio::test]
