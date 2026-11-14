@@ -393,7 +393,8 @@ class LoopSixteenRelayTests(unittest.TestCase):
 
     def test_the_measured_review_has_one_reviews_allowance_whatever_setup_spent(self) -> None:
         for run_id in ("R21", "R22"):
-            definition = dataclasses.replace(runs.DEFINITIONS[run_id], records_requests=False)
+            definition = dataclasses.replace(runs.DEFINITIONS[run_id], records_requests=False,
+                                             unreachable_embedder=False)
             self.assertEqual(runs._HISTORY_SETUP_TIMEOUT_S, runs.measured_allowance(definition), run_id)
             executor = runs.RunExecutor(None, None, None)
             seen = []
@@ -425,6 +426,7 @@ class LoopSixteenRelayTests(unittest.TestCase):
         doc = runs.REVIEW_PARENT_DOC.decode()
         source = pathlib.Path(runs.__file__).read_text(encoding="utf-8").replace("\r", "")
         constants = source.split("#: The doc comment of R18's file", 1)[1].split("REVIEW_DOCREV_FILE", 1)[0]
+        constants = " ".join(constants.replace("#:", " ").split())
         self.assertIn("old side", constants)
         self.assertNotIn("no request may carry either", constants)
         self.assertTrue(doc)

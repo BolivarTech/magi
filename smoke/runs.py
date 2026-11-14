@@ -2265,7 +2265,11 @@ REVIEW_MASKED_DOC = b"Returns the token of the toy service."
 #: R20 (S56, RV21, RV-S36) reviews ``HEAD`` of a two-commit history whose file's
 #: doc comment says :data:`REVIEW_COMMITTED_DOC` at ``HEAD`` and
 #: :data:`REVIEW_PARENT_DOC` at its parent, while the working tree's copy, left
-#: dirty, says :data:`REVIEW_DIRTY_DOC`: no request may carry either of the last two.
+#: dirty, says :data:`REVIEW_DIRTY_DOC`: no embedded documentation chunk may carry the
+#: parent's doc comment and no request the dirty one. The parent's doc comment IS the old
+#: side of the replaced hunk under review, which RV21 sends to the trio by design (the
+#: removed lines of a diff); it is forbidden as a documentation chunk only (S56 reads
+#: embedding requests alone for it).
 #: MAGI FIX (MS3 §6 loop11): both commits wrote one doc comment, so HEAD^'s passed.
 REVIEW_DOCREV_FILE = "docrev/answer.rs"
 REVIEW_COMMITTED_DOC = b"Returns the committed answer."
@@ -2294,7 +2298,9 @@ _HISTORY_BUGGY = (b"/// Returns the mean of the values.\n"
                   b"pub fn mean(v: &[i32]) -> i32 {\n"
                   b"    v.iter().sum::<i32>() / v.len() as i32\n"
                   b"}\n")
-_HISTORY_FIXED = (b"/// Returns the mean of the values, 0 for none, without overflow.\n"
+#: How many lines the seeded buggy file has: a finding must land inside it to become history.
+REVIEW_HISTORY_BUGGY_LINES = _HISTORY_BUGGY.count(b"\n")
+_HISTORY_FIXED =(b"/// Returns the mean of the values, 0 for none, without overflow.\n"
                   b"pub fn mean(values: &[i32]) -> i32 {\n"
                   b"    if values.is_empty() {\n"
                   b"        return 0;\n"
@@ -3267,6 +3273,18 @@ class RequestBodies:
         with self._lock:
             return tuple(self._headers)
 
+    def snapshot(self) -> tuple[tuple[tuple[str, bytes], ...], tuple[bytes, ...], bool]:
+        """The record as one locked read: ``(bodies, headers, complete)``.
+
+        MAGI FIX (MS3 §6 loop16, R7a1): three separate reads let a handler thread
+        losing the record between them keep the bodies and drop the headers.
+
+        Returns:
+            tuple: The kept ``(path, body)`` pairs, their header lines and completeness.
+        """
+        with self._lock:
+            return tuple(self._recorded), tuple(self._headers), not self._lost
+
     @property
     def complete(self) -> bool:
         """bool: Whether every request that reached the relay was kept whole."""
@@ -3464,13 +3482,20 @@ def _bodies_ending(request_bodies, suffixes) -> tuple:
     """The bodies whose target, query dropped, ends in one of *suffixes*.
 
     Args:
-        request_bodies: ``(target, body)`` pairs, or ``None`` for no record.
+        request_bodies: ``(target, body)`` pairs.
         suffixes: The path endings to keep.
 
     Returns:
         tuple: The matching bodies, in order.
+
+    Raises:
+        HarnessError: When *request_bodies* is ``None`` (no complete record).
     """
-    return tuple(b for t, b in request_bodies or ()
+    if request_bodies is None:
+        # MAGI FIX (MS3 §6 loop16, R7a1): no record is not "nothing was sent".
+        raise HarnessError("the relay's record is missing or incomplete; a scenario must check "
+                           "for it before reading the trio's or the gate's bodies")
+    return tuple(b for t, b in request_bodies
                  if t.split("?", 1)[0].endswith(suffixes))
 
 
@@ -3495,6 +3520,11 @@ def relay_upstream(config_path, environ=None) -> str:
     root = document.get(_ENDPOINT_KEY)
     if not isinstance(root, str) or not root.strip():
         raise HarnessError("%s has no root base_url for the relay to stand in for" % config_path)
+    parts = urllib.parse.urlsplit(root)
+    if parts.scheme not in ("http", "https") or not parts.hostname or "@" in parts.netloc:
+        # MAGI FIX (MS3 §6 loop16, R7a1): the relay cannot forward it: the environment's limit.
+        raise RelayUnavailable("%s names an endpoint the relay cannot stand in for (it needs "
+                               "plain http(s), no credentials)" % config_path)
     others = {value for path, value in _config_leaves(document)
               if path[-1] == _ENDPOINT_KEY and len(path) > 1}
     override = (environ.get(_BACKEND_URL_VARIABLE) or "").strip()
@@ -3536,6 +3566,28 @@ def relay_staging_problems(config_path) -> list:
         return ["could not stage %s: %s" % (config_path, exc)]
 
 
+def measured_allowance(definition: RunDefinition) -> int:
+    """The wall clock the measured invocation of *definition* gets, in seconds.
+
+    MAGI FIX (MS3 §6 loop16, R7a1): the run's clock was one pool the setup reviews drew on, so
+    two slow seeding reviews left the measured review a second. It is now one review's
+    allowance: the run's ``timeout_s`` minus its setup invocations' own, so no setup overrun
+    (each step is capped by its own timeout) can take it.
+
+    Args:
+        definition: The run.
+
+    Returns:
+        int: ``timeout_s`` less the setup invocations' timeouts, at least 1.
+
+    Example:
+        >>> measured_allowance(DEFINITIONS["R21"]) == _HISTORY_SETUP_TIMEOUT_S
+        True
+    """
+    spent = sum(step.timeout_s for step in definition.setup if isinstance(step, Invocation))
+    return max(1, definition.timeout_s - spent)
+
+
 def commit_files(workspace, commit: Commit) -> None:
     """Write *commit*'s files under *workspace* and commit exactly them.
 
@@ -3560,7 +3612,9 @@ def commit_files(workspace, commit: Commit) -> None:
             target.write_bytes(body)
         identity = ("-c", "user.name=smoke", "-c", "user.email=smoke@example.invalid",
                     "-c", "commit.gpgsign=false")
-        for args in (("add", "--", *paths), identity + ("commit", "-q", "-m", commit.message)):
+        # MAGI FIX (MS3 §6 loop16, R7a1): ``:(literal)`` keeps a glob character a plain one.
+        literal = [":(literal)" + path for path in paths]
+        for args in (("add", "--", *literal), identity + ("commit", "-q", "-m", commit.message)):
             subprocess.run(git_command(root, *args), check=True, env=git_env(),
                            capture_output=True, timeout=GIT_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -4110,7 +4164,11 @@ class RunExecutor:
         self._setup_outputs = []
         self._setup_expired = None
         self._unrunnable_cause = ""
-        self._clock_end = started + definition.timeout_s
+        # MAGI FIX (MS3 §6 loop16, R7a1): the setup shares the clock minus the measured review's
+        # own allowance, which no setup overrun can take.
+        setup_clock = (definition.timeout_s - measured_allowance(definition) if definition.setup
+                       else definition.timeout_s)
+        self._clock_end = started + setup_clock
         workspace = self._prepare_review_workspace(definition)
         # A second listing, after the run's files are written and before the
         # product starts: what the product's own enumeration will see.
@@ -4129,10 +4187,9 @@ class RunExecutor:
                     output=ProductOutput(stdout=b"", stderr=b"", exit_code=0, command=()),
                     duration_s=time.monotonic() - started, timed_out=False, planted=definition.planted,
                     not_runnable=self._unrunnable_cause)
-            if definition.setup and self._setup_expired is None and self._clock_end is not None:
-                # MAGI FIX (MS3 §6 loop13): the measured review gets what the setup left of the clock.
-                runnable = dataclasses.replace(
-                    runnable, timeout_s=max(1, int(self._clock_end - time.monotonic())))
+            if definition.setup and self._setup_expired is None:
+                # MAGI FIX (MS3 §6 loop16, R7a1): one review's allowance, never what the setup left.
+                runnable = dataclasses.replace(runnable, timeout_s=measured_allowance(definition))
             try:
                 if self._setup_expired is not None:
                     # MAGI FIX (MS3 §6 loop9): a setup review that hung is the run's hang.
@@ -4155,6 +4212,8 @@ class RunExecutor:
                 timed_out = True
         unreadable = []
         review_log = self._capture_review_log(definition, unreadable)
+        # MAGI FIX (MS3 §6 loop16, R7a1): bodies, headers and completeness from one locked read.
+        snapshot = recorded[0].snapshot() if recorded else None
         return RunResult(
             run_id=definition.run_id,
             output=output,
@@ -4168,10 +4227,8 @@ class RunExecutor:
             protected_visible=protected,
             model_requests=tuple(contacted),
             backend_requests=sum(self._reached) if self._reached else None,
-            request_bodies=(recorded[0].recorded if recorded and recorded[0].complete
-                            else None),
-            request_headers=(recorded[0].headers if recorded and recorded[0].complete
-                             else None),
+            request_bodies=snapshot[0] if snapshot and snapshot[2] else None,
+            request_headers=snapshot[1] if snapshot and snapshot[2] else None,
             setup_outputs=tuple(self._setup_outputs),
         )
 
@@ -4207,6 +4264,11 @@ class RunExecutor:
         if workspace is None:
             raise HarnessError("run %s records its requests but has no review workspace"
                                % definition.run_id)
+        if self._unrunnable_cause:
+            # MAGI FIX (MS3 §6 loop16, R7a1): the dry run already refused this configuration; the
+            # live checks would raise the same problems as a harness error (exit 3).
+            yield None
+            return
         config = workspace.joinpath(*CONFIG_PATH_PARTS)
         try:
             original = config.read_bytes()

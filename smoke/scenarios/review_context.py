@@ -419,6 +419,9 @@ def validated_history_reaches_the_trio(run):
     located = [f for f in findings or () if isinstance(f, dict)
                and isinstance(f.get("line"), int) and not isinstance(f.get("line"), bool)
                and isinstance(f.get("file"), str)
+               # MAGI FIX (MS3 §6 loop16, R7a1): a line outside the seeded file is a model
+               # answer the fixture cannot turn into history: no precondition, CANNOT_TEST.
+               and 1 <= f["line"] <= runs.REVIEW_HISTORY_BUGGY_LINES
                and f["file"].replace("\\", "/") == runs.REVIEW_HISTORY_FILE]
     if not located:
         yield Finding(assertion=texts[1], outcome=Outcome.CANNOT_TEST, run_id="R21",
