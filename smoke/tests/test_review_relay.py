@@ -421,6 +421,31 @@ class LoopSixteenRelayTests(unittest.TestCase):
             r = _with(_result("R21", 0, {}), request_bodies=(), setup_outputs=(first, first))
             self.assertEqual([P, C], _judged("S57", r, rc.S57_ASSERTIONS), line)
 
+    def test_s56_a_missing_header_record_is_cannot_test_for_its_header_assertion(self) -> None:
+        # MAGI FIX (MS3 §6 loop16, R7a2): `request_headers or ()` read a missing record as no header.
+        chunk = ("/v1/embeddings", json.dumps({"input": [runs.REVIEW_COMMITTED_DOC.decode()]}).encode())
+        r = _with(_result("R20", 0, {}), request_bodies=(chunk, _S56_TRIO), request_headers=None)
+        self.assertEqual([P, P, C], _judged("S56", r, rc.S56_ASSERTIONS))
+
+    def test_s56_names_what_its_third_assertion_checks(self) -> None:
+        self.assertIn("embedded chunk", rc.S56_ASSERTIONS[2])
+        self.assertNotIn("embedding request carries the parent", rc.S56_ASSERTIONS[2])
+
+    def test_the_fixture_needles_are_disjoint(self) -> None:
+        needles = (runs.REVIEW_COMMITTED_DOC, runs.REVIEW_PARENT_DOC, runs.REVIEW_DIRTY_DOC,
+                   runs.REVIEW_MASKED_DOC, rc._ANSWER_CODE.encode())
+        for first in needles:
+            for second in needles:
+                if first is not second:
+                    self.assertNotIn(first, second)
+
+    def test_the_readme_and_docstring_declare_what_the_scenarios_leave_open(self) -> None:
+        root = pathlib.Path(runs.__file__).parent
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        self.assertIn("RV-S37", readme)
+        self.assertIn("RV-S39", readme)
+        self.assertIn("**S58**", (root / "scenarios" / "review_context.py").read_text(encoding="utf-8"))
+
     def test_the_forbidden_docs_are_forbidden_as_chunks_not_as_the_reviewed_diff(self) -> None:
         # RV21 sends the old side of a replaced hunk; the fixture says so instead of forbidding it.
         doc = runs.REVIEW_PARENT_DOC.decode()
