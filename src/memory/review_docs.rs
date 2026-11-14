@@ -1505,6 +1505,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_request_byte_bound_counts_the_serialized_body_not_the_raw_text() {
+        // [MAGI S6 loop 17, R1] JSON escaping can double a text: the bound is on what is sent.
+        let quotes = "\"".repeat(MAX_DOC_CHUNK_BYTES);
+        let chunks: Vec<DocChunk> = (0..6)
+            .map(|i| chunk("d.md", &format!("S{i}"), &quotes))
+            .collect();
+        let refs: Vec<&DocChunk> = chunks.iter().collect();
+        for batch in embed_batches(&refs, 0) {
+            let body: usize = batch
+                .iter()
+                .map(|c| serde_json::to_string(&c.text).expect("json").len())
+                .sum();
+            assert!(
+                batch.len() == 1 || body <= EMBED_BATCH_BYTES,
+                "a request of {} texts serializes to {body} bytes",
+                batch.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_holding_a_private_key_block_is_refused_whole() {
+        // [MAGI S6 loop 17, R1] `without_secret_sources` asks the one egress predicate, which
+        // includes the multi-line key-block check.
+        let block = format!(
+            "{}\nQUJDRA==\n{}\n",
+            concat!("-----", "BEGIN RSA ", "PRIVATE KEY-----"),
+            concat!("-----", "END RSA ", "PRIVATE KEY-----")
+        );
+        let sources = [
+            (src("a.md", "k1"), vec![chunk("a.md", "A", &block)]),
+            (src("b.md", "k2"), vec![chunk("b.md", "B", "fine")]),
+        ];
+        let (safe, refused) = without_secret_sources(&sources);
+        assert_eq!(safe.len(), 1);
+        assert_eq!(refused, vec!["a.md".to_string()]);
+    }
+
     /// The lookup tag the store keeps for `value` in `domain`.
     fn tag_of(store: &ReviewDocStore, domain: TagDomain, value: &str) -> String {
         store.tags(domain, [value]).expect("tag").remove(0)
