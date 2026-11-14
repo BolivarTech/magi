@@ -88,6 +88,12 @@ pub struct ReindexStats {
     /// The index held rows of another identity (model, dimension or chunker) and was wiped.
     pub rebuilt: bool,
     /// Sources left out for a secret pattern, by [`display_path`]: never embedded or written.
+    ///
+    /// Names, not identities: the caller (`index_batch` in `review_rag`) removes from its allowed set every source whose `display_path` is listed,
+    /// so two sources that display alike (a secret-shaped path shows as
+    /// `<path redacted: pattern>`, a control character as its escape) are both removed, which
+    /// only costs documentation (the safe direction). A refused source left in the allowed set
+    /// by mistake loses only itself at load time ([`DocVectors::vanished_sources`]).
     pub refused: Vec<String>,
 }
 

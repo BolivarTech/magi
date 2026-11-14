@@ -1199,6 +1199,13 @@ documentation index is cleaned after each review (see "History" under the code r
 in a repository with more than 64 local branches and tags, where that clean-up is skipped and
 the index keeps every version it ever indexed until you purge it.
 
+Two more properties of the documentation index. Reviewing a revision that no branch or tag
+points at (an old commit, a detached head) embeds that revision's documentation once, and the
+clean-up drops it afterwards, so reviewing it again embeds it again: a cost in time, never in
+correctness. And the source paths and content hashes of the index are stored in clear (the
+chunk text, section names and vectors are encrypted), because they are what the index is looked
+up by; a path shaped like a secret is left out of the index instead of being stored.
+
 ---
 
 ## How It Works

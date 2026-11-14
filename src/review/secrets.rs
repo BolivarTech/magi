@@ -1437,8 +1437,8 @@ pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
 }
 
 /// Whether `text`, already masked, still holds a secret to the eye of the detector or once its
-/// control and format characters are taken out: [`find_secret`] or
-/// [`hides_secret_behind_hidden_chars`]. The one question every egress that cannot hold a side
+/// control and format characters are taken out: [`find_secret`] or `hides_secret_behind_hidden_chars`.
+/// The one question every egress that cannot hold a side
 /// raw asks (documentation chunks before their embedding). O(n · p).
 ///
 /// # Arguments

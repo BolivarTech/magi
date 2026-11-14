@@ -63,8 +63,11 @@ pub struct DocSource {
 pub const DOC_SOURCES: &[&str] = &["README.md", "CLAUDE.md", "docs/", "adr/"];
 
 /// Bound on one chunk's text: 8 KiB, about 2 048 tokens at four bytes per token, the `num_ctx`
-/// Ollama gives an embedding model by default, so a long section never overflows
-/// `nomic-embed-text`.
+/// Ollama gives an embedding model by default. A margin, not a guarantee: four bytes per token
+/// is the unmeasured heuristic of the batch estimator (PM-S-13, A6), and at three bytes per
+/// token a maximal chunk is about 2 700 tokens, past that window, where the backend truncates
+/// the tail of the text without a signal. The cost is retrieval quality on the tail of a very
+/// long section, never a leak or a wrong chunk served.
 pub const MAX_DOC_CHUNK_BYTES: usize = 8_192;
 
 /// Bound on one chunk's section, its part number included. Every part of a split section carries
@@ -74,6 +77,10 @@ pub const MAX_DOC_SECTION_BYTES: usize = 512;
 
 /// Room kept under [`MAX_DOC_SECTION_BYTES`] for a part number (` (n)`, up to 13 digits).
 const SECTION_PART_ROOM: usize = 16;
+
+// `bounded_section` cuts at `MAX_DOC_SECTION_BYTES - SECTION_PART_ROOM - len(SECTION_CUT_MARK)`:
+// the bound must leave a positive cut.
+const _: () = assert!(MAX_DOC_SECTION_BYTES > SECTION_PART_ROOM + SECTION_CUT_MARK.len());
 
 /// What ends a section cut to its bound.
 const SECTION_CUT_MARK: &str = "…";
@@ -165,6 +172,9 @@ const PY_TRIPLE_QUOTES: [&str; 2] = ["\"\"\"", "'''"];
 /// Whether `path` is a Markdown documentation source by path: `README.md` or `CLAUDE.md` at the
 /// root, or a `.md` under `docs/` or `adr/`. Other files there (`.rst`, `.txt`) are not indexed,
 /// a declared limit (`docs_txt_is_not_a_doc_source`).
+///
+/// `path` is as git prints it (`/` separators on every platform); a backslash is part of a file
+/// name, never a separator (`a_backslash_path_is_not_a_doc_source_on_any_platform`).
 ///
 /// O(`DOC_SOURCES`) per call.
 ///
@@ -2276,6 +2286,17 @@ mod tests {
             (4, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
             "the secret patterns changed: bump DOC_INDEX_VERSION and update this list"
         );
+    }
+
+    #[test]
+    fn a_backslash_path_is_not_a_doc_source_on_any_platform() {
+        // [MAGI S6 MS3 loop16, R1 Caspar] Doc paths come from git (`ls-files`, `ls-tree`), which
+        // prints `/` on every platform, so a working-tree path never carries a backslash; one
+        // that did would be a file NAME on Unix and must not pass as `docs/`. Pinned so that
+        // Windows-only CI and a Linux build agree.
+        assert!(!is_doc_source("docs\\guide.md"));
+        assert!(!is_doc_source("adr\\0001.md"));
+        assert!(is_doc_source("docs/guide.md"));
     }
 
     #[test]
