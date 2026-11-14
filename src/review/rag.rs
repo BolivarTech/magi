@@ -544,8 +544,10 @@ impl FileUnits {
 
 /// The definitions of the names the batch code uses, one item per definition, at most
 /// [`MAX_DEFINITIONS_PER_NAME`] per name (the first by `(file, line)`) and
-/// [`MAX_DEFINITIONS_TOTAL`] for the batch; each name cut by either is returned for the caller
-/// to declare.
+/// [`MAX_DEFINITIONS_TOTAL`] for the batch. The two cuts are returned apart, for the caller to
+/// declare: each name cut by the per-name cap, and once whether the total was reached with a
+/// later name still to serve (the scan stops at that name, so the cost of a spent total is one
+/// flag, never one entry per later name).
 ///
 /// The input is the batch's raw code: every identifier counts, quoted or not, in the order it
 /// first appears. Accepted over-retrieval (declared): a name in a comment or a string fetches its
@@ -566,8 +568,8 @@ impl FileUnits {
 ///
 /// # Returns
 ///
-/// The `Definition` items; a file that is gone or cannot be read gives none. And the names whose
-/// definitions a cap cut, for the caller to declare.
+/// The `Definition` items; a file that is gone or cannot be read gives none. And the
+/// [`RetrievalCuts`], for the caller to declare.
 pub fn definitions_for(
     text: &str,
     index: &LexicalIndex,
@@ -577,22 +579,34 @@ pub fn definitions_for(
     let mut names = HashSet::new();
     let mut files: HashMap<&str, Option<String>> = HashMap::new();
     let mut items = Vec::new();
-    let mut capped = Vec::new();
+    let mut cuts = RetrievalCuts::default();
     for name in identifier_runs(text) {
         if !names.insert(name) {
             continue;
         }
         let places = index.definitions(name);
+        if places.is_empty() {
+            continue;
+        }
+        // MAGI FIX (MS3 §6 loop17, R2): a name met with the total spent was declared as over
+        // the per-name cap, one entry per later name; the total is its own cause, said once,
+        // and the scan stops there.
+        let room = MAX_DEFINITIONS_TOTAL.saturating_sub(items.len());
+        if room == 0 {
+            cuts.total = true;
+            break;
+        }
         // MAGI FIX (MS3 §6 loop16): the one retrieval layer without a cap (R2, all three
         // mages): the first MAX_DEFINITIONS_PER_NAME by `(file, line)`, whatever the listing
         // order, and at most MAX_DEFINITIONS_TOTAL for the batch; a cut name is declared.
         let mut ordered: Vec<_> = places.iter().collect();
         ordered.sort_unstable();
-        let room = MAX_DEFINITIONS_TOTAL.saturating_sub(items.len());
-        let take = ordered.len().min(MAX_DEFINITIONS_PER_NAME).min(room);
-        if take < ordered.len() {
-            capped.push(name.to_string());
+        let own = ordered.len().min(MAX_DEFINITIONS_PER_NAME);
+        let take = own.min(room);
+        if own < ordered.len() {
+            cuts.per_name.push(name.to_string());
         }
+        cuts.total |= take < own;
         for (file, first, last) in ordered.into_iter().take(take) {
             if !files.contains_key(file.as_str()) {
                 files.insert(file, read_or_note(sources, file, unread));
@@ -611,13 +625,7 @@ pub fn definitions_for(
             });
         }
     }
-    (
-        items,
-        RetrievalCuts {
-            per_name: capped,
-            total: false,
-        },
-    )
+    (items, cuts)
 }
 
 /// The units that name any of `names` (the changed units), one item per `(file, unit)`, never
