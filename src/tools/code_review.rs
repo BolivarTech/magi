@@ -316,7 +316,9 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
 /// the async runtime.
 /// The work gets its bound: [`finish_after_report`] passes the smaller of
 /// [`POST_REPORT_LIMIT_SECS`] and what is left of the caller's run.
-pub(crate) type PostReport = Box<dyn FnOnce(Duration) -> Option<String> + Send>;
+/// It also gets the calling run's cancellation, checked between its steps: a started blocking
+/// task cannot be cancelled from outside, so the work stops itself.
+pub(crate) type PostReport = Box<dyn FnOnce(Duration, CancellationToken) -> Option<String> + Send>;
 
 /// What the tool's result says when the run had no time left for the post-report work. True on
 /// every surface: a long-lived one (the TUI) runs it after its next review, a one-shot process
@@ -378,7 +380,8 @@ pub(crate) async fn finish_after_report(
     // left; it is the smaller of the two (`post_report_bound_is_min`).
     let full = Duration::from_secs(POST_REPORT_LIMIT_SECS);
     let bound = limit.map_or(full, |l| l.min(full));
-    let task = tokio::task::spawn_blocking(move || work(bound));
+    let token = cancel.cloned().unwrap_or_default();
+    let task = tokio::task::spawn_blocking(move || work(bound, token));
     let bounded = async {
         match limit {
             Some(limit) => tokio::time::timeout(limit, task).await.ok(),
@@ -1965,10 +1968,10 @@ impl CodeReviewRunner for ProductionReviewRunner {
             return None;
         }
         let workspace = self.workspace.clone();
-        Some(Box::new(move |bound| {
+        Some(Box::new(move |bound, cancel| {
             let git = ScrubbedGit::new(workspace);
             let deadline = std::time::Instant::now() + bound;
-            run_follow_ups(&memory, &git, follows, deadline)
+            run_follow_ups(&memory, &git, follows, deadline, &cancel)
         }))
     }
 }
@@ -1984,10 +1987,11 @@ fn run_follow_ups(
     git: &dyn GitCommand,
     follows: Vec<FollowUp>,
     deadline: std::time::Instant,
+    cancel: &CancellationToken,
 ) -> Option<String> {
     let mut warnings: Vec<String> = Vec::new();
     for follow in follows {
-        warnings.extend(follow_up_work_until(memory, git, follow, Some(deadline)));
+        warnings.extend(follow_up_steps(memory, git, follow, Some(deadline), cancel));
     }
     (!warnings.is_empty()).then(|| warnings.join("\n"))
 }
@@ -2027,16 +2031,47 @@ fn follow_up_work(memory: &ReviewMemory, git: &dyn GitCommand, follow: FollowUp)
 /// index is derived and the next review cleans it again, so under a tight bound the clean-up is
 /// what yields; [`POST_REPORT_LIMIT_SECS`] is twice the sub-budget, so it still gets as long.
 // MAGI FIX (MS3 §6 loop6): the detached sequence had no total bound (R5 Caspar).
+#[cfg(test)]
 fn follow_up_work_until(
     memory: &ReviewMemory,
     git: &dyn GitCommand,
     follow: FollowUp,
     deadline: Option<std::time::Instant>,
 ) -> Option<String> {
+    follow_up_steps(memory, git, follow, deadline, &CancellationToken::new())
+}
+
+/// Seconds of the post-report bound kept for the index clean-up when a history is recorded first.
+const CLEANUP_RESERVE_SECS: u64 = 10;
+
+/// The history budget of one follow-up: [`reclassify_budget`] under `deadline`, nothing once the
+/// run was cancelled.
+fn history_budget(
+    deadline: Option<std::time::Instant>,
+    _cleanup_follows: bool,
+    _cancel: &CancellationToken,
+) -> Duration {
+    reclassify_budget(deadline)
+}
+
+/// Whether the derived work (the index clean-up) must not start: the bound passed or the run was
+/// cancelled.
+fn post_report_stopped(deadline: Option<std::time::Instant>, _cancel: &CancellationToken) -> bool {
+    past(deadline)
+}
+
+/// [`follow_up_work_until`] that also ends at the run's `cancel`.
+fn follow_up_steps(
+    memory: &ReviewMemory,
+    git: &dyn GitCommand,
+    follow: FollowUp,
+    deadline: Option<std::time::Instant>,
+    cancel: &CancellationToken,
+) -> Option<String> {
     let mut warning = None;
     if let Some(rev) = &follow.rev {
         // MAGI FIX (MS3 §6 loop12): the reclassification yields to the deadline too.
-        let budget = reclassify_budget(deadline);
+        let budget = history_budget(deadline, follow.docs.is_some(), cancel);
         match record_history(memory, git, rev, &follow.findings, budget) {
             Ok(stats) => tracing::event!(
                 target: REVIEW_LOG_TARGET,
@@ -2057,7 +2092,7 @@ fn follow_up_work_until(
             }
         }
     }
-    if follow.docs.is_some() && past(deadline) {
+    if follow.docs.is_some() && post_report_stopped(deadline, cancel) {
         tracing::event!(
             target: REVIEW_LOG_TARGET,
             tracing::Level::WARN,
@@ -2137,12 +2172,20 @@ fn record_history(
     if !FULL_SHA_LENGTHS.contains(&sha.len()) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(NOT_A_FULL_SHA.to_string());
     }
+    let budget = reclassification_budget(git, sha, budget);
+    let budget = reclassification_budget(git, sha, budget);
     let entries = entries_from_review(findings, sha);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     record_review(memory.history(), &entries, HISTORY_HEAD, git, now, budget)
         .map_err(|e| egress_text(&e.to_string()))
+}
+
+/// The reclassification budget for a review of `sha`: `budget`, or nothing when `sha` is not an
+/// ancestor of the comparison head.
+fn reclassification_budget(_git: &dyn GitCommand, _sha: &str, budget: Duration) -> Duration {
+    budget
 }
 
 /// Whether `input` reviews a git revision (a commit, a range, two branches), whose history is
@@ -2367,7 +2410,7 @@ mod tests {
             self.0.run(plan, budget, cancel).await
         }
         fn after_report(&self) -> Option<PostReport> {
-            Some(Box::new(|_bound| {
+            Some(Box::new(|_bound, _cancel| {
                 Some(format!("{HISTORY_NOT_UPDATED}: the store is locked"))
             }))
         }
@@ -2390,7 +2433,7 @@ mod tests {
         }
         fn after_report(&self) -> Option<PostReport> {
             let drained = Arc::clone(&self.0);
-            Some(Box::new(move |_bound| {
+            Some(Box::new(move |_bound, _cancel| {
                 drained.store(true, std::sync::atomic::Ordering::SeqCst);
                 None
             }))
@@ -3280,7 +3323,7 @@ mod tests {
         fn after_report(&self) -> Option<PostReport> {
             let rx = self.release.lock().expect("lock").take()?;
             let started = Arc::clone(&self.started);
-            Some(Box::new(move |_bound| {
+            Some(Box::new(move |_bound, _cancel| {
                 started.store(true, std::sync::atomic::Ordering::SeqCst);
                 let _ = rx.recv_timeout(Duration::from_secs(60));
                 None
@@ -3438,7 +3481,7 @@ mod tests {
         }
         fn after_report(&self) -> Option<PostReport> {
             let seen = Arc::clone(&self.0);
-            Some(Box::new(move |bound| {
+            Some(Box::new(move |bound, _cancel| {
                 *seen.lock().expect("lock") = Some(bound);
                 None
             }))
@@ -3859,7 +3902,13 @@ mod tests {
             })
             .collect();
         let past = std::time::Instant::now();
-        let _ = run_follow_ups(&memory, &ScrubbedGit::new(ws), follows, past);
+        let _ = run_follow_ups(
+            &memory,
+            &ScrubbedGit::new(ws),
+            follows,
+            past,
+            &CancellationToken::new(),
+        );
         let mut anchors: Vec<String> = memory
             .history()
             .all()
@@ -4040,6 +4089,76 @@ mod tests {
                 .expect("ok")
                 .is_none(),
             "a runner without stores is its own stateless runner"
+        );
+    }
+
+    #[test]
+    fn a_runner_without_stores_never_carries_an_embedder() {
+        // [MAGI S6 MS3 loop17, R5 Caspar] `--no-memory` is "no stores, no embedder" by
+        // construction: an embedder cannot be held without the stores that make it reachable.
+        let (_tmp, ws) = workspace_with_readme();
+        let fake = Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let embedder: Arc<dyn EmbeddingProvider> = fake;
+        let runner = production_runner_with_memory(&ws, None, Some(embedder));
+        assert!(runner.parts.embedder.is_none());
+        assert!(runner.stateless().expect("ok").is_none());
+    }
+
+    #[test]
+    fn the_history_leaves_part_of_the_bound_for_the_index_cleanup() {
+        // [MAGI S6 MS3 loop17, R5 Balthasar] With the index clean-up still to run, the
+        // reclassification stops short of the bound so the clean-up is not starved.
+        let now = std::time::Instant::now();
+        let cancel = CancellationToken::new();
+        let bound = Some(now + Duration::from_secs(30));
+        let with_cleanup = history_budget(bound, true, &cancel);
+        let without = history_budget(bound, false, &cancel);
+        assert!(
+            with_cleanup <= Duration::from_secs(30 - CLEANUP_RESERVE_SECS),
+            "{with_cleanup:?}"
+        );
+        assert!(without > with_cleanup, "{without:?} vs {with_cleanup:?}");
+    }
+
+    #[test]
+    fn a_cancelled_run_gives_the_history_no_time_and_stops_the_cleanup() {
+        // [MAGI S6 MS3 loop17, R5 Caspar] A started blocking task cannot be cancelled from
+        // outside; the work reads the run's token between its steps.
+        let cancel = CancellationToken::new();
+        assert!(!post_report_stopped(None, &cancel));
+        assert_ne!(history_budget(None, true, &cancel), Duration::ZERO);
+        cancel.cancel();
+        assert!(post_report_stopped(None, &cancel));
+        assert_eq!(history_budget(None, true, &cancel), Duration::ZERO);
+    }
+
+    /// Answers `merge-base --is-ancestor <sha> HEAD` as `ancestor` says, and nothing else.
+    struct AncestryGit {
+        ancestor: bool,
+    }
+    impl GitCommand for AncestryGit {
+        fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+            if args == ["merge-base", "--is-ancestor", FULL_SHA, HISTORY_HEAD] && self.ancestor {
+                Ok(Vec::new())
+            } else {
+                Err(ReviewError::Git(args.join(" ")))
+            }
+        }
+    }
+
+    #[test]
+    fn history_is_reclassified_only_against_a_head_that_descends_from_the_reviewed_revision() {
+        // [MAGI S6 MS3 loop17, R5 Caspar] The reclassification compares the reviewed commit
+        // with HEAD; a review of a commit HEAD does not descend from (another branch) would
+        // read an unrelated diff as "attended". It records without reclassifying then.
+        let budget = Duration::from_secs(60);
+        assert_eq!(
+            reclassification_budget(&AncestryGit { ancestor: true }, FULL_SHA, budget),
+            budget
+        );
+        assert_eq!(
+            reclassification_budget(&AncestryGit { ancestor: false }, FULL_SHA, budget),
+            Duration::ZERO
         );
     }
 
