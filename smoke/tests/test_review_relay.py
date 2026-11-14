@@ -332,6 +332,104 @@ class RelayTests(unittest.TestCase):
         self.assertIn(b"visible", kept)
 
 
+class LoopSixteenRelayTests(unittest.TestCase):
+    """MAGI FIX (MS3 §6 loop16, R7a1): the relay's staging, snapshot and fixtures."""
+
+    def _definition(self) -> "runs.RunDefinition":
+        return runs.RunDefinition(
+            run_id="RX", stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+            records_requests=True, argv=("code-review",) + runs.REVIEW_FLAGS)
+
+    def test_a_dry_run_cause_ends_the_run_unrunnable_and_never_stages_the_relay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = pathlib.Path(tmp)
+            (ws / ".magi").mkdir()
+            (ws / ".magi" / "magi.toml").write_text('base_url = "http://a/v1"\n', encoding="utf-8")
+            executor = runs.RunExecutor(None, None, None)
+            executor._unrunnable_cause = "the relay cannot be staged: off the relay"
+            with unittest.mock.patch.object(runs, "recording_relay",
+                                            side_effect=AssertionError("staged a refused relay")):
+                with executor._recorded_requests(self._definition(), ws, []) as runnable:
+                    self.assertIsNone(runnable)
+            self.assertIn("off the relay", executor._unrunnable_cause)
+
+    def test_a_credentialed_or_non_http_upstream_is_unavailable_not_a_harness_error(self) -> None:
+        for root in ("http://u:p@127.0.0.1:1/v1", "ftp://a/v1", "http:///v1", "file:///x"):
+            with self.subTest(root=root), tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "magi.toml"
+                path.write_text('base_url = "%s"\n' % root, encoding="utf-8")
+                with self.assertRaises(runs.RelayUnavailable):
+                    runs.relay_upstream(path, {})
+
+    def test_one_locked_snapshot_returns_bodies_headers_and_completeness(self) -> None:
+        rec = runs.RequestBodies(cap=1)
+        rec.record("/a", b"x", b"H: 1\n")
+        self.assertEqual(((("/a", b"x"),), (b"H: 1\n",), True), rec.snapshot())
+        rec.record("/b", b"y", b"H: 2\n")
+        self.assertEqual(((("/a", b"x"),), (b"H: 1\n",), False), rec.snapshot())
+
+    def test_the_result_is_built_from_the_snapshot_alone(self) -> None:
+        source = pathlib.Path(runs.__file__).read_text(encoding="utf-8").replace("\r", "")
+        execute = source.split("    def execute(", 1)[1].split("    def _recorded_requests(", 1)[0]
+        self.assertIn(".snapshot()", execute)
+        for forbidden in (".recorded", ".complete", ".headers"):
+            self.assertNotIn("recorded[0]" + forbidden, execute)
+
+    def test_an_incomplete_record_is_never_read_as_nothing_sent(self) -> None:
+        for reader in (runs.trio_bodies, runs.gate_bodies):
+            with self.subTest(reader=reader.__name__), self.assertRaises(HarnessError):
+                reader(None)
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_a_setup_commit_names_its_files_literally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = pathlib.Path(tmp)
+            subprocess.run(runs.git_command(ws, "init", "-q"), check=True, env=runs.git_env())
+            (ws / "w1.rs").write_bytes(b"stray")
+            runs.commit_files(ws, runs.Commit(files=(("w[1].rs", b"fn b() {}\n"),), message="one"))
+            listed = subprocess.run(runs.git_command(ws, "ls-files"), check=True, env=runs.git_env(),
+                                    capture_output=True, text=True).stdout.split()
+        self.assertEqual(["w[1].rs"], listed)
+
+    def test_the_measured_review_has_one_reviews_allowance_whatever_setup_spent(self) -> None:
+        for run_id in ("R21", "R22"):
+            definition = dataclasses.replace(runs.DEFINITIONS[run_id], records_requests=False)
+            self.assertEqual(runs._HISTORY_SETUP_TIMEOUT_S, runs.measured_allowance(definition), run_id)
+            executor = runs.RunExecutor(None, None, None)
+            seen = []
+
+            def burn(_definition, _executor=executor):
+                _executor._clock_end = 0.0  # the whole shared clock is gone before the measured review
+                return None
+
+            with unittest.mock.patch.object(executor, "_prepare_review_workspace", burn), \
+                    unittest.mock.patch.object(executor, "_stdin_for", return_value=b""), \
+                    unittest.mock.patch.object(executor, "_capture_review_log", return_value=None), \
+                    unittest.mock.patch.object(
+                        executor, "_invoke",
+                        lambda d, s, _seen=seen: _seen.append(d.timeout_s) or ProductOutput(
+                            stdout=b"", stderr=b"", exit_code=0, command=())):
+                executor.execute(definition)
+            self.assertEqual([runs._HISTORY_SETUP_TIMEOUT_S], seen, run_id)
+
+    def test_s57_a_finding_outside_the_seeded_file_is_cannot_test(self) -> None:
+        for line in (0, 99):
+            found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": line,
+                                                   "title": "off by one"}]}}
+            first = ProductOutput(stdout=json.dumps(found).encode(), stderr=b"", exit_code=0, command=["m"])
+            r = _with(_result("R21", 0, {}), request_bodies=(), setup_outputs=(first, first))
+            self.assertEqual([P, C], _judged("S57", r, rc.S57_ASSERTIONS), line)
+
+    def test_the_forbidden_docs_are_forbidden_as_chunks_not_as_the_reviewed_diff(self) -> None:
+        # RV21 sends the old side of a replaced hunk; the fixture says so instead of forbidding it.
+        doc = runs.REVIEW_PARENT_DOC.decode()
+        source = pathlib.Path(runs.__file__).read_text(encoding="utf-8").replace("\r", "")
+        constants = source.split("#: The doc comment of R18's file", 1)[1].split("REVIEW_DOCREV_FILE", 1)[0]
+        self.assertIn("old side", constants)
+        self.assertNotIn("no request may carry either", constants)
+        self.assertTrue(doc)
+
+
 P, F, C = Outcome.PASS, Outcome.FAIL, Outcome.CANNOT_TEST
 # [MAGI S6 MS3 loop11, R7b Caspar] False positive: `scenario_result` has no `setup_outputs`
 # parameter on purpose; S57's results add it with `dataclasses.replace` (`_with`), so the relay
@@ -455,8 +553,8 @@ class RelayScenarioTests(unittest.TestCase):
                   ("/v1/systemone", b"g1"), ("/v1/systemone?m=1", b"g2"), ("/v1/embeddings", b"e"))
         self.assertEqual((b"t1", b"t2"), runs.trio_bodies(record))
         self.assertEqual((b"g1", b"g2"), runs.gate_bodies(record))
-        self.assertEqual((), runs.trio_bodies(None))
-        self.assertEqual((), runs.gate_bodies(None))
+        self.assertEqual((), runs.trio_bodies(()))
+        self.assertEqual((), runs.gate_bodies(()))
 
     def test_embedded_texts_read_the_path_alone_and_a_single_string(self) -> None:
         # MAGI FIX (MS3 §6 loop12, R7a): a recorded target carries its query, and the
