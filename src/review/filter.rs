@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use super::diffmask::{fallback_diff, rebuilt_diff, HUNK_START};
+use super::diffmask::{fallback_diff, rebuilt_diff, redacted_line_count, HUNK_START};
 use super::error::ReviewError;
 use super::input::{
     in_work_tree, is_binary_marker_line, is_binary_section, renamed_from, split_nul, ReviewFile,
@@ -156,9 +156,12 @@ pub struct Filtered {
 /// A file reviewed with its secrets masked (RV22): reviewed, never left out.
 ///
 /// Its diff is rebuilt from the masked sides (diffmask); a body line that differs from its side's
-/// beyond a mask is replaced by the side's text, and the count is declared in the run log (one WARN
-/// per file), not per file in the report: the replaced text is always the masked side's, so the
-/// declaration is about drift between git's diff and the file, never about a secret.
+/// beyond a mask is replaced by the side's text, and that count is declared in the run log (one
+/// WARN per file): the replaced text is always the masked side's, so it is about drift between
+/// git's diff and the file, never about a secret. How many lines of the diff the trio got as a
+/// placeholder is declared in the report ([`Masked::redacted_lines`]); masking can collapse a
+/// hunk whose only change is inside a secret (a rotated credential reads the same on both
+/// sides once masked), and that count is the only trace of it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Masked {
     /// The path, as it may leave the process ([`display_path`]).
@@ -202,6 +205,8 @@ struct Kept {
     with_old: bool,
     /// The pattern of the first secret masked in it, if any.
     masked: Option<&'static str>,
+    /// The diff lines the by-line fallback replaced by a placeholder ([`Masked::redacted_lines`]).
+    redacted_lines: usize,
 }
 
 /// Splits the files of a review into what is reviewed and what is left out.
@@ -348,7 +353,9 @@ fn classify_files(
                     release_unkept(source, &kept_sides, sides);
                 }
                 if let Some(pattern) = kept.masked {
-                    filtered.masked.push(masked_file(&path, pattern));
+                    let mut declared = masked_file(&path, pattern);
+                    declared.redacted_lines = kept.redacted_lines;
+                    filtered.masked.push(declared);
                 }
                 // MAGI FIX (MS3 §6 loop14): a kept path is never secret-shaped: `classify` skips
                 // such a path as `secret` before any verdict (`a_path_shaped_like_a_key_is_never_sent`),
@@ -587,6 +594,7 @@ fn kept_verdict(
             diff,
             with_old,
             masked: None,
+            redacted_lines: 0,
         });
     };
     let mut declared = side_mask;
@@ -650,10 +658,19 @@ fn kept_verdict(
     if let Some(declared) = declared {
         log_masked(read.path, declared);
     }
+    // MAGI FIX (MS3 §6 loop17, R6a1): how much of the diff the trio does not get is declared
+    // beside the mask. Declared limit: masking can collapse a hunk whose only change is inside a
+    // secret (two rotated credentials read the same once masked), and the count is the only
+    // trace of it.
+    let redacted_lines = diff
+        .as_deref()
+        .filter(|_| declared.is_some())
+        .map_or(0, redacted_line_count);
     Verdict::Keep(Kept {
         diff,
         with_old,
         masked: declared,
+        redacted_lines,
     })
 }
 
@@ -2186,7 +2203,9 @@ mod tests {
         let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
             .expect("both kept");
         assert_eq!(f.skipped, vec![]);
-        assert_eq!(f.masked, vec![masked("a.rs", "openai-key")]);
+        let mut declared = masked("a.rs", "openai-key");
+        declared.redacted_lines = 1;
+        assert_eq!(f.masked, vec![declared]);
         assert_eq!(
             f.kept.first().and_then(|k| k.diff.as_deref()),
             Some("@@ -1,2 +1,1 @@\n-const K: &str = \"<redacted: openai-key>\";\n fn f() {}\n")
@@ -3193,7 +3212,10 @@ mod tests {
         ];
         let f = filter_files(files, &leaky, &reg, false, &|_| false).expect("both kept");
         assert_eq!(f.skipped, vec![]);
-        assert_eq!(f.masked, vec![masked("gone.rs", "openai-key")]);
+        // The deleted line carries its mask, and the count says so.
+        let mut declared = masked("gone.rs", "openai-key");
+        declared.redacted_lines = 1;
+        assert_eq!(f.masked, vec![declared]);
         let diff = f.kept.first().and_then(|k| k.diff.as_deref()).unwrap_or("");
         assert!(
             diff.ends_with("@@ -1,1 +0,0 @@\n-const K: &str = \"<redacted: openai-key>\";\n"),

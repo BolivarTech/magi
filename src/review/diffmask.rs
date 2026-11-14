@@ -44,6 +44,15 @@ pub(super) fn fallback_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) 
         .then_some(masked)
 }
 
+/// How many lines of `diff` carry a `<redacted: …>` placeholder: the lines of a masked file's
+/// diff the trio does not get as they were (a secret masked, or a line no masked side shows).
+/// O(diff).
+pub(super) fn redacted_line_count(diff: &str) -> usize {
+    diff.lines()
+        .filter(|line| line.contains(REDACTED_OPEN))
+        .count()
+}
+
 /// The lines of `diff`'s hunks as the new side would show them (context and added) and as the old
 /// side would (context and deleted), marker removed, in order. O(diff).
 fn side_projections(diff: &str) -> [String; 2] {
