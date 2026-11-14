@@ -542,6 +542,34 @@ impl FileUnits {
     }
 }
 
+/// Openers that mark a comment line once its diff prefix and indentation are off: `//`, `/*`
+/// and `*` (C family, Rust doc comments, block-comment bodies) and `#` (Python, shell, TOML).
+const COMMENT_OPENERS: [&str; 4] = ["//", "/*", "*", "#"];
+
+/// Whether `line` reads as a comment line: after one diff prefix (`+`, `-` or a space) and its
+/// indentation, it opens with one of [`COMMENT_OPENERS`]. A language-agnostic heuristic, used only
+/// to rank names (never to drop one): a C line that opens with a dereference (`*p = 1;`), a Rust
+/// attribute or a C preprocessor line (`#`) rank with the comments, and a comment that follows
+/// code on its line ranks with the code. O(length of `line`).
+fn is_comment_line(line: &str) -> bool {
+    let body = line
+        .strip_prefix(['+', '-', ' '])
+        .unwrap_or(line)
+        .trim_start();
+    COMMENT_OPENERS.iter().any(|o| body.starts_with(o))
+}
+
+/// The identifiers of `text`: those of its code lines first, then those of its comment lines
+/// ([`is_comment_line`]), each group in order of first appearance. O(bytes of `text`).
+fn ranked_identifiers(text: &str) -> impl Iterator<Item = &str> {
+    let lines = |comments: bool| {
+        text.lines()
+            .filter(move |l| is_comment_line(l) == comments)
+            .flat_map(identifier_runs)
+    };
+    lines(false).chain(lines(true))
+}
+
 /// The definitions of the names the batch code uses, one item per definition, at most
 /// [`MAX_DEFINITIONS_PER_NAME`] per name (the first by `(file, line)`) and
 /// [`MAX_DEFINITIONS_TOTAL`] for the batch. The two cuts are returned apart, for the caller to
@@ -549,10 +577,14 @@ impl FileUnits {
 /// later name still to serve (the scan stops at that name, so the cost of a spent total is one
 /// flag, never one entry per later name).
 ///
-/// The input is the batch's raw code: every identifier counts, quoted or not, in the order it
-/// first appears. Accepted over-retrieval (declared): a name in a comment or a string fetches its
-/// definition too. It costs budget only: `assemble` holds the batch's limit and can let it
-/// displace lower layers (callers, documentation, history), never a containing unit. A name with more than one definition (homonyms) marks each as a `candidate`;
+/// The input is the batch's raw code: every identifier counts, quoted or not. The names of code
+/// lines are served first and those of comment lines ([`is_comment_line`]) after them, each in the
+/// order it first appears, so a comment block cannot spend [`MAX_DEFINITIONS_TOTAL`] before the
+/// callees of the code below it. Accepted over-retrieval (declared): a name in a comment, in a
+/// trailing comment or in a string still fetches its definition when slots are left, and a name
+/// in a trailing comment or a string ranks as code. It costs slots and budget only: `assemble`
+/// holds the batch's limit and can let it displace lower layers (callers, documentation,
+/// history), never a containing unit. A name with more than one definition (homonyms) marks each as a `candidate`;
 /// a name with none (a keyword, an outside symbol) adds nothing. Each file is read once. Needs a
 /// complete index to be exhaustive: when `index.is_complete()` is false some definitions may be
 /// missing.
@@ -580,7 +612,9 @@ pub fn definitions_for(
     let mut files: HashMap<&str, Option<String>> = HashMap::new();
     let mut items = Vec::new();
     let mut cuts = RetrievalCuts::default();
-    for name in identifier_runs(text) {
+    // MAGI FIX (MS3 §6 loop17, R2 Melchior): names of a comment block spent the total before
+    // the callee below it was met; code lines rank first now.
+    for name in ranked_identifiers(text) {
         if !names.insert(name) {
             continue;
         }
