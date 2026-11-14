@@ -648,6 +648,18 @@ class RunResult:
     #: The runner reports every scenario reading it as ``CANNOT_TEST`` with this cause.
     not_runnable: str = ""
 
+    def __post_init__(self) -> None:
+        """Refuse a result without its capture (MAGI FIX, MS3 §6 loop17, R7a1 Melchior).
+
+        Every executor path builds one (an empty capture for a hang or an
+        unrunnable run), so scenarios read :attr:`output` unguarded.
+
+        Raises:
+            HarnessError: When ``output`` is ``None``.
+        """
+        if self.output is None:
+            raise HarnessError("run %s has no capture; every RunResult carries one" % self.run_id)
+
     @property
     def requests_complete(self) -> bool:
         """bool: Whether the relay's record of the run is whole (MAGI FIX, MS3 §6 loop17, R7a1).

@@ -135,7 +135,7 @@ def a_review_without_an_embedder_runs_and_says_so(run):
     """
     # MAGI FIX (MS3 §6 loop12): a result with no output is a missing capture, never an
     # AttributeError (S57's guard, now S52's, S53's, S55's and S56's too).
-    if run is None or run.output is None:
+    if run is None:
         for index in range(len(S52_ASSERTIONS)):
             yield _finding(index, Outcome.CANNOT_TEST,
                            "run %s produced no capture to inspect" % RUN_ID)
@@ -290,7 +290,7 @@ def a_review_with_its_embedder_up_is_not_degraded(run):
         Finding: One per entry of :data:`S55_ASSERTIONS`, in that order.
     """
     # MAGI FIX (S6 MS3 loop2): no scenario observed a working RAG; S52 only its degradation.
-    if run is None or run.output is None:
+    if run is None:
         for index in range(len(S55_ASSERTIONS)):
             yield _s55_finding(index, Outcome.CANNOT_TEST,
                                "run %s produced no capture to inspect" % S55_RUN_ID)
@@ -362,7 +362,7 @@ def documentation_comes_from_the_reviewed_commit(run):
         Finding: One per entry of :data:`S56_ASSERTIONS`, in that order.
     """
     texts = S56_ASSERTIONS
-    if run is None or run.output is None:
+    if run is None:
         yield from code_review.all_cannot_test(texts, "R20", "run R20 produced no capture")
         return
     code = run.output.exit_code
@@ -414,29 +414,15 @@ def validated_history_reaches_the_trio(run):
     """
     texts = S57_ASSERTIONS
     # MAGI FIX (MS3 §6 loop10): a measured review that left no output crashed the scenario.
-    if run is None or run.output is None or len(run.setup_outputs) != 2:
+    if run is None or len(run.setup_outputs) != 2:
         yield from code_review.all_cannot_test(texts, "R21", "run R21 did not run its three reviews")
         return
     codes = [o.exit_code for o in run.setup_outputs + (run.output,)]
     yield code_review.verdict(texts, 0, "R21", codes == [EXIT_OK] * 3, "the reviews exited %s" % codes)
-    try:
-        findings = run.setup_outputs[0].json().get(CODE_REVIEW_KEY, {}).get("findings")
-    except (ProductOutputError, AttributeError):
-        findings = None
-    # MAGI FIX (MS3 §6 loop14, R7a2): a `findings` that is not a list is no finding, not a crash.
-    findings = findings if isinstance(findings, list) else None
-    # MAGI FIX (MS3 §6 loop15, R7a2): a located finding has an integer line (a bool is no line).
-    located = [f for f in findings or () if isinstance(f, dict)
-               and isinstance(f.get("line"), int) and not isinstance(f.get("line"), bool)
-               and isinstance(f.get("file"), str)
-               # MAGI FIX (MS3 §6 loop16, R7a1): a line outside the seeded file is a model
-               # answer the fixture cannot turn into history: no precondition, CANNOT_TEST.
-               and 1 <= f["line"] <= runs.REVIEW_HISTORY_BUGGY_LINES
-               and f["file"].replace("\\", "/") == runs.REVIEW_HISTORY_FILE]
+    located = _seeded_findings(run)
     if not located:
         yield Finding(assertion=texts[1], outcome=Outcome.CANNOT_TEST, run_id="R21",
-                      detail="the first review reported no located finding on %s, so no history "
-                             "was recorded to serve" % runs.REVIEW_HISTORY_FILE)
+                      detail=_NO_SEEDED_HISTORY)
     elif run.request_bodies is None:
         yield Finding(assertion=texts[1], outcome=Outcome.CANNOT_TEST, run_id="R21",
                       detail="the relay's record is missing or incomplete")
@@ -474,7 +460,7 @@ def a_review_with_history_and_a_down_embedder_declares_it(run):
         Finding: One per entry of :data:`S58_ASSERTIONS`, in that order.
     """
     texts = S58_ASSERTIONS
-    if run is None or run.output is None or len(run.setup_outputs) != 2:
+    if run is None or len(run.setup_outputs) != 2:
         yield from code_review.all_cannot_test(texts, "R22", "run R22 did not run its three reviews")
         return
     codes = [o.exit_code for o in run.setup_outputs + (run.output,)]
@@ -491,12 +477,51 @@ def a_review_with_history_and_a_down_embedder_declares_it(run):
     history_degraded = (isinstance(trimmed, list)
                         and any(isinstance(t, dict) and t.get("kind") == _HISTORY_KIND
                                 and t.get(TRIMMED_LABEL_KEY) in DEGRADED_LABELS for t in trimmed))
-    yield code_review.verdict(texts, 1, "R22",
-                              summary.get(WITHOUT_EMBEDDER_KEY) is True and history_degraded,
-                              "without_embedder is %r and trimmed is %r"
-                              % (summary.get(WITHOUT_EMBEDDER_KEY), trimmed))
+    if not _seeded_findings(run):
+        # MAGI FIX (MS3 §6 loop17, R7a1 Caspar): no seeded history, no history to be unretrievable.
+        yield Finding(assertion=texts[1], outcome=Outcome.CANNOT_TEST, run_id="R22",
+                      detail=_NO_SEEDED_HISTORY)
+    else:
+        yield code_review.verdict(texts, 1, "R22",
+                                  summary.get(WITHOUT_EMBEDDER_KEY) is True and history_degraded,
+                                  "without_embedder is %r and trimmed is %r"
+                                  % (summary.get(WITHOUT_EMBEDDER_KEY), trimmed))
     yield code_review.verdict(texts, 2, "R22", isinstance(summary.get("findings"), list),
                               "code_review.findings is %r, not a list" % (summary.get("findings"),))
+
+
+#: Why S57's and S58's history assertion cannot be judged when the trio located nothing to seed.
+_NO_SEEDED_HISTORY = ("the first review reported no located finding on %s, so no history was "
+                      "recorded" % runs.REVIEW_HISTORY_FILE)
+
+
+def _seeded_findings(run) -> list:
+    """The first setup review's findings the history is seeded from (MAGI FIX, MS3 §6 loop17).
+
+    Whether the trio reports one is its answer, not the product's, so S57 and S58
+    read the same precondition here and report ``CANNOT_TEST`` without it.
+
+    Args:
+        run: R21's or R22's ``RunResult``, with two setup outputs.
+
+    Returns:
+        list: The findings, each a dict, located on :data:`runs.REVIEW_HISTORY_FILE`
+        inside its :data:`runs.REVIEW_HISTORY_BUGGY_LINES`; empty when there is none.
+    """
+    try:
+        findings = run.setup_outputs[0].json().get(CODE_REVIEW_KEY, {}).get("findings")
+    except (ProductOutputError, AttributeError):
+        findings = None
+    # MAGI FIX (MS3 §6 loop14, R7a2): a `findings` that is not a list is no finding, not a crash.
+    findings = findings if isinstance(findings, list) else None
+    # MAGI FIX (MS3 §6 loop15, R7a2): a located finding has an integer line (a bool is no line).
+    return [f for f in findings or () if isinstance(f, dict)
+            and isinstance(f.get("line"), int) and not isinstance(f.get("line"), bool)
+            and isinstance(f.get("file"), str)
+            # MAGI FIX (MS3 §6 loop16, R7a1): a line outside the seeded file is a model
+            # answer the fixture cannot turn into history: no precondition, CANNOT_TEST.
+            and 1 <= f["line"] <= runs.REVIEW_HISTORY_BUGGY_LINES
+            and f["file"].replace("\\", "/") == runs.REVIEW_HISTORY_FILE]
 
 
 def _history_served(request_bodies, located) -> bool:

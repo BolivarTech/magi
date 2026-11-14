@@ -206,7 +206,7 @@ def a_key_in_a_files_content_is_masked_and_the_file_reviewed(run):
         Finding: One per entry of :data:`S53_ASSERTIONS`, in that order.
     """
     texts = S53_ASSERTIONS
-    if run is None or run.output is None:
+    if run is None:
         yield from _no_capture(texts, "R18")
         return
     if run.timed_out:
