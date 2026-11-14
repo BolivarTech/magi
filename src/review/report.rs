@@ -44,6 +44,11 @@ const TRIMMED_UNLISTED_KEY: &str = "trimmed_unlisted";
 const NO_EXTRACTOR_KEY: &str = "no_extractor";
 /// The JSON key that declares how many of those files are not listed.
 const NO_EXTRACTOR_UNLISTED_KEY: &str = "no_extractor_unlisted";
+/// The JSON key of the promised containing units that were not delivered
+/// ([`ReviewSummary::undelivered_units`]).
+const UNDELIVERED_KEY: &str = "undelivered_units";
+/// The JSON key that declares how many of those units are not listed.
+const UNDELIVERED_UNLISTED_KEY: &str = "undelivered_units_unlisted";
 /// Every character a terminal or a log viewer may take as the start of a new line.
 const LINE_BREAKS: [char; 7] = [
     '\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
@@ -598,7 +603,8 @@ fn write_discarded(out: &mut String, title: &str, list: &[Discarded]) -> std::fm
 /// (`{input_tokens, output_tokens, ms}` summed over `batches`) and `rejected_skips`
 /// (`{model: n}`, the models skipped after an HTTP 400). `skipped`, `masked`, `trimmed` and
 /// `no_extractor` list at most [`MAX_OMISSIONS_SHOWN`] entries each, and `skipped_unlisted`,
-/// `masked_unlisted`, `trimmed_unlisted` / `no_extractor_unlisted` declare how many more there
+/// `masked_unlisted`, `trimmed_unlisted` / `no_extractor_unlisted` declare (`undelivered_units`
+/// is capped the same way, with `undelivered_units_unlisted`) how many more there
 /// are (0 when none), as the text form's `and N more` does: the lists grow with the reviewed
 /// tree and its batches, not with the review's result. Every string and every
 /// object key is redacted, so a model name used as a key passes the RV22 detector too.
@@ -631,6 +637,11 @@ pub fn summary_json(s: &ReviewSummary) -> Value {
                 NO_EXTRACTOR_KEY,
                 NO_EXTRACTOR_UNLISTED_KEY,
                 s.no_extractor.len(),
+            ),
+            (
+                UNDELIVERED_KEY,
+                UNDELIVERED_UNLISTED_KEY,
+                s.undelivered_units.len(),
             ),
         ] {
             if let Some(Value::Array(items)) = fields.get_mut(list) {
