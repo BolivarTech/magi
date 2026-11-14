@@ -20,7 +20,7 @@ use super::input::{
     ReviewInput,
 };
 use super::languages::LanguageRegistry;
-use super::secrets::{display_path, find_secret, holds_key_block};
+use super::secrets::{display_path, find_secret, holds_key_block, leaks_secret};
 use super::source::{is_never_reviewed, ContentSource, Face, GitCommand, HARD_LINK_CAUSE};
 
 /// The cause of [`ReviewError::NotReviewable`] for a file requested by name that does not exist.
@@ -580,20 +580,22 @@ fn kept_verdict(
     let mut declared = side_mask;
     let diff = match diff {
         Some(d) => match rebuilt_diff(&d, read.new, read.old) {
-            Some((r, diverged)) if find_secret(&r).is_none() => {
+            Some((r, diverged)) if !leaks_secret(&r) => {
                 if diverged > 0 {
                     let shown = display_path(read.path);
-                    // The reviews that reach here read their sides and their diff through one
-                    // access, and a moved worktree fails closed before this text is used
-                    // (`moved_worktree_fails_closed`), so a count is a secret spanning a line
-                    // break, masked differently on the whole side than on one diff line.
+                    // MAGI FIX (MS3 §6 loop17, R6a1): the count has two causes the code cannot
+                    // tell apart. A commit or a two-revision diff reads its sides and its diff
+                    // through one git access, so a count there is a secret spanning a line
+                    // break, masked differently on the whole side than on one diff line; a
+                    // worktree review reads the diff from `git diff` and the sides from the
+                    // file system, so a file saved in between is pure drift.
                     tracing::event!(
                         target: LOG_TARGET,
                         tracing::Level::WARN,
                         path = shown.as_str(),
                         lines = diverged,
-                        "diff lines differ from the file's masked sides (a secret spanning lines, \
-                         not drift); the file is reviewed from its sides"
+                        "{}",
+                        DIVERGENCE_WARNING
                     );
                 }
                 Some(r)
@@ -679,15 +681,34 @@ fn content_verdict(path: &str, sides: [Option<&[u8]>; 2]) -> Option<Verdict> {
     // MAGI FIX (MS3 §6 loop13): the omission set must cover what the cache never masks. A side
     // `holds_key_block` reports (a header `find_secret` misses, such as two joined literals) is
     // held raw by `CachedSource`, so the file is left out here, never kept with its body.
+    // MAGI FIX (MS3 §6 loop17, R6a2/R6a1): the verdict asks the one egress predicate
+    // (`leaks_secret`), the question `held_side` answered when it held the side raw; a pattern
+    // name is read from `find_secret` first, then from what only the stronger terms see.
     let named = faces.iter().copied().find_map(find_secret);
     match named {
         Some(name) => Some(secret(path, name)),
-        None => faces
-            .iter()
-            .any(|face| holds_key_block(face))
-            .then(|| secret(path, KEY_BLOCK_PATTERN)),
+        None => faces.iter().find(|face| leaks_secret(face)).map(|face| {
+            secret(
+                path,
+                if holds_key_block(face) {
+                    KEY_BLOCK_PATTERN
+                } else {
+                    SPLIT_SECRET_PATTERN
+                },
+            )
+        }),
     }
 }
+
+/// The run-log text for a masked file whose diff lines differ from its masked sides beyond a
+/// mask: the code cannot tell which of the two causes it is, so it names both.
+const DIVERGENCE_WARNING: &str = "diff lines differ from the file's masked sides: either the \
+    file changed after the diff was read (drift), or a secret spans a line break and was masked \
+    differently on the whole side than on one diff line; the file is reviewed from its sides";
+
+/// The pattern name a file is left out under when a hidden or control character splits a secret
+/// the contiguous scan cannot name.
+const SPLIT_SECRET_PATTERN: &str = "split-secret";
 
 /// The pattern name a file is left out under when a side holds a key block no pattern names.
 const KEY_BLOCK_PATTERN: &str = "pem-private-key";

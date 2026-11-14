@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use super::secrets::{find_secret, holds_key_block, mask_secrets, REDACTED_OPEN};
+use super::secrets::{find_secret, holds_key_block, leaks_secret, mask_secrets, REDACTED_OPEN};
 
 /// The marker that opens and closes a hunk header line (`@@ -a,b +c,d @@`).
 pub(super) const HUNK_START: &str = "@@";
@@ -34,7 +34,41 @@ const SECTION_START: &str = "diff ";
 // MAGI FIX (MS3 §6 loop13): the fallback was the one egress text never re-scanned.
 pub(super) fn fallback_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> Option<String> {
     let masked = masked_raw_diff(diff, new, old);
-    find_secret(&masked).is_none().then_some(masked)
+    // MAGI FIX (MS3 §6 loop17, R6a1): the one egress predicate, over the raw text and over what
+    // each side would have shown with the markers off: a ` `, `+` or `-` before a line is not
+    // whitespace, so a name and its value on neighbouring added (or deleted) lines were no pair.
+    let [shown_new, shown_old] = side_projections(&masked);
+    [&masked, &shown_new, &shown_old]
+        .iter()
+        .all(|text| !leaks_secret(text))
+        .then_some(masked)
+}
+
+/// The lines of `diff`'s hunks as the new side would show them (context and added) and as the old
+/// side would (context and deleted), marker removed, in order. O(diff).
+fn side_projections(diff: &str) -> [String; 2] {
+    let (mut new, mut old) = (String::new(), String::new());
+    let mut in_hunk = false;
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with(HUNK_START) {
+            in_hunk = true;
+        } else if line.starts_with(SECTION_START) {
+            in_hunk = false;
+        }
+        let Some((marker, text)) = line
+            .split_at_checked(1)
+            .filter(|_| in_hunk && !line.starts_with(HUNK_START))
+        else {
+            continue;
+        };
+        if matches!(marker, " " | "+") {
+            new.push_str(text);
+        }
+        if matches!(marker, " " | "-") {
+            old.push_str(text);
+        }
+    }
+    [new, old]
 }
 
 /// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it. Private on purpose: its output
@@ -64,7 +98,7 @@ fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> String
     let mut out = String::with_capacity(diff.len());
     for line in diff.split_inclusive('\n') {
         let (body, end) = line.strip_suffix('\n').map_or((line, ""), |b| (b, "\n"));
-        if body.starts_with("@@") {
+        if body.starts_with(HUNK_START) {
             in_hunk = true;
             // MAGI FIX (MS3 §6 loop12): the function context is a line of the file, so, as in
             // `rebuilt_diff`, it stays only when a masked side shows it; masking the line alone
@@ -80,7 +114,7 @@ fn masked_raw_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) -> String
                         header.to_string()
                     }
                 }
-                None => format!("@@ {}", redacted(body)),
+                None => format!("{HUNK_START} {}", redacted(body)),
             };
             out.push_str(&kept);
             out.push_str(end);

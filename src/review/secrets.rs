@@ -1104,6 +1104,43 @@ pub fn masked_pattern(text: &str) -> Option<&'static str> {
 /// The masked text, or `None` as soon as it passes `max_bytes` (never with `usize::MAX`: the
 /// output of a text that fits in memory fits in `usize`).
 fn mask_spans(text: &str, keep_lines: bool, max_bytes: usize) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    let mut within = true;
+    scan_spans(text, |span, name| {
+        out.push_str(text.get(done..span.start).unwrap_or_default());
+        out.push_str(REDACTED_OPEN);
+        out.push_str(name);
+        out.push('>');
+        if keep_lines {
+            // MAGI FIX (MS3 §6 loop6): each break as it was, `\r\n` included (R6a Caspar).
+            // MAGI FIX (MS3 §6 loop7): a lone `\r` too: every break byte, in order.
+            let covered = text.get(span.clone()).unwrap_or_default();
+            for b in covered.bytes().filter(|b| matches!(b, b'\r' | b'\n')) {
+                out.push(char::from(b));
+            }
+        }
+        done = span.end;
+        within = out.len() <= max_bytes;
+        within
+    });
+    if !within {
+        return None;
+    }
+    out.push_str(text.get(done..).unwrap_or_default());
+    (out.len() <= max_bytes).then_some(out)
+}
+
+/// The secrets of `text` in order, as the one-pass masking loop finds them: each span is the
+/// range a mask replaces (overlapping spans merged, [`merged_end`]) and the name of the pattern
+/// that opened it. `visit` returns `false` to stop early. O(n · s), see [`mask_secrets`].
+///
+/// # Arguments
+/// * `text` - The text to scan.
+/// * `visit` - Called with each span and its pattern's name; `false` ends the scan.
+// MAGI FIX (MS3 §6 loop17): the loop lived inside `mask_spans`; `outward_text` needs the spans
+// of several copies of a text to mask their union.
+fn scan_spans(text: &str, mut visit: impl FnMut(Range<usize>, &'static str) -> bool) {
     let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
     let lanes: Vec<(&SecretPattern, usize)> = SECRET_PATTERNS
         .iter()
@@ -1113,31 +1150,17 @@ fn mask_spans(text: &str, keep_lines: bool, max_bytes: usize) -> Option<String> 
         .iter()
         .map(|(p, lane)| p.matcher.lane_span(*lane, text))
         .collect();
-    let mut out = String::with_capacity(text.len());
-    let mut done = 0;
     while let Some((span, name)) = next
         .iter()
         .zip(&lanes)
         .filter_map(|(span, (p, _))| span.clone().map(|s| (s, p.name)))
         .min_by_key(|(s, _)| s.start)
     {
-        out.push_str(text.get(done..span.start).unwrap_or_default());
-        out.push_str(REDACTED_OPEN);
-        out.push_str(name);
-        out.push('>');
         let end = merged_end(span.end, next.iter().flatten());
-        if keep_lines {
-            // MAGI FIX (MS3 §6 loop6): each break as it was, `\r\n` included (R6a Caspar).
-            // MAGI FIX (MS3 §6 loop7): a lone `\r` too: every break byte, in order.
-            let covered = text.get(span.start..end).unwrap_or_default();
-            for b in covered.bytes().filter(|b| matches!(b, b'\r' | b'\n')) {
-                out.push(char::from(b));
-            }
+        if !visit(span.start..end, name) {
+            return;
         }
-        if out.len() > max_bytes {
-            return None;
-        }
-        done = end;
+        let done = end;
         let rest = text.get(done..).unwrap_or_default();
         for (slot, (p, lane)) in next.iter_mut().zip(&lanes) {
             if slot.as_ref().is_some_and(|s| s.start < done) {
@@ -1147,8 +1170,6 @@ fn mask_spans(text: &str, keep_lines: bool, max_bytes: usize) -> Option<String> 
             }
         }
     }
-    out.push_str(text.get(done..).unwrap_or_default());
-    (out.len() <= max_bytes).then_some(out)
 }
 
 /// What [`mask_secrets_keeping_lines`] gave for a text that held a secret.
@@ -1185,6 +1206,17 @@ pub struct LineMasked {
 /// ```
 // MAGI FIX (MS3 §6 loop11): a header joined at a token boundary without its space opened none.
 pub fn holds_key_block(text: &str) -> bool {
+    // MAGI FIX (MS3 §6 loop17, R6a2): case-insensitive like the binary path (`----begin rsa
+    // private key----` opened no block here). The upper-cased copy is read only when the text
+    // has an armor's dashes and a lower-case letter, so an ordinary text costs one scan.
+    opens_key_block_exactly(text)
+        || (text.contains(SSH2_ARMOR_DASHES)
+            && text.bytes().any(|b| b.is_ascii_lowercase())
+            && opens_key_block_exactly(&text.to_ascii_uppercase()))
+}
+
+/// [`holds_key_block`] on the text as it is spelled (upper case type words). O(n · p).
+fn opens_key_block_exactly(text: &str) -> bool {
     SECRET_PATTERNS
         .iter()
         .filter(|p| p.matcher.opens_key_block())
@@ -1210,7 +1242,8 @@ const HEADER_JOINERS: [char; 6] = [' ', '\t', '"', '\'', ',', '+'];
 /// canonical SSH2 armor, `---- BEGIN SSH2 PRIVATE KEY ----`). So a PEM, OpenPGP or SSH2 header
 /// split at a token boundary (`…RSA PRIVATE` +
 /// `KEY-----`, in a separator-free concatenation) still opens a block
-/// (`spaceless_header_is_a_block`); upper case only, as [`holds_key_block`]. Errs toward a block,
+/// (`spaceless_header_is_a_block`); upper-case words (the caller reads a lower-cased text through an
+/// upper-cased copy, [`holds_key_block`]). Errs toward a block,
 /// RV22's safe direction. O(bytes of `line`).
 fn spaceless_key_header(line: &str) -> bool {
     // MAGI FIX (MS3 §6 loop13): joiners are skipped only between `BEGIN` and the closing dashes,
@@ -1366,48 +1399,75 @@ fn token_after_mask(pattern: &SecretPattern, lane: usize, rest: &str) -> Option<
 /// # Returns
 /// The masked, escaped text.
 pub fn outward_text(text: &str) -> String {
-    let masked = mask_secrets(text);
-    // MAGI FIX (MS3 §6 loop12): the detector reads contiguous text, so a control or format
-    // character inside a secret hid it; escaping it afterwards left both halves readable. The
-    // text without those characters is masked too, and when that finds a secret the first pass
-    // missed, the stripped, masked form leaves instead. MAGI FIX (MS3 §6 loop13): line breaks and
-    // tabs are not stripped (they become escapes), so a multi-line field keeps its lines. Limit,
-    // declared: a secret split by a raw line break is not read as one here.
-    let plain = without_hidden_chars(&masked);
-    // MAGI FIX (MS3 §6 loop15): a tab or a lone CR splits a token like any control character, so
-    // a third copy without them is masked too; CRLF pairs stay line breaks. When it finds a
-    // secret the others missed, its masked form leaves (tabs and lone CRs lost, the safe side).
-    let joined = plain.replace("\r\n", "\n").replace(['\t', '\r'], "");
-    let masked_joined = mask_secrets(&joined);
-    let masked_plain = mask_secrets(&plain);
-    // MAGI FIX (MS3 §6 loop16): the joined copy is preferred only when the stripped pass found
-    // nothing itself (`masked_plain == plain`), so a secret that pass already masks keeps its
-    // CRLF breaks.
-    if masked_plain == plain && masked_joined != joined {
-        escape_controls(&masked_joined)
-    } else if masked_plain == plain {
-        escape_controls(&masked)
-    } else {
-        escape_controls(&masked_plain)
+    // MAGI FIX (MS3 §6 loop17, R6a2): the secrets of every view of the text are masked in the
+    // text itself, as the union of their spans. Each view takes out what can split a token (a
+    // view per hidden-character policy of the table above: none, control and format characters
+    // with the line breaks and tabs kept, then tabs and lone CRs too), and a span found in a
+    // view is mapped back onto the original, so one text holding a ZWSP-split and a tab-split
+    // secret masks both, and every break outside a secret stays a break. Limit, declared: a
+    // secret split by a raw line break is not read as one here.
+    let views = [
+        StrippedView::of(text, |_| true),
+        StrippedView::of(text, |c| {
+            matches!(c, '\n' | '\r' | '\t') || !(c.is_control() || is_hidden_format_char(c))
+        }),
+        StrippedView::of(text, |c| {
+            c == '\n' || !(c.is_control() || is_hidden_format_char(c))
+        }),
+    ];
+    let mut spans: Vec<(Range<usize>, &'static str)> = Vec::new();
+    for view in &views {
+        scan_spans(&view.text, |span, name| {
+            spans.extend(view.in_original(&span).map(|range| (range, name)));
+            true
+        });
     }
+    spans.sort_by_key(|(range, _)| range.start);
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    for (range, name) in spans {
+        if range.start >= done {
+            out.push_str(text.get(done..range.start).unwrap_or_default());
+            out.push_str(REDACTED_OPEN);
+            out.push_str(name);
+            out.push('>');
+        }
+        done = done.max(range.end);
+    }
+    out.push_str(text.get(done..).unwrap_or_default());
+    escape_controls(&out)
 }
 
-/// `text` without its control characters and its [`HIDDEN_FORMAT_CHARS`]; the line breaks and
-/// tabs (`\n`, `\r`, `\t`) stay, so a multi-line text keeps its lines. O(n · r).
-///
-/// # Arguments
-/// * `text` - Any text.
-///
-/// # Returns
-/// The text as a detector sees it once nothing can split a token.
-// MAGI FIX (MS3 §6 loop14): shared by `outward_text` and the content path's second pass; the
-// stripped pass of `outward_text` dropped `\r`, against its own comment (R6a2 Caspar/Melchior).
-fn without_hidden_chars(text: &str) -> String {
-    text.chars()
-        .filter(|&c| {
-            matches!(c, '\n' | '\r' | '\t') || (!c.is_control() && !is_hidden_format_char(c))
-        })
-        .collect()
+/// A copy of a text with some characters taken out, and where each byte of the copy came from.
+struct StrippedView {
+    /// The copy.
+    text: String,
+    /// For each byte of the copy, the byte offset of its character in the original.
+    origin: Vec<usize>,
+}
+
+impl StrippedView {
+    /// The copy of `text` that keeps the characters `keep` accepts. O(n).
+    fn of(text: &str, keep: impl Fn(char) -> bool) -> Self {
+        let mut view = Self {
+            text: String::with_capacity(text.len()),
+            origin: Vec::with_capacity(text.len()),
+        };
+        for (at, c) in text.char_indices().filter(|(_, c)| keep(*c)) {
+            view.text.push(c);
+            view.origin.extend(std::iter::repeat_n(at, c.len_utf8()));
+        }
+        view
+    }
+
+    /// The range of the original that `span` of the copy covers: from its first character to the
+    /// end of its last, with whatever was taken out in between. `None` for an empty or invalid span.
+    fn in_original(&self, span: &Range<usize>) -> Option<Range<usize>> {
+        let start = *self.origin.get(span.start)?;
+        let last = self.text.get(..span.end)?.chars().next_back()?;
+        let end = *self.origin.get(span.end.checked_sub(1)?)? + last.len_utf8();
+        Some(start..end)
+    }
 }
 
 /// Whether `masked`, a text [`mask_secrets`] already went over, still holds a secret once its
@@ -1436,10 +1496,12 @@ pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
     stripped != normalized && (find_secret(&stripped).is_some() || holds_key_block(&stripped))
 }
 
-/// Whether `text`, already masked, still holds a secret to the eye of the detector or once its
-/// control and format characters are taken out: [`find_secret`] or `hides_secret_behind_hidden_chars`.
-/// The one question every egress that cannot hold a side
-/// raw asks (documentation chunks before their embedding). O(n · p).
+/// Whether `text`, already masked, still holds a secret to the eye of the detector, a private-key
+/// block ([`holds_key_block`]) or a secret once its control and format characters are taken out:
+/// [`find_secret`], [`holds_key_block`] or `hides_secret_behind_hidden_chars`.
+/// **The one egress predicate**: the cache (`held_side`), the filter's content verdict, the diff
+/// re-scans and every egress that cannot hold a side raw (documentation chunks before their
+/// embedding, history) ask it, and a test over a shared corpus pins that none answers weaker. O(n · p).
 ///
 /// # Arguments
 /// * `text` - A text already masked by [`mask_secrets`].
@@ -1448,7 +1510,11 @@ pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
 /// `true` when the text must be withheld.
 // MAGI FIX (MS3 §6 loop16): the documentation egress ran `find_secret` alone (R1 Caspar).
 pub fn leaks_secret(text: &str) -> bool {
-    find_secret(text).is_some() || hides_secret_behind_hidden_chars(text)
+    // MAGI FIX (MS3 §6 loop17, R6a2/R6a1): `holds_key_block` is a term, so a header only the
+    // spaceless reader recognises is withheld here exactly as `held_side` withholds it. This is
+    // the one egress predicate: the cache, the filter's verdict, the diff re-scan and the
+    // documentation egress all ask it (`no_egress_predicate_is_weaker_than_leaks_secret`).
+    find_secret(text).is_some() || holds_key_block(text) || hides_secret_behind_hidden_chars(text)
 }
 
 /// Texts that hold a secret no single pattern pass finds on its own (a key header spelled across

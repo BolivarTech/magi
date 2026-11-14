@@ -15,8 +15,8 @@ use std::sync::{Mutex, PoisonError};
 
 use super::error::ReviewError;
 use super::secrets::{
-    display_path, hides_secret_behind_hidden_chars, holds_key_block, holds_secret_prefix,
-    mask_secrets_keeping_lines, mask_secrets_keeping_lines_within, BoundedMask,
+    display_path, holds_key_block, holds_secret_prefix, leaks_secret, mask_secrets_keeping_lines,
+    mask_secrets_keeping_lines_within, BoundedMask,
 };
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
@@ -977,7 +977,11 @@ fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
     // contiguous pass; the text as it would be served is scanned once more without them, and a
     // secret found there holds the side raw, so the filter leaves its file out (cause `secret`).
     let served = masked.as_ref().map(|m| m.text.as_str()).or(text);
-    let raw_secret = raw_secret || served.is_some_and(hides_secret_behind_hidden_chars);
+    // MAGI FIX (MS3 §6 loop17, R6a2): the one egress predicate, which the filter's verdict asks
+    // too (`content_verdict`), so the side held raw here is exactly the side the filter omits.
+    // Over the served (masked) text it can only fire on what masking leaves: a hidden-character
+    // split, a header the contiguous pass missed.
+    let raw_secret = raw_secret || served.is_some_and(leaks_secret);
     match masked {
         Some(_) if raw_secret => HeldSide {
             bytes: read,
