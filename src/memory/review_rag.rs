@@ -85,6 +85,24 @@ const VANISHED: &str = "gone since it was listed";
 /// Why no query was sent when [`doc_search_query`] withholds it (a key block, RV22).
 const QUERY_WITHHELD: &str = "the query prefix holds a private-key block: no query is sent";
 
+/// Why no history entry is served when the review has no git to check it against `HEAD`.
+const HISTORY_NO_GIT: &str = "history not served: there is no git to check it against HEAD";
+
+/// Why a batch's documentation and history were not searched when its own text holds a private-key
+/// block (RV22): declared for that batch, apart from a missing or down embedder.
+const BATCH_QUERY_WITHHELD: &str =
+    "this batch's text holds a private-key block: no query is sent for it";
+
+/// What embedding one batch's query came to.
+enum QueryVector {
+    /// The query's vector.
+    Vector(Vec<f32>),
+    /// Withheld for this batch alone (a private-key block in its text).
+    Withheld,
+    /// The embedder is down or did not answer, for the rest of the review.
+    Unavailable,
+}
+
 /// Bound on the whole documentation preparation of one review (listing, reads and every
 /// reindex), checked between steps and sources; it runs before the review clock (RV06).
 pub const REINDEX_TIMEOUT_SECS: u64 = 120;
@@ -162,6 +180,11 @@ pub struct StoreRag<'a> {
     pub history_failed: AtomicBool,
     /// Skipped history rows (they did not decode) were declared once.
     pub corrupt_declared: AtomicBool,
+    /// The store's corrupt-row count before this review's first history read: the store counts
+    /// for its lifetime, the review declares only what it skipped itself.
+    pub corrupt_baseline: std::sync::OnceLock<usize>,
+    /// The absence of a git, which leaves history unserved, was declared once.
+    pub history_no_git_declared: AtomicBool,
     /// The reviewed revision's documentation sources: `search` sees only these (RV21).
     pub doc_sources: BTreeSet<DocSource>,
     /// Documentation paths left out for a secret, as `display_path`, returned by `skipped`: a
@@ -403,26 +426,33 @@ impl StoreRag<'_> {
         self
     }
 
-    /// The query's vector, embedded under [`EMBED_QUERY_TIMEOUT_SECS`]; `None` when the embedder
-    /// fails or does not answer, which marks it down for the rest of the review with one WARN.
-    async fn query_vector(&self, embedder: &dyn EmbeddingProvider, text: &str) -> Option<Vec<f32>> {
+    /// The query's vector, embedded under [`EMBED_QUERY_TIMEOUT_SECS`]; [`QueryVector::Unavailable`]
+    /// when the embedder fails or does not answer, which marks it down for the rest of the review
+    /// with one WARN; [`QueryVector::Withheld`] when this batch's own text holds a private-key
+    /// block, which sends nothing and leaves the embedder as it was.
+    async fn query_vector(&self, embedder: &dyn EmbeddingProvider, text: &str) -> QueryVector {
         if self.embedder_down.load(Ordering::SeqCst) {
-            return None;
+            return QueryVector::Unavailable;
         }
         let bound = Duration::from_secs(EMBED_QUERY_TIMEOUT_SECS);
         // MAGI FIX (MS3 §6 loop11): a key block in the query prefix is withheld, never sent.
         // MAGI FIX (MS3 §6 loop12): a key block in this BATCH's text withholds this query only;
         // the embedder is not down and the next batch is served (the filter omits key-block
         // files, so this is a backstop).
-        if !holds_key_block(embedder.query_prefix()) && holds_key_block(text) {
-            return None;
+        // MAGI FIX (MS3 §6 loop16): that withhold is declared for the batch, with its own cause.
+        let prefix_blocked = holds_key_block(embedder.query_prefix());
+        if !prefix_blocked && holds_key_block(text) {
+            return QueryVector::Withheld;
         }
         let cause = match doc_search_query(embedder.query_prefix(), text) {
+            // MAGI FIX (MS3 §6 loop16): a block formed only by prefix and text joined is this
+            // batch's alone, not an embedder that "did not answer" for the rest of the review.
+            None if !prefix_blocked => return QueryVector::Withheld,
             None => QUERY_WITHHELD.to_string(),
             Some(query) => match tokio::time::timeout(bound, embedder.embed(&[query])).await {
                 // MAGI FIX (MS3 §6 loop2): one query, one vector; any other count is not guessed at.
                 Ok(Ok(mut vectors)) => match (vectors.pop(), vectors.is_empty()) {
-                    (Some(v), true) if !v.is_empty() => return Some(v),
+                    (Some(v), true) if !v.is_empty() => return QueryVector::Vector(v),
                     (None, _) => "the embedder answered no vector".to_string(),
                     _ => "the embedder did not answer one vector for the query".to_string(),
                 },
@@ -438,7 +468,7 @@ impl StoreRag<'_> {
                 "the embedder did not answer: documentation and history are left out of this review"
             );
         }
-        None
+        QueryVector::Unavailable
     }
 
     /// The documentation chunks closest to `vector`, among the revision's own sources only.
@@ -569,15 +599,25 @@ impl StoreRag<'_> {
         if self.history_failed.load(Ordering::SeqCst) {
             return Vec::new();
         }
+        // MAGI FIX (MS3 §6 loop16): no git, no entry can be checked against HEAD, so none is
+        // served; said once (R2 Caspar).
+        if self.history_git.is_none() && !self.history_no_git_declared.swap(true, Ordering::SeqCst)
+        {
+            declared.push((ContextKind::History, HISTORY_NO_GIT.to_string()));
+        }
         let on_line = |commit: &str| {
             self.history_git
                 .is_some_and(|g| self.commit_on_line(g, commit))
         };
+        let baseline = *self.corrupt_baseline.get_or_init(|| history.corrupt_rows());
         // MAGI FIX (MS3 §6 loop11): the ancestry filter runs before the cap, in the store.
         match history.validated_on_line(files, &on_line) {
             Ok((entries, cut)) => {
                 // MAGI FIX (MS3 §6 loop11): a row that did not decode is skipped, declared once.
-                if history.corrupt_rows() > 0 && !self.corrupt_declared.swap(true, Ordering::SeqCst)
+                // MAGI FIX (MS3 §6 loop16): the store counts for its lifetime (the TUI keeps it
+                // across reviews); this review declares the rows it skipped itself.
+                if history.corrupt_rows() > baseline
+                    && !self.corrupt_declared.swap(true, Ordering::SeqCst)
                 {
                     declared.push((ContextKind::History, CORRUPT_HISTORY.to_string()));
                 }
@@ -646,26 +686,42 @@ impl StoreRag<'_> {
         withheld: &mut usize,
     ) -> (Option<Vec<ContextItem>>, Option<Vec<ContextItem>>) {
         let was_down = self.embedder_down.load(Ordering::SeqCst);
-        let Some(vector) = self.query_vector(embedder, text).await else {
-            // MAGI FIX (MS3 §6 loop2): a down embedder is said apart from a missing one.
-            // MAGI FIX (MS3 §6 loop12): only when it is down now (a withheld batch is not).
-            if !was_down && self.embedder_down.load(Ordering::SeqCst) {
-                let layers = [
+        let vector = match self.query_vector(embedder, text).await {
+            QueryVector::Vector(v) => v,
+            // MAGI FIX (MS3 §6 loop16): this batch only, with its own cause, and neither layer
+            // is a missing embedder (`without_embedder` stays false).
+            QueryVector::Withheld => {
+                for (on, kind) in [
                     (self.docs.is_some(), ContextKind::Documentation),
                     (self.history.is_some(), ContextKind::History),
-                ];
-                // MAGI FIX (MS3 §6 loop14): a prefix that holds a key block never reached the
-                // embedder, so it is not an embedder that "did not answer".
-                let cause = if holds_key_block(embedder.query_prefix()) {
-                    QUERY_WITHHELD
-                } else {
-                    EMBEDDER_DOWN
-                };
-                for (_, kind) in layers.into_iter().filter(|(on, _)| *on) {
-                    declared.push((kind, cause.to_string()));
+                ] {
+                    if on {
+                        declared.push((kind, BATCH_QUERY_WITHHELD.to_string()));
+                    }
                 }
+                return (Some(Vec::new()), Some(Vec::new()));
             }
-            return (None, None);
+            QueryVector::Unavailable => {
+                // MAGI FIX (MS3 §6 loop2): a down embedder is said apart from a missing one.
+                // MAGI FIX (MS3 §6 loop12): only when it is down now (a withheld batch is not).
+                if !was_down && self.embedder_down.load(Ordering::SeqCst) {
+                    let layers = [
+                        (self.docs.is_some(), ContextKind::Documentation),
+                        (self.history.is_some(), ContextKind::History),
+                    ];
+                    // MAGI FIX (MS3 §6 loop14): a prefix that holds a key block never reached the
+                    // embedder, so it is not an embedder that "did not answer".
+                    let cause = if holds_key_block(embedder.query_prefix()) {
+                        QUERY_WITHHELD
+                    } else {
+                        EMBEDDER_DOWN
+                    };
+                    for (_, kind) in layers.into_iter().filter(|(on, _)| *on) {
+                        declared.push((kind, cause.to_string()));
+                    }
+                }
+                return (None, None);
+            }
         };
         let docs = self.documentation(&vector, declared);
         (
@@ -676,7 +732,7 @@ impl StoreRag<'_> {
 
     /// Whether neither documentation nor history can enter any later batch: each is absent,
     /// unavailable or failed for the rest of the review. A down embedder is not checked here:
-    /// [`Self::query_vector`] answers `None` for it without a call, so the stores are what this
+    /// [`Self::query_vector`] answers `Unavailable` for it without a call, so the stores are what this
     /// adds. O(1).
     fn both_layers_down(&self) -> bool {
         let docs =
@@ -987,6 +1043,8 @@ impl RagSource for ReviewRag<'_> {
             docs_shrunk: AtomicBool::new(false),
             history_failed: AtomicBool::new(false),
             corrupt_declared: AtomicBool::new(false),
+            corrupt_baseline: std::sync::OnceLock::new(),
+            history_no_git_declared: AtomicBool::new(false),
             doc_sources: BTreeSet::new(),
             withheld_sources: Vec::new(),
             masked_sources: Vec::new(),
@@ -1536,10 +1594,11 @@ pub async fn reindex_or_degrade(
 ///
 /// [`MemoryError::Storage`] with the store's cause redacted ([`outward_text`]), never swallowed.
 ///
-/// Not one transaction, on purpose: a reclassified status is git's evidence whether or not the
-/// findings are then recorded, and `touch` only moves an entry in the due queue; a failed
-/// `record` is returned and leaves nothing stored wrong. A failure part-way leaves the state a
-/// budget stop after the last entry done would (verified, MS3 §6 loop10); each step is per entry.
+/// One transaction (MS3 §6 loop10): git is asked per due entry first, within the `budget`, and
+/// the gathered writes (each reclassified status, the `checked_at` of every entry checked, then
+/// the findings recorded) are applied together by one `apply_review`, all or nothing
+/// (`apply_review_is_atomic`). A failure rolls the whole review's history update back, so the
+/// next review reclassifies the same queue; nothing is ever half applied.
 pub fn record_review(
     history: &ReviewHistoryStore,
     findings: &[HistoryEntry],
@@ -1722,6 +1781,8 @@ mod tests {
                 docs_shrunk: Default::default(),
                 history_failed: Default::default(),
                 corrupt_declared: Default::default(),
+                corrupt_baseline: Default::default(),
+                history_no_git_declared: Default::default(),
                 doc_sources: BTreeSet::new(),
                 withheld_sources: Vec::new(),
                 masked_sources: Vec::new(),

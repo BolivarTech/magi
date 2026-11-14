@@ -512,7 +512,10 @@ impl FileUnits {
     }
 }
 
-/// The definitions of the names the batch code uses, one item per definition.
+/// The definitions of the names the batch code uses, one item per definition, at most
+/// [`MAX_DEFINITIONS_PER_NAME`] per name (the first by `(file, line)`) and
+/// [`MAX_DEFINITIONS_TOTAL`] for the batch; each name cut by either is returned for the caller
+/// to declare.
 ///
 /// The input is the batch's raw code: every identifier counts, quoted or not, in the order it
 /// first appears. Accepted over-retrieval (declared): a name in a comment or a string fetches its
@@ -544,12 +547,23 @@ pub fn definitions_for(
     let mut names = HashSet::new();
     let mut files: HashMap<&str, Option<String>> = HashMap::new();
     let mut items = Vec::new();
+    let mut capped = Vec::new();
     for name in identifier_runs(text) {
         if !names.insert(name) {
             continue;
         }
         let places = index.definitions(name);
-        for (file, first, last) in places {
+        // MAGI FIX (MS3 §6 loop16): the one retrieval layer without a cap (R2, all three
+        // mages): the first MAX_DEFINITIONS_PER_NAME by `(file, line)`, whatever the listing
+        // order, and at most MAX_DEFINITIONS_TOTAL for the batch; a cut name is declared.
+        let mut ordered: Vec<_> = places.iter().collect();
+        ordered.sort_unstable();
+        let room = MAX_DEFINITIONS_TOTAL.saturating_sub(items.len());
+        let take = ordered.len().min(MAX_DEFINITIONS_PER_NAME).min(room);
+        if take < ordered.len() {
+            capped.push(name.to_string());
+        }
+        for (file, first, last) in ordered.into_iter().take(take) {
             if !files.contains_key(file.as_str()) {
                 files.insert(file, read_or_note(sources, file, unread));
             }
@@ -567,7 +581,7 @@ pub fn definitions_for(
             });
         }
     }
-    (items, Vec::new())
+    (items, capped)
 }
 
 /// The units that name any of `names` (the changed units), one item per `(file, unit)`, never
