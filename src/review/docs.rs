@@ -1111,11 +1111,32 @@ pub fn without_secrets(chunks: Vec<DocChunk>) -> (Vec<DocChunk>, Vec<String>) {
 ///
 /// The kept sources, and whether any was left out (to be reported).
 pub fn bounded(
-    mut sources: Vec<(DocSource, Vec<DocChunk>)>,
+    sources: Vec<(DocSource, Vec<DocChunk>)>,
 ) -> (Vec<(DocSource, Vec<DocChunk>)>, bool) {
+    let (kept, caps) = bounded_capped(sources);
+    (kept, caps.chunks || caps.bytes)
+}
+
+/// Which of the index's two bounds left a source out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CapsHit {
+    /// A source was left out for [`MAX_DOC_CHUNKS`].
+    pub chunks: bool,
+    /// A source was left out for [`MAX_DOC_INDEX_BYTES`].
+    pub bytes: bool,
+}
+
+/// [`bounded`], naming the bound that cut: the report says which cap a review hit.
+///
+/// # Returns
+///
+/// The kept sources, and which bounds left a source out.
+pub fn bounded_capped(
+    mut sources: Vec<(DocSource, Vec<DocChunk>)>,
+) -> (Vec<(DocSource, Vec<DocChunk>)>, CapsHit) {
     sources.sort_by(|a, b| a.0.cmp(&b.0));
     let (mut total, mut bytes) = (0usize, 0usize);
-    let mut truncated = false;
+    let mut truncated = CapsHit::default();
     let mut kept = Vec::with_capacity(sources.len());
     for (source, chunks) in sources {
         // MAGI FIX (MS3 §6 loop8): only the chunk count was bounded, not the bytes held.
@@ -1126,10 +1147,11 @@ pub fn bounded(
         // MAGI FIX (MS3 §6 loop15): a source with no chunk still costs a registry row, so it
         // counts as one against the bound (R1 Caspar).
         let cost = chunks.len().max(1);
-        if total.saturating_add(cost) > MAX_DOC_CHUNKS
-            || bytes.saturating_add(size) > MAX_DOC_INDEX_BYTES
-        {
-            truncated = true;
+        let over_chunks = total.saturating_add(cost) > MAX_DOC_CHUNKS;
+        let over_bytes = bytes.saturating_add(size) > MAX_DOC_INDEX_BYTES;
+        if over_chunks || over_bytes {
+            truncated.chunks |= over_chunks;
+            truncated.bytes |= over_bytes;
         } else {
             total += cost;
             bytes += size;

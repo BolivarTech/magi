@@ -114,6 +114,10 @@ pub struct IndexDeclarations {
     pub withheld: usize,
     /// Whether indexing stopped at its cap.
     pub truncated: bool,
+    /// Whether the cut was at the chunk bound (`MAX_DOC_CHUNKS`).
+    pub chunk_cap: bool,
+    /// Whether the cut was at the byte bound (`MAX_DOC_INDEX_BYTES`).
+    pub byte_cap: bool,
     /// Whether a source was left out because reading it passed the review's size cap.
     pub size_capped: bool,
     /// Whether a source was left out because its bytes are not UTF-8 text.
@@ -329,7 +333,8 @@ pub fn assemble(
 
 /// The `trimmed` label of a documentation index cut at its bounds: it names both, since either
 /// can cut ([`crate::review::docs::bounded`]).
-fn truncated_label() -> String {
+fn truncated_label(d: &IndexDeclarations) -> String {
+    let _ = (d.chunk_cap, d.byte_cap);
     format!(
         "document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS}) or \
          MAX_DOC_INDEX_BYTES ({MAX_DOC_INDEX_BYTES})"
@@ -349,7 +354,7 @@ pub fn declare_index(a: &mut Assembled, d: &IndexDeclarations) {
     a.withheld = a.withheld.saturating_add(d.withheld);
     if d.truncated {
         a.trimmed
-            .push((ContextKind::Documentation, truncated_label()));
+            .push((ContextKind::Documentation, truncated_label(d)));
     }
     // MAGI FIX (MS3 §6 loop4): a source over the size cap was declared as the chunk cap.
     if d.size_capped {
@@ -1778,6 +1783,30 @@ mod tests {
             !cut.contains("sk-ant-"),
             "a cut fragment of the key left: {cut}"
         );
+    }
+
+    #[test]
+    fn a_truncation_names_the_bound_that_cut() {
+        // [MAGI S6 MS3 loop17, R1] The label named both bounds whichever one cut.
+        let label = |chunk_cap, byte_cap| {
+            let mut a = assemble(10, 1_000, vec![], vec![], None, None).expect("assemble");
+            declare_index(
+                &mut a,
+                &IndexDeclarations {
+                    truncated: true,
+                    chunk_cap,
+                    byte_cap,
+                    ..Default::default()
+                },
+            );
+            a.trimmed[0].1.clone()
+        };
+        let by_bytes = label(false, true);
+        assert!(by_bytes.contains("MAX_DOC_INDEX_BYTES"), "{by_bytes}");
+        assert!(!by_bytes.contains("MAX_DOC_CHUNKS"), "{by_bytes}");
+        let by_chunks = label(true, false);
+        assert!(by_chunks.contains("MAX_DOC_CHUNKS"), "{by_chunks}");
+        assert!(!by_chunks.contains("MAX_DOC_INDEX_BYTES"), "{by_chunks}");
     }
 
     #[test]

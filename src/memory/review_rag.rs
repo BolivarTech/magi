@@ -27,8 +27,8 @@ use tokio::time::Instant;
 
 use magi_rs::review::batching::{BatchItem, Companion, ReviewBatch};
 use magi_rs::review::docs::{
-    bounded, doc_index_id, live_doc_sources, netted_chunks, revision_doc_sources, worktree_key,
-    yields_doc_chunks, DocChunk, DocSource,
+    bounded_capped, doc_index_id, live_doc_sources, netted_chunks, revision_doc_sources,
+    worktree_key, yields_doc_chunks, DocChunk, DocSource,
 };
 use magi_rs::review::error::ReviewError;
 use magi_rs::review::history::{
@@ -1503,8 +1503,10 @@ fn bounded_into(
     chunked: Vec<(DocSource, Vec<DocChunk>)>,
 ) -> Vec<(DocSource, Vec<DocChunk>)> {
     let offered: Vec<DocSource> = chunked.iter().map(|(s, _)| s.clone()).collect();
-    let (kept, truncated) = bounded(chunked);
-    prep.doc_index.truncated |= truncated;
+    let (kept, caps) = bounded_capped(chunked);
+    prep.doc_index.truncated |= caps.chunks || caps.bytes;
+    prep.doc_index.chunk_cap |= caps.chunks;
+    prep.doc_index.byte_cap |= caps.bytes;
     let kept_set: BTreeSet<&DocSource> = kept.iter().map(|(s, _)| s).collect();
     for s in offered.iter().filter(|s| !kept_set.contains(s)) {
         prep.doc_sources.remove(s);
@@ -1745,6 +1747,7 @@ pub fn collect_garbage(
 mod tests {
     use super::*;
     use crate::memory::review_docs::test_embedder::{chunk, src, FailingEmbedder, FakeEmbedder};
+    use magi_rs::review::docs::bounded;
     use magi_rs::review::history::MAX_RECLASSIFY_PER_REVIEW;
     use magi_rs::review::history::{HistoryEntry, HistoryStatus};
     use magi_rs::review::rag::ContextKind;
