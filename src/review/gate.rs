@@ -1857,6 +1857,31 @@ mod tests {
     }
 
     #[test]
+    fn an_armor_end_of_another_label_never_closes_a_key_block() {
+        // [MAGI S6 MS3 loop17, R6b2 Melchior] Any `END` line closed the block, so a certificate's
+        // footer inside a key's armor ended it early and a finding past it, still in the key's
+        // body, was judged with body lines in its window.
+        let d = ARMOR_DASHES;
+        let body: String = (0..99)
+            .map(|_| "MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w\n")
+            .collect();
+        let code = format!(
+            "{d}BEGIN RSA PRIVATE KEY{d}\n{body}{d}END CERTIFICATE{d}\n{body}{d}END RSA PRIVATE KEY{d}\n"
+        );
+        assert!(
+            window_overlaps_block_of(&code, 150, &holds_key_block),
+            "the key block runs to its own END line"
+        );
+        let tail: String = (0..100).map(|i| format!("f{i}\n")).collect();
+        let closed =
+            format!("{d}BEGIN RSA PRIVATE KEY{d}\nbody\n{d}END RSA PRIVATE KEY{d}\n{tail}");
+        assert!(
+            !window_overlaps_block_of(&closed, 90, &holds_key_block),
+            "its own END line still closes it"
+        );
+    }
+
+    #[test]
     fn footer_rules_agree() {
         // [MAGI S6 MS3 loop13, R6b] The gate's END rule and `secrets::mask_secrets`' are two
         // implementations kept apart on purpose; this pins their relation. Over the canonical
