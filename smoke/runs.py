@@ -2292,6 +2292,11 @@ def review_masked_files() -> tuple[tuple[str, bytes], ...]:
     return ((REVIEW_MASKED_FILE, body),)
 
 
+#: What the product's embedder prepends to a stored text (``document_prefix``, default in
+#: ``src/memory/config.rs``; pinned by ``test_rust_sync``). A documentation chunk is identified by
+#: it, a retrieval query carrying ``search_query: `` instead.
+EMBED_DOCUMENT_PREFIX = "search_document: "
+
 #: The doc comment of R18's file: S55 finds it indexed alone, as a documentation
 #: chunk, in a request the relay forwarded to the embedder.
 REVIEW_MASKED_DOC = b"Returns the token of the toy service."

@@ -205,15 +205,22 @@ def _embedded_texts(bodies):
 def _chunk_sent(bodies, doc, code):
     """Whether *doc* was embedded alone (a documentation chunk), without *code*.
 
+    MAGI FIX (MS3 §6 loop17, R7a1): a chunk is identified by the embedder's document prefix
+    (:data:`smoke.runs.EMBED_DOCUMENT_PREFIX`), not by the absence of *code*: a retrieval query
+    that happens to omit *code* is not documentation. The harness environment keeps the product's
+    default prefix; one configured otherwise would read as no chunk sent (a FAIL, never a pass).
+
     Args:
         bodies: The run's ``(path, body)`` record.
         doc: The doc comment's text.
         code: Text only the code carries, never the chunk.
 
     Returns:
-        bool: Whether some embedded text holds *doc* and not *code*.
+        bool: Whether some embedded text starts with the document prefix, holds *doc* and not
+        *code*.
     """
-    return any(doc in t and code not in t for t in _embedded_texts(bodies))
+    return any(t.startswith(runs.EMBED_DOCUMENT_PREFIX) and doc in t and code not in t
+               for t in _embedded_texts(bodies))
 
 
 #: The run S55 reads: a review with the environment's own embedder.
