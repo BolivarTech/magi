@@ -2056,6 +2056,13 @@ class ReviewMaskingSyncTests(unittest.TestCase):
         # its path, and S54 would stop exercising the key block's content while still listing `secret`.
         self._assert_no_opening_in(runs.REVIEW_KEYBLOCK_FILE)
 
+    def test_the_products_matcher_kinds_are_exactly_the_ones_the_openings_read(self) -> None:
+        # MAGI FIX (MS3 §6 loop17): an unknown kind is refused by `secret_openings`; a known one the
+        # product dropped left a reading for a variant that no longer exists, unnoticed.
+        from smoke.tests.rust_source import KNOWN_MATCHERS, SECRETS_SOURCE
+        text = without_comments(_source(SECRETS_SOURCE))
+        self.assertEqual(set(KNOWN_MATCHERS), set(re.findall(r"matcher:\s*Matcher::(\w+)", text)))
+
     def test_the_openings_parse_includes_every_github_token_prefix(self) -> None:
         self.assertTrue({"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "://"} <= set(_secret_openings()))
 
@@ -2140,6 +2147,8 @@ class ReviewMaskingSyncTests(unittest.TestCase):
         config_rs = without_comments(_source("src/memory/config.rs"))
         doc_prefix = one_definition(config_rs, r'"(search_document: )"\.into\(\)', "src/memory/config.rs").group(1)
         query_prefix = one_definition(config_rs, r'"(search_query: )"\.into\(\)', "src/memory/config.rs").group(1)
+        # MAGI FIX (MS3 §6 loop17): `_chunk_sent` identifies a documentation chunk by this prefix.
+        self.assertEqual(doc_prefix, runs.EMBED_DOCUMENT_PREFIX)
         embeddings = [json.loads(body)["input"][0] for path, body in R18_HEALTHY_REQUESTS
                       if path == "/v1/embeddings"]
         self.assertEqual(2, len(embeddings), embeddings)

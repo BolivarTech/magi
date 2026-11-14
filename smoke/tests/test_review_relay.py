@@ -57,9 +57,15 @@ class _Short(http.server.BaseHTTPRequestHandler):
         """Keep the test output quiet."""
 
 
-def _chunk(text: str) -> tuple:
-    """An ``/embeddings`` request for *text*, as the relay records it."""
-    return ("/v1/embeddings", json.dumps({"input": [text]}).encode())
+def _chunk(text: str, prefix: str = runs.EMBED_DOCUMENT_PREFIX) -> tuple:
+    """An ``/embeddings`` request for *text*, as the relay records it.
+
+    Args:
+        text: What is embedded.
+        prefix: What the product's embedder prepends (a stored text's by default; ``""`` when
+            *text* already carries its own, as a query does).
+    """
+    return ("/v1/embeddings", json.dumps({"input": [prefix + text]}).encode())
 
 
 class _Redirect(http.server.BaseHTTPRequestHandler):
@@ -444,7 +450,7 @@ class LoopSixteenRelayTests(unittest.TestCase):
 
     def test_s56_a_missing_header_record_is_cannot_test_for_its_header_assertion(self) -> None:
         # MAGI FIX (MS3 §6 loop16, R7a2): `request_headers or ()` read a missing record as no header.
-        chunk = ("/v1/embeddings", json.dumps({"input": [runs.REVIEW_COMMITTED_DOC.decode()]}).encode())
+        chunk = _chunk(runs.REVIEW_COMMITTED_DOC.decode())
         r = _with(_result("R20", 0, {}), request_bodies=(chunk, _S56_TRIO), request_headers=None)
         self.assertEqual([P, P, C], _judged("S56", r, rc.S56_ASSERTIONS))
 
@@ -452,13 +458,35 @@ class LoopSixteenRelayTests(unittest.TestCase):
         self.assertIn("embedded chunk", rc.S56_ASSERTIONS[2])
         self.assertNotIn("embedding request carries the parent", rc.S56_ASSERTIONS[2])
 
-    def test_the_fixture_needles_are_disjoint(self) -> None:
-        needles = (runs.REVIEW_COMMITTED_DOC, runs.REVIEW_PARENT_DOC, runs.REVIEW_DIRTY_DOC,
-                   runs.REVIEW_MASKED_DOC, rc._ANSWER_CODE.encode())
-        for first in needles:
-            for second in needles:
-                if first is not second:
+    def _assert_disjoint(self, needles) -> None:
+        """Fail when one needle is inside another; pairs go by index, never by identity."""
+        for i, first in enumerate(needles):
+            for j, second in enumerate(needles):
+                if i != j:
                     self.assertNotIn(first, second)
+
+    def test_the_fixture_needles_are_disjoint(self) -> None:
+        # MAGI FIX (MS3 §6 loop17): REVIEW_MASKED_KEY joins the set, so the doc comment never
+        # contains the key (nor the key the doc), which would make S53's two claims one.
+        self._assert_disjoint((runs.REVIEW_COMMITTED_DOC, runs.REVIEW_PARENT_DOC, runs.REVIEW_DIRTY_DOC,
+                               runs.REVIEW_MASKED_DOC, runs.REVIEW_MASKED_KEY, rc._ANSWER_CODE.encode()))
+
+    def test_the_disjointness_check_sees_two_equal_needles(self) -> None:
+        # `first is not second` skipped two equal bytes objects (one interned object): the check
+        # was blind to exactly the collision it exists for.
+        with self.assertRaises(AssertionError):
+            self._assert_disjoint((b"same", b"same"))
+        with self.assertRaises(AssertionError):
+            self._assert_disjoint((b"a-needle", b"a needle holds a-needle"))
+
+    def test_a_chunk_is_identified_by_the_document_prefix(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1): `doc in t and code not in t` took any embedded text
+        # without the code for a chunk, a retrieval query cut short included.
+        doc, code = "Returns the token.", "pub fn token()"
+        for text, want in (("search_document: " + doc, True), ("search_query: " + doc, False),
+                           (doc, False), ("search_document: " + doc + code, False)):
+            with self.subTest(text=text):
+                self.assertEqual(want, rc._chunk_sent((_chunk(text, prefix=""),), doc, code))
 
     def test_the_readme_and_docstring_declare_what_the_scenarios_leave_open(self) -> None:
         root = pathlib.Path(runs.__file__).parent
@@ -588,7 +616,8 @@ class RelayScenarioTests(unittest.TestCase):
         # lines included, so it carries the parent's doc comment beside the batch's code. Only a
         # chunk (the doc comment without that code) is another revision's documentation.
         good = _chunk(runs.REVIEW_COMMITTED_DOC.decode())
-        query = _chunk("search_query: -    /// " + runs.REVIEW_PARENT_DOC.decode() + "\n+pub fn answer() {}")
+        query = _chunk("search_query: -    /// " + runs.REVIEW_PARENT_DOC.decode() + "\n+pub fn answer() {}",
+                       prefix="")
         self.assertEqual([P, P, P], _judged("S56", _with(_result("R20", 0, {}),
                                                          request_bodies=(good, query, _S56_TRIO)),
                                             rc.S56_ASSERTIONS))
