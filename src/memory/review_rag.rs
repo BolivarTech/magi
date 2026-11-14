@@ -5024,6 +5024,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_batch_packed_to_the_planners_limit_still_assembles_and_one_token_less_does_not() {
+        // [MAGI S6 MS3 loop17, R2 Balthasar] Who owns the context heading across the planning /
+        // assembly seam: the planner packs to the prompt limit less the heading (`plan_review`),
+        // and `context_for` takes the heading off `limit_tokens` itself. A batch packed exactly to
+        // the planner's limit must assemble; one token less is the visible error.
+        let f = RagFixture::new(&[("a.rs", "fn worktree() {}\n")]).await;
+        let two = TwoSides {
+            new: vec![("a.rs", "fn f() {\n    b();\n    cc();\n}\n")],
+            old: vec![("a.rs", "fn f() {\n    b();\n    c();\n}\n")],
+        };
+        let mut rag = f.rag(false);
+        rag.sources = &two;
+        let diff =
+            "diff --git a/a.rs b/a.rs\nindex 31d2d81..eec0b67 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -1,4 +1,4 @@\n fn f() {\n     b();\n-    c();\n+    cc();\n }\n";
+        let files = vec![magi_rs::review::input::ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff.into()),
+        }];
+        let heading = estimate_tokens(CONTEXT_HEADING);
+        let plan = |limit: usize| {
+            magi_rs::review::batching::plan_batches_with(&files, &two, &f.registry, limit, &|i| {
+                rag.companion(i)
+            })
+        };
+        let roomy = plan(100_000).expect("plans");
+        let packed = roomy[0].tokens + roomy[0].companion_tokens;
+        assert!(roomy[0].companion_tokens > 0, "the unit is charged");
+        // The planner, at exactly that limit, packs the same batch (the limit is reached).
+        let at_limit = plan(packed).expect("fits at its own size");
+        assert_eq!(at_limit.len(), 1);
+        rag.limit_tokens = packed + heading;
+        rag.context_for(&at_limit[0])
+            .await
+            .expect("a batch packed to the planner's limit assembles");
+        rag.limit_tokens = packed + heading - 1;
+        assert!(
+            matches!(
+                rag.context_for(&at_limit[0]).await,
+                Err(ReviewError::TooLargeForBatch { .. })
+            ),
+            "one token under, the batch and its unit no longer fit"
+        );
+    }
+
+    #[tokio::test]
     async fn an_old_side_and_a_new_side_unit_on_the_same_lines_are_two_companions() {
         // [MS3 final review m2] Planning charges what assemble adds: both units, never one.
         let f = RagFixture::new(&[("a.rs", "fn worktree() {}\n")]).await;
