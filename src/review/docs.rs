@@ -2233,6 +2233,24 @@ mod tests {
         );
     }
     #[test]
+    fn documentation_discovery_ignores_the_case_of_the_name() {
+        // [MAGI S6 MS3 loop17, R1] `Readme.md` and `Docs/Guide.MD` are documentation on the
+        // case-insensitive file systems of Windows and macOS.
+        for p in [
+            "Readme.md",
+            "readme.md",
+            "CLAUDE.MD",
+            "Docs/Guide.MD",
+            "ADR/0001.md",
+        ] {
+            assert!(is_doc_source(p), "{p}");
+        }
+        for p in ["sub/Readme.md", "Docs/guide.txt"] {
+            assert!(!is_doc_source(p), "{p}");
+        }
+    }
+
+    #[test]
     fn docs_txt_is_not_a_doc_source() {
         // [MAGI S6 MS3 loop10, R1 Caspar] The two predicates disagreed on `docs/api.txt`.
         let reg = LanguageRegistry::new();
