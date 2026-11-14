@@ -1192,7 +1192,18 @@ DELETE FROM code_review_history;
 
 Use `DELETE FROM`, never `DROP TABLE`, for these three: a database missing one of them is
 taken for one written by magi-rs 0.24.x or earlier and refuses to open. The documentation
-index is rebuilt on the next review.
+index is rebuilt on the next review. If you already dropped one, the next open names the
+missing table and does not touch the file; recover by restoring your backup of the database
+(a dropped table cannot be recreated in place without the same migration this version
+deliberately does not ship) or by deleting `.magi-rs-memory.db*` and loading your vault secrets
+again (`magi-rs vault set`).
+
+The documentation index stores no path, content key or chunk hash in the clear: each lookup
+key is an HMAC-SHA-256 tag under a subkey derived from the database's data key, and the path
+is kept encrypted next to the chunk. Only the embedding model and its dimension, and whether a
+source came from the working tree, are visible to someone who reads the file without the
+passphrase. A review refused for its `--timeout` is refused before the index is opened and
+before any embedder call.
 
 The finding history is never pruned on its own; this purge is the way to empty it. The
 documentation index is cleaned after each review (see "History" under the code review), except
