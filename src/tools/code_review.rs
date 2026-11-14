@@ -2183,11 +2183,19 @@ fn follow_up_steps(
                 removed = removed,
                 "documentation index cleaned"
             ),
-            Ok(None) => tracing::event!(
-                target: REVIEW_LOG_TARGET,
-                tracing::Level::WARN,
-                "{GC_NOT_CLEANED}"
-            ),
+            // MAGI FIX (MS3 §6 loop17, R1): the skip also reaches the report's warning, not only
+            // the run log.
+            Ok(None) => {
+                tracing::event!(
+                    target: REVIEW_LOG_TARGET,
+                    tracing::Level::WARN,
+                    "{GC_NOT_CLEANED}"
+                );
+                warning = Some(match warning {
+                    Some(earlier) => format!("{earlier}; {GC_NOT_CLEANED}"),
+                    None => GC_NOT_CLEANED.to_string(),
+                });
+            }
             Err(e) => {
                 let error = egress_text(&e.to_string());
                 tracing::event!(
