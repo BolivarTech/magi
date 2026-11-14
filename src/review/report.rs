@@ -1059,7 +1059,7 @@ const KEY_SUFFIXES_EXHAUSTED_KEY: &str = "(too many colliding keys)";
 
 /// Every ` (n)` suffix from the first one tried to `usize::MAX` was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeySuffixesExhausted;
+pub(crate) struct KeySuffixesExhausted;
 
 /// The first free `base (n)` key with `n >= first`; O(taken) for a sane `first`.
 ///
@@ -1070,7 +1070,7 @@ pub struct KeySuffixesExhausted;
 ///
 /// # Returns
 /// The free key, or [`KeySuffixesExhausted`] when the counter would pass `usize::MAX`.
-pub fn distinct_key_from(
+pub(crate) fn distinct_key_from(
     taken: &serde_json::Map<String, Value>,
     base: &str,
     first: usize,

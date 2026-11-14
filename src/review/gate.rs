@@ -77,6 +77,13 @@ const CAUSE_CHAIN_EXHAUSTED: &str = "chain exhausted";
 /// `critical` defects was not measured: neither `tune` nor `verify` holds a real `critical`
 /// judged `false_positive`. A constant, not configuration, by the user's decision (U21, bound at
 /// 0.75): moving it is a recalibration, decided with evidence, never an operator knob.
+///
+/// Interaction with a model's `min_confidence` (declared, MS3 §6 loop16): the two compose. For a
+/// model whose `min_confidence` is at or above this bound, an answer under the bound is already
+/// `low_confidence` by the model's own threshold, so this rule adds nothing for it; that is the
+/// specified behavior (the 2026-11-06 amendment filters a `critical` at confidence >= 0.75), not
+/// a gap. For a model with a lower `min_confidence` (the built-in chain: 0.40, 0.32, 0.80) the
+/// window between its threshold and this bound is where a `critical` stays in the main list.
 pub const CRITICAL_MIN_CONFIDENCE: f64 = 0.75;
 /// Cause of a critical finding judged a false positive with low confidence: it stays in the main list.
 const CAUSE_CRITICAL_NEVER_FILTERED: &str = "critical never filtered";
@@ -257,10 +264,20 @@ fn constituents(finding: &ConsolidatedFinding) -> Vec<(&str, &str)> {
     pairs
 }
 
+/// The first and last line (numbered from 1, both included) of the window around `line`: the one
+/// definition [`numbered_window`] cuts and [`window_meets_block`] tests against, so what is shown
+/// to the gate and what is checked for a key block cannot drift apart
+/// (`the_window_shown_and_the_window_checked_share_their_bounds`). O(1).
+fn window_bounds(line: u32) -> (u32, u32) {
+    (
+        line.saturating_sub(GATE_CONTEXT_LINES).max(1),
+        line.saturating_add(GATE_CONTEXT_LINES),
+    )
+}
+
 /// The lines `line +/- GATE_CONTEXT_LINES` of `code`, numbered from 1.
 fn numbered_window(code: &str, line: u32) -> String {
-    let first = line.saturating_sub(GATE_CONTEXT_LINES).max(1);
-    let last = line.saturating_add(GATE_CONTEXT_LINES);
+    let (first, last) = window_bounds(line);
     let mut out = String::new();
     for (n, text) in (1u32..).zip(code.lines()) {
         if n > last {
@@ -342,6 +359,27 @@ struct KeyBlockScan {
     blocks: Vec<(u32, u32)>,
 }
 
+impl KeyBlockScan {
+    /// The scan of `code` with `opens` the block detector (the production one is
+    /// [`holds_key_block`]; a test gives one that reads a header only across lines, which none
+    /// does today, so the `untracked` fallback is exercised through the production path of
+    /// [`Gate::key_block_scan`]). O(bytes of `code`) times the cost of `opens`.
+    fn of(code: &str, opens: &dyn Fn(&str) -> bool) -> Self {
+        let holds = opens(code);
+        let untracked = holds && untracked_block(code, opens);
+        let blocks = if holds && !untracked {
+            tracked_blocks(code, opens)
+        } else {
+            Vec::new()
+        };
+        Self {
+            holds,
+            untracked,
+            blocks,
+        }
+    }
+}
+
 /// [`window_overlaps_key_block`] with the block detector `opens` given, so the cases the real
 /// detector cannot produce today (a header read only across lines) are testable.
 #[cfg(test)]
@@ -352,8 +390,7 @@ fn window_overlaps_block_of(code: &str, line: u32, opens: &dyn Fn(&str) -> bool)
 
 /// Whether the window around `line` overlaps one of `blocks` ([`tracked_blocks`]). O(blocks).
 fn window_meets_block(blocks: &[(u32, u32)], line: u32) -> bool {
-    let first = line.saturating_sub(GATE_CONTEXT_LINES).max(1);
-    let last = line.saturating_add(GATE_CONTEXT_LINES);
+    let (first, last) = window_bounds(line);
     blocks
         .iter()
         .any(|&(start, end)| start <= last && end >= first)
@@ -591,8 +628,11 @@ pub struct Gate<'a> {
     /// The SHA-256 of the last code scanned for private-key blocks, and what the scan found: the
     /// findings of one file come together, so its whole-code scans run once, not once per
     /// finding. Keyed by the digest, so no copy of a file (up to `MAX_REVIEW_FILE_BYTES`) is
-    /// held and no full comparison is paid; a digest that matches is the same code, since SHA-256
-    /// does not collide in practice (a miss only rescans).
+    /// held (hashing costs more per byte than a comparison would: the gain is the memory, not
+    /// the time); a digest that matches is the same code, since SHA-256 does not collide in
+    /// practice (a miss only rescans). One slot: the O(files) bound holds for findings grouped by
+    /// file, as the pipeline hands them; in any other order each file change rescans (correct,
+    /// `scan_memo_any_order`, only slower).
     // MAGI FIX (MS3 §6 loop12): it kept a copy of the file and compared it whole (R6b Balthasar).
     last_scan: Option<([u8; 32], KeyBlockScan)>,
     /// Whole-code scans done (tests count them: `scan_memo_is_keyed_by_digest`).
@@ -649,18 +689,7 @@ impl<'a> Gate<'a> {
         {
             self.scans += 1;
         }
-        let holds = holds_key_block(code);
-        let untracked = holds && untracked_block(code, &holds_key_block);
-        let blocks = if holds && !untracked {
-            tracked_blocks(code, &holds_key_block)
-        } else {
-            Vec::new()
-        };
-        let scan = KeyBlockScan {
-            holds,
-            untracked,
-            blocks,
-        };
+        let scan = KeyBlockScan::of(code, &holds_key_block);
         self.last_scan = Some((digest, scan.clone()));
         scan
     }
@@ -985,12 +1014,13 @@ impl<'a> Gate<'a> {
         // masking (`sendable` returns a `Value`, and widening it for the flag would change every
         // caller). A finding that itself quotes the marker therefore also stays out of `filtered`
         // (`a_quoted_marker_is_never_filtered`): the safe direction, one `low_confidence`.
-        let guard = guard.or_else(|| {
-            state
-                .to_string()
-                .contains(REDACTED_OPEN)
-                .then_some(CAUSE_MASKED_CODE)
-        });
+        // MAGI FIX (MS3 §6 loop16, R6b2): the mask guard is kept apart from the caller's, so it
+        // is named even when another guard (or the critical rule) took the state's own cause.
+        let masked = state
+            .to_string()
+            .contains(REDACTED_OPEN)
+            .then_some(CAUSE_MASKED_CODE);
+        let guard = guard.or(masked);
         let mut lean: Option<Outcome> = None;
         let mut called = false;
         let mut all_transport = true;
@@ -1052,7 +1082,7 @@ impl<'a> Gate<'a> {
                     };
                     // MAGI FIX (MS3 §6 loop15): the guard the state raised is named beside the
                     // critical cause that replaced it.
-                    let guard_also = guard.filter(|_| cause == Some(CAUSE_CRITICAL_NEVER_FILTERED));
+                    let guard_also = masked.filter(|m| cause.is_some_and(|c| c != *m));
                     return Outcome {
                         decided: true,
                         guard_also,
@@ -1913,6 +1943,49 @@ mod tests {
         let scan = g.key_block_scan(&far);
         assert!(!window_overlaps_key_block(1, &scan));
         assert!(window_overlaps_key_block(201 + 1, &scan));
+    }
+
+    #[test]
+    fn the_window_shown_and_the_window_checked_share_their_bounds() {
+        // [MAGI S6 MS3 loop16, R6b2] `numbered_window` and `window_meets_block` each computed the
+        // window: a block whose first line is the last shown line, or whose last line is the first
+        // shown, must be both shown and found, one line further neither.
+        for line in [1u32, 5, GATE_CONTEXT_LINES, GATE_CONTEXT_LINES + 1, 200] {
+            let (first, last) = window_bounds(line);
+            let code: String = (1..=line + GATE_CONTEXT_LINES + 3)
+                .map(|n| format!("l{n}\n"))
+                .collect();
+            let shown = numbered_window(&code, line);
+            let shown_has = |n: u32| shown.lines().any(|l| l.starts_with(&format!("{n}: ")));
+            assert!(shown_has(first) && shown_has(last), "line {line}");
+            assert!(!shown_has(last + 1), "line {line}");
+            assert!(first == 1 || !shown_has(first - 1), "line {line}");
+            assert!(window_meets_block(&[(last, last + 5)], line), "line {line}");
+            assert!(!window_meets_block(&[(last + 1, last + 5)], line));
+            assert!(window_meets_block(&[(1, first)], line));
+            if first > 1 {
+                assert!(!window_meets_block(&[(1, first - 1)], line));
+            }
+        }
+        assert_eq!(
+            window_bounds(GATE_CONTEXT_LINES),
+            (1, 2 * GATE_CONTEXT_LINES)
+        );
+    }
+
+    #[test]
+    fn a_header_read_only_across_lines_withholds_a_window_far_from_it() {
+        // [MAGI S6 MS3 loop16, R6b2] The `untracked` term of the per-file scan: when the detector
+        // finds a block only across lines, no line opens one and `blocks` is empty, so without
+        // that term every window would be judged and the block's body sent.
+        let opens = |t: &str| t.contains("SPLIT\nHEADER");
+        let tail: String = (0..200).map(|i| format!("fn f{i}() {{}}\n")).collect();
+        let code = format!("{tail}SPLIT\nHEADER\nbody\n");
+        let scan = KeyBlockScan::of(&code, &opens);
+        assert!(scan.holds && scan.untracked && scan.blocks.is_empty());
+        assert!(window_overlaps_key_block(1, &scan), "whole code counts");
+        let clean = KeyBlockScan::of(&tail, &opens);
+        assert!(!window_overlaps_key_block(1, &clean));
     }
 
     #[test]
