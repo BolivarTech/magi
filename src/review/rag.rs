@@ -668,6 +668,25 @@ pub fn definitions_for(
     (items, cuts)
 }
 
+/// The `k` smallest of `items`, in ascending order, and whether `items` held more. A max-heap of
+/// at most `k` entries: O(n log k) time and O(k) memory, whatever n.
+fn first_k<T: Ord>(items: impl Iterator<Item = T>, k: usize) -> (Vec<T>, bool) {
+    let mut heap = std::collections::BinaryHeap::with_capacity(k.saturating_add(1));
+    let mut more = false;
+    for item in items {
+        if heap.len() < k {
+            heap.push(item);
+            continue;
+        }
+        more = true;
+        if heap.peek().is_some_and(|top| item < *top) {
+            heap.pop();
+            heap.push(item);
+        }
+    }
+    (heap.into_sorted_vec(), more)
+}
+
 /// The units that name any of `names` (the changed units), one item per `(file, unit)`, never
 /// the definition nor a unit of the same name (a homonym, a recursive call); at most
 /// [`MAX_CALLERS_PER_NAME`] per name, the first by `(file, line)` among the first
@@ -675,7 +694,8 @@ pub fn definitions_for(
 /// (the scan stops at the first caller past it). Each file is read and split once; one without an
 /// extractor, or gone, gives none; a unit already given is not repeated.
 ///
-/// O(occurrences of `names` + S log S per name, S = the scan bound, + bytes of the files read).
+/// O(occurrences of `names` · log S + bytes of the files read) time and O(S) memory per name,
+/// S = the scan bound ([`first_k`]).
 ///
 /// # Arguments
 ///
@@ -703,22 +723,14 @@ pub fn callers_for(
     let mut files: HashMap<String, Option<FileUnits>> = HashMap::new();
     let mut total = false;
     'names: for name in names {
-        let mut places: Vec<(&str, u32)> = index.occurrences(name).collect();
-        // MAGI FIX (MS3 §6 loop11): only the first MAX_CALLER_SCAN_PER_NAME are inspected, in
-        // O(occurrences) (a selection, not a full sort); a cut scan is declared.
-        // MAGI FIX (MS3 §6 loop12): `select_nth_unstable(k)` leaves the k smallest elements, in
-        // no order, before index k, so the truncation keeps exactly the first k by `(file, line)`
-        // (a false positive was raised here); `the_cap_keeps_the_first_by_file` pins it with the
-        // listing in the opposite order.
-        let cut = places.len() > MAX_CALLER_SCAN_PER_NAME;
-        if cut {
-            places.select_nth_unstable(MAX_CALLER_SCAN_PER_NAME);
-            places.truncate(MAX_CALLER_SCAN_PER_NAME);
-        }
-        // Not redundant: `occurrences` yields the files in the order they were given to the
-        // index (the listing's order), not by path, and the cap keeps "the first by
-        // `(file, line)`"; the sort makes which callers survive the cap independent of that order.
-        places.sort_unstable();
+        // MAGI FIX (MS3 §6 loop11): only the first MAX_CALLER_SCAN_PER_NAME are inspected; a
+        // cut scan is declared.
+        // MAGI FIX (MS3 §6 loop12): the first k by `(file, line)`, whatever the listing order
+        // (`occurrences` yields files in the order they were given to the index);
+        // `the_cap_keeps_the_first_by_file` pins it with the listing in the opposite order.
+        // MAGI FIX (MS3 §6 loop17, R2 Melchior): every occurrence was collected before the cap
+        // (one name can have millions); a bounded selection holds k at a time.
+        let (places, cut) = first_k(index.occurrences(name), MAX_CALLER_SCAN_PER_NAME);
         let defined = index.definitions(name);
         let (mut kept, mut over) = (0usize, false);
         for (file, line) in places {
@@ -2491,6 +2503,30 @@ mod tests {
         assert_eq!(capped.per_name, vec!["parse".to_string()]);
         let labels: Vec<_> = callers.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, vec!["early"], "the first file's caller survives");
+    }
+
+    #[test]
+    fn first_k_keeps_the_smallest_in_order_and_says_when_more_were_given() {
+        // [MAGI S6 MS3 loop17, R2 Melchior] The caller scan's bounded selection: the k smallest
+        // whatever the input order, sorted, and whether the input held more than k.
+        let (kept, more) = first_k((0..100u32).rev(), 3);
+        assert_eq!((kept, more), (vec![0, 1, 2], true));
+        let (kept, more) = first_k([5u32, 1, 9, 1].into_iter(), 3);
+        assert_eq!((kept, more), (vec![1, 1, 5], true));
+        let (kept, more) = first_k([2u32, 1].into_iter(), 3);
+        assert_eq!(
+            (kept, more),
+            (vec![1, 2], false),
+            "fewer than k: all, no cut"
+        );
+        let (kept, more) = first_k(std::iter::empty::<u32>(), 3);
+        assert_eq!((kept, more), (Vec::new(), false));
+        let (kept, more) = first_k([7u32].into_iter(), 0);
+        assert_eq!(
+            (kept, more),
+            (Vec::new(), true),
+            "k = 0 keeps nothing and says so"
+        );
     }
 
     #[test]
