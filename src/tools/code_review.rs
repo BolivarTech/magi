@@ -1573,12 +1573,14 @@ impl ProductionReviewRunner {
     /// nothing is sent to the trio, every chunk passed the secret detector before any embedding,
     /// and what was indexed is reused by the next review of the same revision.
     ///
-    /// Declared limit (S6 loop 17, R5): the working-tree candidates come from the same
-    /// full-content resolution the review uses, so a tree above that resolution's own caps
-    /// fails the listing and the review runs without documentation, said once as `unavailable`
-    /// (the error arm below); the digest re-check's one re-plan before this is not part of the
-    /// outbound reserve (it is local git work, counted in `prep_ms`). A path-only listing is the
-    /// follow-up that lifts the cap.
+    /// Working-tree candidates (S6 loop 17, R5): they come from the directory resolution, which
+    /// is a path-only listing (names and metadata; it reads no file content, pinned by
+    /// `a_directory_listing_reads_no_file_content`). Only the listing's own cap
+    /// (`MAX_GIT_OUTPUT_BYTES`) can fail it, and the review then runs without documentation, said
+    /// once as `unavailable` (the error arm below, pinned by
+    /// `a_failed_documentation_listing_degrades_the_documentation_not_the_review`); the digest
+    /// re-check's one re-plan before this is not part of the outbound reserve (accepted: it is
+    /// local git work, counted in `prep_ms`).
     ///
     /// A working-tree review lists the tree here and again for the review (and computes the
     /// ignored paths twice): local git calls, bounded and counted in `prep_ms`, kept apart so the
@@ -4119,6 +4121,30 @@ mod tests {
             .as_array()
             .map_or(0, |t| t.iter().filter(|i| **i == unavailable).count());
         assert_eq!(hits, 1, "{}", rendered.json["trimmed"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_documentation_listing_degrades_the_documentation_not_the_review() {
+        // [MAGI S6 loop 17, R5] the working-tree listing the documentation uses can fail on its
+        // own (here: the only tracked file is deleted, so the whole-workspace listing has
+        // nothing to list although the uncommitted review has its deletion). The preparation
+        // degrades, declared (`docs_unavailable`), and still hands the store back; it never
+        // fails the review.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::write(ws.join("gone.rs"), "fn gone() {}\n").expect("gone.rs");
+        git_in(&ws, &["init", "-q"]);
+        git_in(&ws, &["add", "-A"]);
+        git_in(&ws, &["commit", "-q", "-m", "one file"]);
+        std::fs::remove_file(ws.join("gone.rs")).expect("delete");
+        let (_db, _mem, memory) = review_memory();
+        let embedder: Arc<dyn EmbeddingProvider> =
+            Arc::new(crate::memory::review_docs::test_embedder::FakeEmbedder::new(3));
+        let runner = production_runner_with_memory(&ws, Some(memory), Some(embedder));
+        let doc = runner.prepare_documentation(&ReviewInput::Uncommitted).await;
+        assert!(doc.prep.docs_unavailable, "the failed listing is declared");
+        assert!(doc.docs.is_some(), "the store is still handed back");
+        assert!(doc.prep.doc_sources.is_empty(), "nothing was indexed");
     }
 
     #[tokio::test]
