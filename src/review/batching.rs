@@ -485,16 +485,21 @@ impl<'a> HunkLines<'a> {
 }
 
 /// Whether a headerless hunk text has the shape [`HunkLines`] may count from the item's own first
-/// lines: after an optional `---`/`+++` file-header pair (`file_header`), every line is a body
-/// line (` `, `+`, `-`, `\`) or an empty one (a blank context line, a bare `\r`). O(bytes).
+/// lines: after an optional `---`/`+++` file-header pair (`file_header`), every line opens with one
+/// of [`BODY_LINE_LEADERS`] or is empty (a blank context line, `\r\n` included), the lines
+/// [`step_body_line`] reads as body lines. O(bytes).
+// MAGI FIX (MS3 §6 loop17, R6b1 Melchior): a `\r`-led line passed the shape while the walker
+// reads it as `Other`; both now read the one list.
 fn headerless_shape(text: &str, file_header: bool) -> bool {
     let skip = if file_header { 2 } else { 0 };
     text.lines()
         .skip(skip)
-        // MAGI FIX (MS3 §6 loop14): `[char; N]` is a `Pattern` since Rust 1.58 (this compiles on
-        // the pinned toolchain); a `&[char]` would work the same.
-        .all(|line| line.is_empty() || line.starts_with([' ', '+', '-', '\\', '\r']))
+        .all(|line| line.is_empty() || line.starts_with(BODY_LINE_LEADERS))
 }
+
+/// The first characters of a hunk body line: context, added, removed, and the `\ No newline`
+/// marker ([`step_body_line`] numbers the first three and reads the marker as `Other`).
+const BODY_LINE_LEADERS: [char; 4] = [' ', '+', '-', '\\'];
 
 impl<'a> Iterator for HunkLines<'a> {
     type Item = (&'a str, HunkLine, Option<(u32, u32)>);
