@@ -1306,7 +1306,10 @@ fn render_prompts(
             if let Some(items) = contexts.get(i) {
                 write_context(&mut prompt, items);
             }
-            if holds_key_block(&prompt) {
+            // MAGI FIX (S6 loop 17, R4): the fail-closed re-scan `context_egress` performs, on
+            // the finished prompt: a secret the masks left (a backstop, as the key-block check
+            // is) fails the review before any send.
+            if holds_key_block(&prompt) || find_secret(&prompt).is_some() {
                 return Err(key_block(batch));
             }
             let tokens =
@@ -1615,18 +1618,18 @@ fn context_egress(item: ContextItem) -> ContextEgress {
 }
 
 /// Trims `kept` (sorted by [`kind_rank`]) from its lowest-priority end until what it costs is at
-/// most `charged`, the cost the source charged against the batch budget (RV04). Only optional
+/// most `room`, what the batch limit leaves after the code and the heading (RV04). Only optional
 /// items (definitions, callers, documentation, history) are trimmed, each declared in
 /// `summary.trimmed`; a containing unit is mandatory (RV07(1)) and stays, so a growth that only
-/// the units could pay is sent within the margin of the batch fraction, and returned: the tokens
-/// still over `charged`, which the caller logs (`unit_growth_overflow_is_reported`). O(items).
+/// the units could pay stays over `room`, and the tokens still over it are returned (the caller
+/// fails closed on them, `unit_growth_overflow_is_reported`). O(items).
 fn pay_for_growth(
     kept: &mut Vec<(ContextItem, Option<&'static str>)>,
-    charged: usize,
+    room: usize,
     summary: &mut ReviewSummary,
 ) -> usize {
     let mut sent: usize = kept.iter().map(|(item, _)| item_cost(item)).sum();
-    while sent > charged {
+    while sent > room {
         let Some((item, _)) = kept
             .last()
             .filter(|(item, _)| item.kind != ContextKind::Unit)
@@ -1641,7 +1644,7 @@ fn pay_for_growth(
             });
         }
     }
-    sent.saturating_sub(charged)
+    sent.saturating_sub(room)
 }
 
 /// The pattern a documentation or history item was sent masked for, if any: these two kinds
@@ -1767,6 +1770,10 @@ async fn prepare_contexts(
         summary.without_embedder |= assembled.without_embedder;
         summary.without_memory |= assembled.without_memory;
         summary.context_withheld = summary.context_withheld.saturating_add(assembled.withheld);
+        // Declared (S6 loop 17, R4): `charged` is what the source charged for the items it
+        // assembled; on reuse the units sent are the promised ones, the same `(file, label)`
+        // identities whose text may differ by the egress (a mask): that difference is what
+        // `over` below reports, so charge and ship need not be the same bytes.
         let charged: usize = assembled.items.iter().map(item_cost).sum();
         let brought = unit_identity(
             assembled
@@ -1822,25 +1829,28 @@ async fn prepare_contexts(
                 .tokens
                 .saturating_add(estimate_tokens(CONTEXT_HEADING)),
         );
-        let target = charged.min(fit);
-        let over = pay_for_growth(&mut kept, target, summary);
-        if target.saturating_add(over) > fit {
+        // MAGI FIX (S6 loop 17, R4): trimmed to the room the limit leaves, not to the source's
+        // charge: a growth that still fits drops nothing optional.
+        let over_fit = pay_for_growth(&mut kept, fit, summary);
+        if over_fit > 0 {
             return Err(ReviewError::TooLargeForBatch {
                 what: format!("batch {} with its containing units", batch.index),
-                tokens: limit
-                    .saturating_sub(fit)
-                    .saturating_add(target)
-                    .saturating_add(over),
+                tokens: limit.saturating_add(over_fit),
                 limit,
             });
         }
+        let over = kept
+            .iter()
+            .map(|(item, _)| item_cost(item))
+            .sum::<usize>()
+            .saturating_sub(charged);
         if over > 0 {
             tracing::event!(
                 target: LOG_TARGET,
                 tracing::Level::WARN,
                 batch = batch.index,
                 tokens = over,
-                "masking grew a containing unit past its charge; it is sent whole"
+                "masking grew the context past its charge; it is sent within the batch limit"
             );
         }
         for (item, pattern) in &kept {
