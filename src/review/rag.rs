@@ -1445,6 +1445,37 @@ mod tests {
     }
 
     #[test]
+    fn a_non_utf8_side_names_its_file_as_display_path_shows_it() {
+        // [MAGI S6 MS3 loop17, R2 Caspar] `read_text` put the raw path into `NotReviewable`, the
+        // one error path of this module that bypassed `display_path`.
+        struct NotUtf8;
+        impl ContentSource for NotUtf8 {
+            fn read(&self, _p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(Some(vec![0xff, 0xfe, b'\n']))
+            }
+            fn read_old(&self, _p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let file = "src/a\nb\u{202e}.rs";
+        let hunk = BatchItem::Hunk {
+            file: file.into(),
+            text: "+x".into(),
+            first_line: 1,
+            last_line: 1,
+            old_first_line: 1,
+            old_last_line: 1,
+        };
+        match containing_units(&hunk, &NotUtf8, &LanguageRegistry::new()) {
+            Err(ReviewError::NotReviewable { path, .. }) => {
+                assert_eq!(path, display_path(file));
+                assert!(!path.contains('\n'), "{path:?}");
+            }
+            other => panic!("expected NotReviewable, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn egress_secret_read_is_noted() {
         // [MAGI S6 MS3 loop10, R6a Melchior] A sealed cache refusing a raw-secret side
         // (`EgressSecret`) costs a definition or caller its own item, declared, never the review.
