@@ -694,6 +694,38 @@ class LoopSeventeenClockTests(unittest.TestCase):
         enough = self._with_setup(2 * 900 + runs.MIN_MEASURED_ALLOWANCE_S)
         self.assertEqual(runs.MIN_MEASURED_ALLOWANCE_S, runs.measured_allowance(enough))
 
+    def test_r21_and_r22_cannot_outrun_their_declared_clock(self) -> None:
+        # R7b1: the worst case is every invocation, setup and measured, running to the timeout it
+        # is granted. The declared `timeout_s` (three reviews) must bound it, not be its floor.
+        for run_id in ("R21", "R22"):
+            definition = dataclasses.replace(runs.DEFINITIONS[run_id], records_requests=False,
+                                             unreachable_embedder=False)
+            clock, granted = [0.0], []
+            executor = runs.RunExecutor(None, None, None)
+
+            def invoke(d, _stdin, _clock=clock, _granted=granted):
+                _granted.append(d.timeout_s)
+                _clock[0] += d.timeout_s
+                return ProductOutput(stdout=b"", stderr=b"", exit_code=0, command=())
+
+            def prepare(d, _executor=executor):
+                _executor._run_setup(d, pathlib.Path("."))
+
+            with unittest.mock.patch.object(runs.time, "monotonic", lambda _clock=clock: _clock[0]), \
+                    unittest.mock.patch.object(runs, "commit_files"), \
+                    unittest.mock.patch.object(executor, "_prepare_review_workspace", prepare), \
+                    unittest.mock.patch.object(executor, "_stdin_for", return_value=b""), \
+                    unittest.mock.patch.object(executor, "_capture_review_log", return_value=None), \
+                    unittest.mock.patch.object(executor, "_command", return_value=()), \
+                    unittest.mock.patch.object(executor, "_invoke", invoke):
+                result = executor.execute(definition)
+            self.assertFalse(result.timed_out, (run_id, granted))
+            self.assertEqual(3, len(granted), run_id)
+            self.assertLessEqual(sum(granted), definition.timeout_s, (run_id, granted))
+            self.assertEqual(runs.measured_allowance(definition), granted[-1], run_id)
+        # The measured review's allowance is one review like R20's, so the declared 3 x R20 holds.
+        self.assertEqual(runs.DEFINITIONS["R20"].timeout_s, runs.measured_allowance(runs.DEFINITIONS["R21"]))
+
 
 if __name__ == "__main__":
     unittest.main()
