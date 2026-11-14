@@ -141,16 +141,47 @@ const AUTO_APPROVED_NOTICE: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewPlan {
     /// What to review, refs pinned to the commits they named when the plan was made.
-    pub input: ReviewInput,
+    input: ReviewInput,
     /// The batches.
-    pub batches: usize,
+    batches: usize,
     /// What the approval saw ([`magi_rs::review::pipeline::PlanFingerprint::digest`]), checked
     /// again before the first trio call; `None` skips that check (test doubles only). Boxed to
     /// keep the plan small where the TUI carries it in an enum variant.
-    pub digest: Option<Box<[u8; 32]>>,
+    digest: Option<Box<[u8; 32]>>,
     /// `batches × (1 + max_rotations) × 2 × agent_timeout_secs`: an upper bound, never the
     /// expected duration.
-    pub worst_case_secs: u64,
+    worst_case_secs: u64,
+}
+
+impl ReviewPlan {
+    /// The number of batches the review was planned into.
+    pub(crate) fn batches(&self) -> usize {
+        self.batches
+    }
+
+    /// The upper bound of the review's duration in seconds, never the expected one.
+    pub(crate) fn worst_case_secs(&self) -> u64 {
+        self.worst_case_secs
+    }
+
+    /// A plan with the digest check switched off, for test doubles of other modules: the fields
+    /// are private so no production surface can build one (the digest re-check cannot be
+    /// disabled by a field literal). Test builds only.
+    #[cfg(test)]
+    pub(crate) fn unchecked_for_test(input: ReviewInput, batches: usize, worst: u64) -> Self {
+        Self {
+            input,
+            batches,
+            digest: None,
+            worst_case_secs: worst,
+        }
+    }
+
+    /// The pinned input, consuming the plan (test doubles read it back).
+    #[cfg(test)]
+    pub(crate) fn into_input(self) -> ReviewInput {
+        self.input
+    }
 }
 
 /// What a review produced, rendered for every surface.

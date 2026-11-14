@@ -2426,7 +2426,8 @@ impl App {
                 self.push_message(line);
             }
         }
-        let text = code_review_confirmation_text(plan.batches, plan.worst_case_secs, cmd.timeout);
+        let text =
+            code_review_confirmation_text(plan.batches(), plan.worst_case_secs(), cmd.timeout);
         for line in audit_for_transcript(&format!("System: {text}")) {
             self.push_message(line);
         }
@@ -9357,12 +9358,11 @@ end"
 
     /// The plan the two confirmation tests approve: 3 batches, the worst case of RV-S32.
     fn shown_plan() -> crate::tools::code_review::ReviewPlan {
-        crate::tools::code_review::ReviewPlan {
-            input: magi_rs::review::input::ReviewInput::Commit(Some("approved".into())),
-            batches: 3,
-            digest: None,
-            worst_case_secs: 42_030,
-        }
+        crate::tools::code_review::ReviewPlan::unchecked_for_test(
+            magi_rs::review::input::ReviewInput::Commit(Some("approved".into())),
+            3,
+            42_030,
+        )
     }
     impl FakeTuiRunner {
         fn calls(&self) -> usize {
@@ -9376,12 +9376,11 @@ end"
             _input: &magi_rs::review::input::ReviewInput,
         ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
         {
-            Ok(crate::tools::code_review::ReviewPlan {
-                input: magi_rs::review::input::ReviewInput::Commit(Some("replanned".into())),
-                batches: 3,
-                digest: None,
-                worst_case_secs: 42_030,
-            })
+            Ok(crate::tools::code_review::ReviewPlan::unchecked_for_test(
+                magi_rs::review::input::ReviewInput::Commit(Some("replanned".into())),
+                3,
+                42_030,
+            ))
         }
         async fn run(
             &self,
@@ -9391,7 +9390,7 @@ end"
         ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
         {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            *self.1.lock().expect("lock") = Some(plan.input);
+            *self.1.lock().expect("lock") = Some(plan.into_input());
             Ok(crate::tools::code_review::Rendered {
                 text: String::new(),
                 json: serde_json::Value::Null,
