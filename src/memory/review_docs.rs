@@ -2330,6 +2330,52 @@ mod tests {
         assert_eq!(hits[0].0.text, "target");
     }
 
+    /// Fails on any request holding the text `boom`; otherwise embeds like the fixture (dim 3).
+    struct FailsOnBoom;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for FailsOnBoom {
+        async fn embed(&self, t: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            if t.iter().any(|x| x == "boom") {
+                return Err(EmbeddingError::Http("down".into()));
+            }
+            Ok(vec![vec![0.5; 3]; t.len()])
+        }
+        fn model_id(&self) -> &str {
+            "fake"
+        }
+        fn dim(&self) -> usize {
+            3
+        }
+        fn query_prefix(&self) -> &str {
+            ""
+        }
+        fn document_prefix(&self) -> &str {
+            ""
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reindex_commits_per_group_so_a_late_failure_keeps_the_earlier_sources() {
+        // [MAGI S6 MS3 loop17, R1] One all-or-nothing transaction held every sealed row at once
+        // and lost all of it to one late failure: sources are written in groups of at most
+        // EMBED_BATCH_ITEMS chunks (a source is never split), each group its own transaction.
+        let (store, _dir) = store_for_test();
+        let first: Vec<DocChunk> = (0..EMBED_BATCH_ITEMS)
+            .map(|i| chunk("a.md", &format!("S{i}"), &format!("a{i}")))
+            .collect();
+        let second = vec![chunk("b.md", "S", "boom")];
+        let sources = [(src("a.md", "ka"), first), (src("b.md", "kb"), second)];
+        assert!(store.reindex(&sources, &FailsOnBoom).await.is_err());
+        assert_eq!(
+            store
+                .missing(&[src("a.md", "ka"), src("b.md", "kb")])
+                .expect("missing"),
+            vec![src("b.md", "kb")],
+            "the first group stays indexed, only the failing one is missing"
+        );
+    }
+
     #[tokio::test]
     async fn a_reindex_whose_embedder_fails_leaves_the_previous_index_whole() {
         // Embed first, write once.
