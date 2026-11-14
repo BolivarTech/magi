@@ -191,6 +191,12 @@ pub struct ReviewDocStore {
     vector_decrypts: AtomicUsize,
 }
 
+/// Stub (Red): HMAC-SHA-256.
+#[cfg(test)]
+fn hmac_sha256(_key: &[u8], _data: &[u8]) -> [u8; 32] {
+    [0; 32]
+}
+
 fn db_err(e: rusqlite::Error) -> MemoryError {
     MemoryError::Storage(e.to_string())
 }
@@ -1244,6 +1250,82 @@ mod tests {
             .expect("store"),
             tmp,
         )
+    }
+
+    #[test]
+    fn hmac_sha256_matches_rfc_4231_test_case_2() {
+        // RFC 4231, case 2: key "Jefe", data "what do ya want for nothing?".
+        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    /// Every stored column of both documentation tables as lossy text, one string per table.
+    fn dump_rows(store: &ReviewDocStore) -> String {
+        let c = store.connection_for_test().lock().expect("lock");
+        let mut out = String::new();
+        for (table, cols) in [
+            ("code_review_docs", 8usize),
+            ("code_review_doc_sources", 3usize),
+        ] {
+            let mut stmt = c
+                .prepare(&format!("SELECT * FROM {table}"))
+                .expect("prepare");
+            let n = stmt.column_count();
+            assert!(n >= cols, "{table} has {n} columns");
+            let rows = stmt
+                .query_map([], |r| {
+                    let mut line = String::new();
+                    for i in 0..n {
+                        match r.get_ref(i)? {
+                            rusqlite::types::ValueRef::Text(t) => {
+                                line.push_str(&String::from_utf8_lossy(t));
+                            }
+                            rusqlite::types::ValueRef::Blob(b) => {
+                                line.push_str(&String::from_utf8_lossy(b));
+                            }
+                            other => line.push_str(&format!("{other:?}")),
+                        }
+                        line.push('|');
+                    }
+                    Ok(line)
+                })
+                .expect("query");
+            for row in rows {
+                out.push_str(&row.expect("row"));
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn stored_rows_hold_no_plaintext_path_source_key_or_chunk_hash() {
+        // [MAGI S6 loop 17, R1/R7b2; controller ruling] The lookup keys are HMAC tags: the path,
+        // the content key and the chunk hash exist nowhere in the stored rows in the clear.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let c = chunk("docs/secret-plan.md", "A", "x");
+        store
+            .reindex(
+                &[(
+                    src("docs/secret-plan.md", "blobkey-0123456789abcdef"),
+                    vec![c.clone()],
+                )],
+                &e,
+            )
+            .await
+            .expect("reindex");
+        let dump = dump_rows(&store);
+        for needle in ["secret-plan", "blobkey-0123456789abcdef", c.hash.as_str()] {
+            assert!(
+                !dump.contains(needle),
+                "`{needle}` is stored in the clear: {dump}"
+            );
+        }
     }
 
     /// The `dim` column of every row.
