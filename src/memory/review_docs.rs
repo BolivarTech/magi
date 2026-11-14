@@ -6,9 +6,12 @@
 //!
 //! Every documentation source (a path plus the key of its content: a git blob id, or a hash of
 //! the working-tree bytes) is indexed once. Its chunks keep their section, text and vector
-//! encrypted with the data key, exactly like [`crate::memory::store::SqliteVectorStore`]; the
-//! path, the source key, the chunk hash and the index identity stay in the clear so rows can be
-//! selected without decrypting anything.
+//! encrypted with the data key, exactly like [`crate::memory::store::SqliteVectorStore`]. The
+//! lookup keys (path, source key, chunk hash) are stored as HMAC-SHA-256 tags under a subkey
+//! derived from the data key (reached only through `with_dek`), so rows are selected by equality
+//! without decrypting anything and no path or content hash exists in the clear; the path is
+//! recovered from its sealed column. Only the index identity (model, dimension, chunker version)
+//! and the boolean class of a source key (working tree or not) stay in the clear.
 //!
 //! # Lock discipline
 //!
@@ -34,6 +37,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::memory::embedding::EmbeddingProvider;
@@ -112,6 +116,10 @@ type RawVector = (String, String, Vec<u8>, i64);
 struct Plan<'a> {
     /// The sources to write, each once, in input order.
     new_sources: Vec<&'a (DocSource, Vec<DocChunk>)>,
+    /// The tag of each of `new_sources`, by position.
+    new_tags: Vec<SourceTag>,
+    /// The lookup tag of every chunk of `new_sources`, by its plaintext chunk hash.
+    chunk_tags: BTreeMap<String, String>,
     /// Foreign rows exist: the index is wiped in the write transaction.
     rebuilt: bool,
     /// [`ReviewDocStore::foreign_fingerprint`] at plan time; the write requires it unchanged.
@@ -123,17 +131,18 @@ struct Plan<'a> {
 }
 
 /// One row of `code_review_docs`, already encrypted.
-struct DocRow<'a> {
-    source: &'a DocSource,
-    hash: &'a str,
+struct DocRow {
+    source: SourceTag,
+    chunk_tag: String,
+    path_blob: Vec<u8>,
     section_blob: Vec<u8>,
     text_blob: Vec<u8>,
     embedding_blob: Vec<u8>,
     dim: i64,
 }
 
-/// One stored chunk read raw: its path and its still-encrypted section and text.
-type RawChunk = (String, Vec<u8>, Vec<u8>);
+/// One stored chunk read raw: its still-encrypted path, section and text.
+type RawChunk = (Vec<u8>, Vec<u8>, Vec<u8>);
 
 /// One review's allowed documentation sources, validated by [`ReviewDocStore::load_vectors`]
 /// and scanned page by page, never held decrypted, by [`ReviewDocStore::search_loaded_counting`].
@@ -141,8 +150,8 @@ type RawChunk = (String, Vec<u8>, Vec<u8>);
 pub struct DocVectors {
     /// The dimension every vector has.
     dim: usize,
-    /// The allowed sources that are indexed under this identity.
-    sources: BTreeSet<DocSource>,
+    /// The allowed sources that are indexed under this identity, as their tags.
+    sources: BTreeSet<SourceTag>,
     /// How many rows those sources held at load time: a scan that sees fewer reports the
     /// difference as vanished rows (another process's clean-up), which the review declares.
     expected_rows: usize,
@@ -191,10 +200,82 @@ pub struct ReviewDocStore {
     vector_decrypts: AtomicUsize,
 }
 
-/// Stub (Red): HMAC-SHA-256.
-#[cfg(test)]
-fn hmac_sha256(_key: &[u8], _data: &[u8]) -> [u8; 32] {
-    [0; 32]
+/// The HMAC block size of SHA-256 (RFC 2104).
+const HMAC_BLOCK_BYTES: usize = 64;
+
+/// The label the lookup-tag subkey is derived under (one subkey per purpose, never the data key
+/// itself). Versioned: changing it orphans every stored tag, so it moves with
+/// `DOC_INDEX_VERSION`.
+const TAG_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-docs/lookup-tag-key/v1";
+
+/// HMAC-SHA-256 (RFC 2104) of `data` under `key`: implemented over the `sha2` crate the project
+/// already depends on, to avoid a new dependency for twenty lines; pinned by the RFC 4231 vector.
+///
+/// # Arguments
+/// * `key` - the MAC key (any length).
+/// * `data` - the message.
+///
+/// # Returns
+/// The 32-byte tag. O(key + data).
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let hashed;
+    let key = if key.len() > HMAC_BLOCK_BYTES {
+        hashed = Sha256::digest(key);
+        hashed.as_slice()
+    } else {
+        key
+    };
+    let mut inner_pad = [0x36u8; HMAC_BLOCK_BYTES];
+    let mut outer_pad = [0x5cu8; HMAC_BLOCK_BYTES];
+    for ((i, o), k) in inner_pad.iter_mut().zip(outer_pad.iter_mut()).zip(key) {
+        *i ^= k;
+        *o ^= k;
+    }
+    let inner = Sha256::new()
+        .chain_update(inner_pad)
+        .chain_update(data)
+        .finalize();
+    let outer = Sha256::new()
+        .chain_update(outer_pad)
+        .chain_update(inner)
+        .finalize();
+    let mut mac = [0u8; 32];
+    mac.copy_from_slice(outer.as_slice());
+    mac
+}
+
+/// Lowercase hex of `bytes`.
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The domains a lookup tag is computed in, so a path and a key with the same text never share a
+/// tag.
+#[derive(Clone, Copy)]
+enum TagDomain {
+    Path,
+    Key,
+    Chunk,
+}
+
+impl TagDomain {
+    fn label(self) -> &'static [u8] {
+        match self {
+            Self::Path => b"path\0",
+            Self::Key => b"key\0",
+            Self::Chunk => b"chunk\0",
+        }
+    }
+}
+
+/// A source as the tables hold it: the HMAC tags of its path and its content key (the cleartext
+/// columns no longer exist, RV19) and whether the key is a working-tree one, which the clean-up
+/// needs and which is a boolean about the key's class, not about its content.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SourceTag {
+    path: String,
+    key: String,
+    worktree: bool,
 }
 
 fn db_err(e: rusqlite::Error) -> MemoryError {
@@ -206,6 +287,12 @@ impl ReviewDocStore {
     #[cfg(test)]
     pub(crate) fn connection_for_test(&self) -> &Arc<Mutex<Connection>> {
         &self.conn
+    }
+
+    /// The stored (tag) form of a source content key, for tests that edit raw rows.
+    #[cfg(test)]
+    pub(crate) fn key_tag_for_test(&self, key: &str) -> String {
+        self.tags(TagDomain::Key, [key]).expect("tag").remove(0)
     }
 
     /// Opens the store over `conn`, making sure the schema exists.
@@ -281,6 +368,54 @@ impl ReviewDocStore {
             .map_err(|e| MemoryError::Storage(format!("embedding deserialization: {e}")))
     }
 
+    /// The lookup tags of `values` in `domain`: `HMAC-SHA-256(subkey, domain || value)`, hex,
+    /// where `subkey = HMAC(data key, label)`. The data key is reached only through `with_dek`
+    /// (never copied out), the subkey lives for this call and is zeroed, and one call serves a
+    /// whole list so the mask is rotated once. Deterministic, so equal inputs meet in SQL.
+    /// Never call while holding the connection lock. O(total bytes).
+    fn tags<'v>(
+        &self,
+        domain: TagDomain,
+        values: impl IntoIterator<Item = &'v str>,
+    ) -> Result<Vec<String>, MemoryError> {
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        Ok(dek.with_dek(|k| {
+            let subkey = Zeroizing::new(hmac_sha256(k, TAG_SUBKEY_LABEL));
+            values
+                .into_iter()
+                .map(|v| {
+                    let mut msg = domain.label().to_vec();
+                    msg.extend_from_slice(v.as_bytes());
+                    to_hex(&hmac_sha256(subkey.as_slice(), &msg))
+                })
+                .collect()
+        }))
+    }
+
+    /// The tags of `sources`, in order.
+    fn source_tags<'s>(
+        &self,
+        sources: impl IntoIterator<Item = &'s DocSource> + Clone,
+    ) -> Result<Vec<SourceTag>, MemoryError> {
+        let paths = self.tags(
+            TagDomain::Path,
+            sources.clone().into_iter().map(|s| s.path.as_str()),
+        )?;
+        let keys = self.tags(
+            TagDomain::Key,
+            sources.clone().into_iter().map(|s| s.key.as_str()),
+        )?;
+        Ok(sources
+            .into_iter()
+            .zip(paths.into_iter().zip(keys))
+            .map(|(s, (path, key))| SourceTag {
+                path,
+                key,
+                worktree: s.key.starts_with(WORKTREE_KEY_PREFIX),
+            })
+            .collect())
+    }
+
     /// Whether any stored row (source or chunk) carries another index identity.
     fn has_foreign_rows(&self, c: &Connection) -> Result<bool, MemoryError> {
         c.query_row(
@@ -307,15 +442,16 @@ impl ReviewDocStore {
     }
 
     /// The sources already indexed under this identity.
-    fn indexed_sources(&self, c: &Connection) -> Result<BTreeSet<DocSource>, MemoryError> {
+    fn indexed_sources(&self, c: &Connection) -> Result<BTreeSet<SourceTag>, MemoryError> {
         let mut stmt = c
-            .prepare("SELECT path, key FROM code_review_doc_sources WHERE index_id = ?1")
+            .prepare("SELECT path, key, worktree FROM code_review_doc_sources WHERE index_id = ?1")
             .map_err(db_err)?;
         let rows = stmt
             .query_map([&self.index_id], |r| {
-                Ok(DocSource {
+                Ok(SourceTag {
                     path: r.get(0)?,
                     key: r.get(1)?,
+                    worktree: r.get::<_, i64>(2)? != 0,
                 })
             })
             .map_err(db_err)?;
@@ -334,6 +470,7 @@ impl ReviewDocStore {
     /// # Errors
     /// [`MemoryError::Storage`] if a query fails.
     pub fn missing(&self, wanted: &[DocSource]) -> Result<Vec<DocSource>, MemoryError> {
+        let tags = self.source_tags(wanted)?;
         let indexed = {
             let c = self.locked_conn();
             if self.has_foreign_rows(&c)? {
@@ -343,8 +480,9 @@ impl ReviewDocStore {
         };
         Ok(wanted
             .iter()
-            .filter(|s| !indexed.contains(*s))
-            .cloned()
+            .zip(&tags)
+            .filter(|(_, t)| !indexed.contains(*t))
+            .map(|(s, _)| s.clone())
             .collect())
     }
 
@@ -385,7 +523,10 @@ impl ReviewDocStore {
         // cannot fail the others through its chunk hashes (R1 Melchior).
         let (safe, refused) = without_secret_sources(sources);
         refuse_inconsistent_chunks(&safe)?;
-        let plan = self.plan(&safe)?;
+        // The tags are computed before any lock is taken (cheap, but never under one).
+        let source_tags = self.source_tags(safe.iter().map(|e| &e.0))?;
+        let chunk_tags = self.chunk_tags(&safe)?;
+        let plan = self.plan(&safe, &source_tags, chunk_tags)?;
         let fresh = embed_all(&plan.to_embed, embedder).await?;
         let rows = self.encode_rows(&plan, &fresh, embedder.dim())?;
         let rebuilt = self.write(&plan, &rows)?;
@@ -398,11 +539,28 @@ impl ReviewDocStore {
         })
     }
 
+    /// The lookup tag of every distinct chunk hash of `sources`, by hash.
+    fn chunk_tags(
+        &self,
+        sources: &[&(DocSource, Vec<DocChunk>)],
+    ) -> Result<BTreeMap<String, String>, MemoryError> {
+        let hashes: BTreeSet<&str> = sources
+            .iter()
+            .flat_map(|e| e.1.iter())
+            .map(|c| c.hash.as_str())
+            .collect();
+        let tags = self.tags(TagDomain::Chunk, hashes.iter().copied())?;
+        Ok(hashes.into_iter().map(str::to_owned).zip(tags).collect())
+    }
+
     /// Reads, under one short lock, what `reindex` needs to decide: foreign rows, the sources
     /// to write, and the stored vectors the new chunks can reuse (raw, still encrypted).
+    /// `source_tags[i]` is the tag of `sources[i]`; `chunk_tags` maps every chunk hash to its tag.
     fn plan<'a>(
         &self,
         sources: &[&'a (DocSource, Vec<DocChunk>)],
+        source_tags: &[SourceTag],
+        chunk_tags: BTreeMap<String, String>,
     ) -> Result<Plan<'a>, MemoryError> {
         let c = self.locked_conn();
         let foreign = self.foreign_fingerprint(&c)?;
@@ -412,11 +570,13 @@ impl ReviewDocStore {
         } else {
             self.indexed_sources(&c)?
         };
-        let mut seen: BTreeSet<&DocSource> = BTreeSet::new();
+        let mut seen: BTreeSet<&SourceTag> = BTreeSet::new();
         let mut new_sources: Vec<&'a (DocSource, Vec<DocChunk>)> = Vec::new();
-        for &entry in sources {
-            if !indexed.contains(&entry.0) && seen.insert(&entry.0) {
+        let mut new_tags: Vec<SourceTag> = Vec::new();
+        for (&entry, tag) in sources.iter().zip(source_tags) {
+            if !indexed.contains(tag) && seen.insert(tag) {
                 new_sources.push(entry);
+                new_tags.push(tag.clone());
             }
         }
         let mut reusable = BTreeMap::new();
@@ -429,8 +589,11 @@ impl ReviewDocStore {
             }
             // MAGI FIX (MS3 §6 loop4): a rebuild wipes only foreign rows, so this identity's
             // stored vectors are still reusable (the lookup is filtered by index_id).
+            let tag = chunk_tags
+                .get(&chunk.hash)
+                .ok_or_else(|| MemoryError::Storage("a chunk has no lookup tag".to_string()))?;
             let stored: Option<Vec<u8>> =
-                optional(lookup.query_row(params![chunk.hash, self.index_id], |r| r.get(0)))?;
+                optional(lookup.query_row(params![tag, self.index_id], |r| r.get(0)))?;
             match stored {
                 Some(blob) => {
                     reusable.insert(chunk.hash.clone(), blob);
@@ -440,6 +603,8 @@ impl ReviewDocStore {
         }
         Ok(Plan {
             new_sources,
+            new_tags,
+            chunk_tags,
             rebuilt,
             foreign,
             reusable,
@@ -459,12 +624,12 @@ impl ReviewDocStore {
     /// embedding blobs at the cap and 768 dimensions, plus the decrypted vectors and the 32 MiB
     /// text bound), because the transaction needs them all before it locks; a streaming write
     /// would hold the connection across embedding batches, which R-V08 forbids.
-    fn encode_rows<'a>(
+    fn encode_rows(
         &self,
-        plan: &Plan<'a>,
+        plan: &Plan<'_>,
         fresh: &[Vec<f32>],
         dim: usize,
-    ) -> Result<Vec<DocRow<'a>>, MemoryError> {
+    ) -> Result<Vec<DocRow>, MemoryError> {
         let mut vectors: BTreeMap<&str, Vec<f32>> = BTreeMap::new();
         for (chunk, vector) in plan.to_embed.iter().zip(fresh) {
             vectors.insert(chunk.hash.as_str(), vector.clone());
@@ -482,16 +647,21 @@ impl ReviewDocStore {
             vectors.insert(hash.as_str(), vector);
         }
         let mut rows = Vec::new();
-        for entry in plan.new_sources.iter().copied() {
-            let (source, chunks) = (&entry.0, &entry.1);
+        for (entry, tag) in plan.new_sources.iter().copied().zip(&plan.new_tags) {
+            let chunks = &entry.1;
             let mut in_source: BTreeSet<&str> = BTreeSet::new();
             for chunk in chunks.iter().filter(|c| in_source.insert(c.hash.as_str())) {
                 let vector = vectors.get(chunk.hash.as_str()).ok_or_else(|| {
                     MemoryError::Storage("a chunk has no vector after embedding".to_string())
                 })?;
+                let chunk_tag =
+                    plan.chunk_tags.get(&chunk.hash).cloned().ok_or_else(|| {
+                        MemoryError::Storage("a chunk has no lookup tag".to_string())
+                    })?;
                 rows.push(DocRow {
-                    source,
-                    hash: &chunk.hash,
+                    source: tag.clone(),
+                    chunk_tag,
+                    path_blob: self.seal(&chunk.path)?,
                     section_blob: self.seal(&chunk.section)?,
                     text_blob: self.seal(&chunk.text)?,
                     embedding_blob: self.seal_vector(vector)?,
@@ -515,7 +685,7 @@ impl ReviewDocStore {
     // and `OR IGNORE` then dropped this store's rows with the same keys.
     // MAGI FIX (MS3 §6 loop6): they were then wiped, erasing the other identity's write; a race
     // is now a conflict.
-    fn write(&self, plan: &Plan<'_>, rows: &[DocRow<'_>]) -> Result<bool, MemoryError> {
+    fn write(&self, plan: &Plan<'_>, rows: &[DocRow]) -> Result<bool, MemoryError> {
         let mut c = self.locked_conn();
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -541,16 +711,17 @@ impl ReviewDocStore {
             let mut insert_row = tx
                 .prepare_cached(
                     "INSERT OR IGNORE INTO code_review_docs \
-                     (key, chunk_hash, path, section_blob, text_blob, embedding_blob, dim, \
-                      index_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     (key, chunk_hash, path, path_blob, section_blob, text_blob, embedding_blob, \
+                      dim, index_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 )
                 .map_err(db_err)?;
             for r in rows {
                 insert_row
                     .execute(params![
                         r.source.key,
-                        r.hash,
+                        r.chunk_tag,
                         r.source.path,
+                        r.path_blob,
                         r.section_blob,
                         r.text_blob,
                         r.embedding_blob,
@@ -561,13 +732,13 @@ impl ReviewDocStore {
             }
             let mut insert_source = tx
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO code_review_doc_sources (path, key, index_id) \
-                     VALUES (?1, ?2, ?3)",
+                    "INSERT OR IGNORE INTO code_review_doc_sources (path, key, worktree, index_id) \
+                     VALUES (?1, ?2, ?3, ?4)",
                 )
                 .map_err(db_err)?;
-            for (s, _) in &plan.new_sources {
+            for s in &plan.new_tags {
                 insert_source
-                    .execute(params![s.path, s.key, self.index_id])
+                    .execute(params![s.path, s.key, i64::from(s.worktree), self.index_id])
                     .map_err(db_err)?;
             }
         }
@@ -626,6 +797,7 @@ impl ReviewDocStore {
         dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<DocVectors, MemoryError> {
+        let allowed_tags: BTreeSet<SourceTag> = self.source_tags(allowed)?.into_iter().collect();
         let mut c = self.locked_conn();
         let snapshot = c.transaction().map_err(db_err)?;
         if !allowed.is_empty() && self.has_foreign_rows(&snapshot)? {
@@ -634,8 +806,8 @@ impl ReviewDocStore {
         // MAGI FIX (MS3 §6 loop10): a source deleted after its reindex loaded as none.
         // MAGI FIX (MS3 §6 loop16): it now loses that source only, counted; the rest serve.
         let indexed = self.indexed_sources(&snapshot)?;
-        let (sources, gone): (BTreeSet<DocSource>, BTreeSet<DocSource>) =
-            allowed.iter().cloned().partition(|s| indexed.contains(s));
+        let (sources, gone): (BTreeSet<SourceTag>, BTreeSet<SourceTag>) =
+            allowed_tags.into_iter().partition(|s| indexed.contains(s));
         let expected_rows = self.count_rows(&snapshot, &sources)?;
         Ok(DocVectors {
             dim,
@@ -651,9 +823,9 @@ impl ReviewDocStore {
     fn count_rows(
         &self,
         c: &Connection,
-        sources: &BTreeSet<DocSource>,
+        sources: &BTreeSet<SourceTag>,
     ) -> Result<usize, MemoryError> {
-        let pairs: Vec<&DocSource> = sources.iter().collect();
+        let pairs: Vec<&SourceTag> = sources.iter().collect();
         let mut total = 0usize;
         for batch in pairs.chunks(ALLOWED_PAIRS_PER_QUERY) {
             let values = pair_values(batch.len());
@@ -743,12 +915,18 @@ impl ReviewDocStore {
                 vanished += 1;
                 continue;
             };
+            let path = self.unseal(&path)?.to_string();
+            let section = self.unseal(&section)?.to_string();
+            let text = self.unseal(&text)?.to_string();
+            // The plaintext chunk hash is not stored: it is recomputed from what was decrypted
+            // (`chunk_hash` is injective over the three), never read back.
+            let hash = chunk_hash(&path, &section, &text);
             hits.push((
                 DocChunk {
                     path,
-                    section: self.unseal(&section)?.to_string(),
-                    text: self.unseal(&text)?.to_string(),
-                    hash: hash.to_string(),
+                    section,
+                    text,
+                    hash,
                 },
                 score,
             ));
@@ -780,7 +958,7 @@ impl ReviewDocStore {
         page_rows: usize,
     ) -> Result<(Vec<ScoredRow>, usize), MemoryError> {
         let page_rows = page_rows.max(1);
-        let sources: Vec<&DocSource> = vectors.sources.iter().collect();
+        let sources: Vec<&SourceTag> = vectors.sources.iter().collect();
         let mut best: Vec<ScoredRow> = Vec::new();
         let mut seen = 0usize;
         for batch in sources.chunks(ALLOWED_PAIRS_PER_QUERY) {
@@ -822,7 +1000,7 @@ impl ReviewDocStore {
     /// SQL, so the blobs of other revisions are never copied under the connection lock.
     fn vector_page(
         &self,
-        batch: &[&DocSource],
+        batch: &[&SourceTag],
         after: Option<&(String, String)>,
         page_rows: usize,
     ) -> Result<Vec<RawVector>, MemoryError> {
@@ -875,7 +1053,7 @@ impl ReviewDocStore {
         for batch in wanted.chunks(ALLOWED_PAIRS_PER_QUERY) {
             let values = pair_values(batch.len());
             let sql = format!(
-                "SELECT key, chunk_hash, path, section_blob, text_blob FROM code_review_docs \
+                "SELECT key, chunk_hash, path_blob, section_blob, text_blob FROM code_review_docs \
                  WHERE (key, chunk_hash) IN (VALUES {values})"
             );
             let args = batch.iter().flat_map(|(k, h)| [*k, *h]);
@@ -914,30 +1092,29 @@ impl ReviewDocStore {
         live: &BTreeSet<DocSource>,
         keep_worktree_keys: bool,
     ) -> Result<usize, MemoryError> {
+        let live: BTreeSet<SourceTag> = self.source_tags(live)?.into_iter().collect();
         let mut c = self.locked_conn();
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
-        let stored: Vec<DocSource> = {
+        let stored: Vec<SourceTag> = {
             let mut stmt = tx
-                .prepare("SELECT path, key FROM code_review_doc_sources")
+                .prepare("SELECT path, key, worktree FROM code_review_doc_sources")
                 .map_err(db_err)?;
             let rows = stmt
                 .query_map([], |r| {
-                    Ok(DocSource {
+                    Ok(SourceTag {
                         path: r.get(0)?,
                         key: r.get(1)?,
+                        worktree: r.get::<_, i64>(2)? != 0,
                     })
                 })
                 .map_err(db_err)?;
             rows.collect::<Result<_, _>>().map_err(db_err)?
         };
-        let doomed: Vec<&DocSource> = stored
+        let doomed: Vec<&SourceTag> = stored
             .iter()
-            .filter(|s| {
-                !live.contains(*s)
-                    && !(keep_worktree_keys && s.key.starts_with(WORKTREE_KEY_PREFIX))
-            })
+            .filter(|s| !live.contains(*s) && !(keep_worktree_keys && s.worktree))
             .collect();
         // MAGI FIX (MS3 §6 loop5): one pair of deletes per batch of doomed sources, not per
         // source.
@@ -1328,6 +1505,11 @@ mod tests {
         }
     }
 
+    /// The lookup tag the store keeps for `value` in `domain`.
+    fn tag_of(store: &ReviewDocStore, domain: TagDomain, value: &str) -> String {
+        store.tags(domain, [value]).expect("tag").remove(0)
+    }
+
     /// The `dim` column of every row.
     fn dims(store: &ReviewDocStore) -> Vec<i64> {
         store
@@ -1579,8 +1761,8 @@ mod tests {
             .lock()
             .expect("lock")
             .execute(
-                "INSERT INTO code_review_doc_sources (path, key, index_id) \
-                 VALUES ('old.md', 'k0', 'other#3#1')",
+                "INSERT INTO code_review_doc_sources (path, key, worktree, index_id) \
+                 VALUES ('old.md', 'k0', 0, 'other#3#1')",
                 [],
             )
             .expect("foreign row");
@@ -1861,7 +2043,10 @@ mod tests {
             .connection_for_test()
             .lock()
             .expect("lock")
-            .execute("DELETE FROM code_review_doc_sources WHERE key = 'k'", [])
+            .execute(
+                "DELETE FROM code_review_doc_sources WHERE key = ?1",
+                [tag_of(&store, TagDomain::Key, "k")],
+            )
             .expect("delete the source row");
         let partial = store.load_vectors(3, &allowed).expect("the other serves");
         assert_eq!((partial.sources.len(), partial.vanished_sources()), (1, 1));
@@ -2049,6 +2234,10 @@ mod tests {
             .await
             .expect("index the target");
         let filler = store.seal_vector(&[0.0, 1.0, 0.0]).expect("seal");
+        let (key_tag, path_tag) = (
+            tag_of(&store, TagDomain::Key, "k"),
+            tag_of(&store, TagDomain::Path, "d.md"),
+        );
         {
             let conn = store.connection_for_test();
             let mut c = conn.lock().expect("lock");
@@ -2060,9 +2249,15 @@ mod tests {
                 // "!" sorts before any hex digit, so the target is also last in key order.
                 tx.execute(
                     "INSERT INTO code_review_docs \
-                     (key,chunk_hash,path,section_blob,text_blob,embedding_blob,dim,index_id) \
-                     VALUES ('k', ?1, 'd.md', x'00', x'00', ?2, 3, ?3)",
-                    rusqlite::params![format!("!{i:06}"), filler, store.index_id],
+                     (key,chunk_hash,path,path_blob,section_blob,text_blob,embedding_blob,dim,\
+                      index_id) VALUES (?4, ?1, ?5, x'00', x'00', x'00', ?2, 3, ?3)",
+                    rusqlite::params![
+                        format!("!{i:06}"),
+                        filler,
+                        store.index_id,
+                        key_tag,
+                        path_tag
+                    ],
                 )
                 .expect("filler");
             }
@@ -2668,7 +2863,10 @@ mod tests {
             .connection_for_test()
             .lock()
             .expect("lock")
-            .execute("DELETE FROM code_review_docs WHERE key = 'k1'", [])
+            .execute(
+                "DELETE FROM code_review_docs WHERE key = ?1",
+                [tag_of(&store, TagDomain::Key, "k1")],
+            )
             .expect("delete");
         let hits = store
             .search_loaded(&vectors, &[1.0, 0.0, 0.0], 5)

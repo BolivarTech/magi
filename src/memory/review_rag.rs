@@ -4608,7 +4608,10 @@ mod tests {
             .connection_for_test()
             .lock()
             .expect("lock")
-            .execute("DELETE FROM code_review_docs WHERE key = 'k1'", [])
+            .execute(
+                "DELETE FROM code_review_docs WHERE key = ?1",
+                [f.docs.key_tag_for_test("k1")],
+            )
             .expect("delete");
         let hits = rag.documentation(&query, &mut declared);
         assert_eq!(hits.len(), 1, "the surviving hit still serves");
@@ -4644,7 +4647,10 @@ mod tests {
             .connection_for_test()
             .lock()
             .expect("lock")
-            .execute("DELETE FROM code_review_doc_sources WHERE key = 'k1'", [])
+            .execute(
+                "DELETE FROM code_review_doc_sources WHERE key = ?1",
+                [f.docs.key_tag_for_test("k1")],
+            )
             .expect("delete");
         let query = [0.5, 0.5, 0.5];
         let mut declared = Vec::new();

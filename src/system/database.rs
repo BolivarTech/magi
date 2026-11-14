@@ -801,10 +801,14 @@ pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
 /// table a 0.24.x file lacks) and [`DATA_TABLES`] (the never-delete row counts). The
 /// `every_ddl_table_is_classified` test fails when they drift, naming the table; the
 /// 0.25 databases' tables are pinned by it, so a new one cannot be forgotten in silence.
+// `code_review_docs.{key,chunk_hash,path}` and `code_review_doc_sources.{path,key}` hold HMAC-SHA-256
+// lookup tags, never the path, the content key or the chunk hash (RV19, S6 loop 17); the path
+// itself is `path_blob`, sealed. `worktree` is the boolean class of the key (the clean-up needs it).
 const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             chunk_hash TEXT NOT NULL,
             path TEXT NOT NULL,
+            path_blob BLOB NOT NULL,
             section_blob BLOB NOT NULL,
             text_blob BLOB NOT NULL,
             embedding_blob BLOB NOT NULL,
@@ -817,6 +821,7 @@ const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
         CREATE TABLE IF NOT EXISTS code_review_doc_sources (
             path TEXT NOT NULL,
             key TEXT NOT NULL,
+            worktree INTEGER NOT NULL,
             index_id TEXT NOT NULL,
             PRIMARY KEY (path, key)
         );
@@ -2727,13 +2732,13 @@ mod tests {
             )
             .expect("insert history");
             conn.execute(
-                "INSERT INTO code_review_docs (key,chunk_hash,path,section_blob,text_blob,embedding_blob,dim,index_id) \
-                 VALUES ('k','h','README.md',x'00',x'00',x'00',3,'test')",
+                "INSERT INTO code_review_docs (key,chunk_hash,path,path_blob,section_blob,text_blob,embedding_blob,dim,index_id) \
+                 VALUES ('k','h','p',x'00',x'00',x'00',x'00',3,'test')",
                 [],
             )
             .expect("insert docs");
             conn.execute(
-                "INSERT INTO code_review_doc_sources (path,key,index_id) VALUES ('README.md','k','test')",
+                "INSERT INTO code_review_doc_sources (path,key,worktree,index_id) VALUES ('p','k',0,'test')",
                 [],
             )
             .expect("insert sources");

@@ -112,9 +112,10 @@ pub const MAX_DOC_INDEX_BYTES: usize = 32 * 1024 * 1024;
 ///
 /// 2 since sections are cut to [`MAX_DOC_SECTION_BYTES`] (MS3 §6 loop 5); 3 since
 /// [`chunk_hash`] length-prefixes its input (MS3 §6 loop 7); 4 since a chunk whose secret hides
-/// behind a control or format character is withheld with its source (MS3 §6 loop 16). An index
-/// rebuild, not a DB change.
-pub const DOC_INDEX_VERSION: u32 = 4;
+/// behind a control or format character is withheld with its source (MS3 §6 loop 16); 5 since the
+/// lookup columns hold HMAC tags and the path is sealed (S6 loop 17: v0.25.0 databases have this
+/// schema from `magi init`, no migration).
+pub const DOC_INDEX_VERSION: u32 = 5;
 
 /// Bound on the local references (branches and tags) [`live_doc_sources`] reads; with more, the
 /// clean-up is skipped for that review (RV19: "more than `MAX_GC_REFS` references").
@@ -2283,7 +2284,7 @@ mod tests {
             .collect();
         assert_eq!(
             (DOC_INDEX_VERSION, names.as_slice()),
-            (4, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
+            (5, PATTERNS_OF_THIS_DOC_INDEX_VERSION),
             "the secret patterns changed: bump DOC_INDEX_VERSION and update this list"
         );
     }
