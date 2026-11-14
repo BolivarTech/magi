@@ -1290,6 +1290,7 @@ mod tests {
                 path: format!("masked/{key}.rs"),
                 cause: crate::review::filter::SkipCause::Secret,
                 pattern: "anthropic-key",
+                redacted_lines: 0,
             }],
             no_extractor: vec![format!("plain/{key}.txt")],
             ..ReviewSummary::default()
@@ -1308,6 +1309,7 @@ mod tests {
                 path: "a.rs".into(),
                 cause: crate::review::filter::SkipCause::Secret,
                 pattern: "bell\u{7}\nname",
+                redacted_lines: 0,
             }],
             ..ReviewSummary::default()
         };
@@ -1349,6 +1351,7 @@ mod tests {
                 path: "a.rs".into(),
                 cause: crate::review::filter::SkipCause::Secret,
                 pattern: PATTERN,
+                redacted_lines: 0,
             }],
             ..ReviewSummary::default()
         };
@@ -1506,6 +1509,7 @@ mod tests {
             path: "a.rs".into(),
             cause: crate::review::filter::SkipCause::Secret,
             pattern: "url-credential",
+            redacted_lines: 0,
         });
         let v = summary_json(&s);
         assert_eq!(

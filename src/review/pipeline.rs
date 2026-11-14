@@ -1543,6 +1543,7 @@ fn declare_masked(summary: &mut ReviewSummary, shown: String, pattern: &'static 
             path: shown,
             cause: SkipCause::Secret,
             pattern,
+            redacted_lines: 0,
         });
     }
 }

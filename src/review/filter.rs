@@ -169,6 +169,18 @@ pub struct Masked {
     pub cause: SkipCause,
     /// The name of the first secret pattern found in it.
     pub pattern: &'static str,
+    /// How many lines of its diff were replaced by a `<redacted: …>` placeholder (0 when the
+    /// diff was rebuilt from the masked sides or the file is reviewed whole). Declared so a
+    /// reader of the report sees how much of the diff the trio did not get: masking can
+    /// collapse a hunk whose only change is inside a secret, and the by-line fallback redacts
+    /// every line no masked side shows.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub redacted_lines: usize,
+}
+
+/// Whether `n` is zero: the report omits a count that says nothing.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// What classifying one file decided.
@@ -863,6 +875,7 @@ fn masked_file(path: &str, pattern: &'static str) -> Masked {
         path: display_path(path),
         cause: SkipCause::Secret,
         pattern,
+        redacted_lines: 0,
     }
 }
 
@@ -1037,6 +1050,7 @@ mod tests {
             path: path.into(),
             cause: SkipCause::Secret,
             pattern,
+            redacted_lines: 0,
         }
     }
 
@@ -2486,6 +2500,57 @@ mod tests {
             assert!(!sent.contains("sk-proj-"), "{sent}");
             assert!(sent.contains("<redacted: "), "{sent}");
         }
+    }
+
+    #[test]
+    fn a_masked_file_declares_how_many_diff_lines_were_redacted() {
+        // [MAGI S6 MS3 loop17, R6a1 Caspar] one `masked` entry read as "one credential"; the
+        // trio may have been shown a hunk redacted line by line. The count rides beside it.
+        let removed = "const K: &str = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAA\";"; // allow-secret-scan
+        let diff = format!("@@ -5,2 +5,1 @@\n-{removed}\n fn f() {{}}\n");
+        let old = format!("{removed}\nfn f() {{}}\n");
+        let inner = MapSource::new(&[("a.rs", "fn f() {}\n")], &[("a.rs", old.as_str())]);
+        let src = CachedSource::new(&inner);
+        let one = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff),
+        }];
+        let f = filter_files(one, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("kept, masked");
+        assert_eq!(f.masked.len(), 1, "{:?}", f.masked);
+        assert_eq!(f.masked[0].redacted_lines, 1, "{:?}", f.masked);
+        let json = serde_json::to_value(&f.masked[0]).expect("json");
+        assert_eq!(json["redacted_lines"], 1, "{json}");
+        let clean = serde_json::to_value(masked("b.rs", "openai-key")).expect("json");
+        assert!(
+            clean.get("redacted_lines").is_none(),
+            "zero is not written: {clean}"
+        );
+    }
+
+    #[test]
+    fn a_benign_binary_listed_twice_is_never_declared_a_secret() {
+        // [MAGI S6 MS3 loop17, R6a2 Caspar] a binary side holding a pattern's opening (`://`
+        // is in nearly every real binary) is held raw, fail closed; the refusal of its second
+        // read said `secret` and drowned the one signal RV22 depends on.
+        let inner = MapSource::new(
+            &[("a.bin", "x\0 see http://h/\n"), ("b.rs", "fn b() {}\n")],
+            &[],
+        );
+        let src = CachedSource::new(&inner);
+        let file = |p: &str| ReviewFile {
+            path: p.into(),
+            diff: None,
+        };
+        let files = vec![file("a.bin"), file("a.bin"), file("b.rs")];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("one file is kept");
+        assert!(!f.skipped.is_empty(), "{:?}", f.skipped);
+        assert!(
+            f.skipped.iter().all(|s| s.cause == SkipCause::Binary),
+            "{:?}",
+            f.skipped
+        );
     }
 
     #[test]
