@@ -2299,6 +2299,71 @@ mod tests {
         );
     }
 
+    /// Makes `path` unreadable while the returned guard lives, and proves it (a read must fail).
+    /// Windows: an exclusive lock (mandatory there); Unix: mode 000. `None` is never returned
+    /// silently: a host where the file stays readable fails the precondition.
+    fn make_unreadable(path: &Path) -> Box<dyn std::any::Any> {
+        #[cfg(windows)]
+        let guard: Box<dyn std::any::Any> = {
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .expect("open");
+            f.lock().expect("lock");
+            Box::new(f)
+        };
+        #[cfg(unix)]
+        let guard: Box<dyn std::any::Any> = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+            Box::new(())
+        };
+        assert!(
+            std::fs::read(path).is_err(),
+            "precondition: the file must be unreadable on this host"
+        );
+        guard
+    }
+
+    #[test]
+    fn a_directory_listing_reads_no_file_content() {
+        // [MAGI S6 loop 17, R5] the documentation candidates come from this listing: it is a
+        // path-only listing (names and metadata), so a file whose content cannot be read, or
+        // would not fit any content cap, still lists. A content read added to the listing makes
+        // the unreadable file fail it.
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(d.path().join("src")).expect("mkdir");
+        std::fs::write(d.path().join("src/a.rs"), "a\n").expect("write");
+        std::fs::write(d.path().join("src/locked.md"), "locked\n").expect("write");
+        let _held = make_unreadable(&d.path().join("src/locked.md"));
+        let git = FakeGit::from(&[
+            (
+                "rev-parse --is-inside-work-tree",
+                Err("fatal: not a git repository"),
+            ),
+            (
+                "ls-files --others --ignored --exclude-standard --directory -z -- src",
+                Ok(""),
+            ),
+        ]);
+        assert!(
+            d.path().ancestors().all(|a| !a.join(".git").exists()),
+            "TMPDIR sits inside a git repository"
+        );
+        let r = resolve_input(
+            &ReviewInput::Directory("src".into()),
+            d.path(),
+            &git,
+            &allow_all,
+        )
+        .expect("a listing never reads content");
+        assert_eq!(
+            r.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.rs", "src/locked.md"]
+        );
+    }
+
     #[test]
     fn a_git_failure_inside_a_repository_fails_closed_instead_of_walking() {
         // [CP2 MS2 S1a loop 11] a broken git (missing binary, dubious ownership) must not drop .gitignore in silence.
