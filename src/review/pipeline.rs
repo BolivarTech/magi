@@ -1289,6 +1289,19 @@ fn render_prompts(
     contexts: &[Vec<ContextItem>],
     limit: usize,
 ) -> Result<Vec<String>, ReviewError> {
+    render_prompts_with(batches, contexts, limit, &mask_secrets)
+}
+
+/// [`render_prompts`] with the code's mask as a parameter: the seam that lets a test hand the
+/// re-scan below a prompt the mask left unmasked (the backstop is otherwise unreachable by
+/// construction, `the_rescan_backstop_fails_a_prompt_the_mask_left_a_secret_in`). Production
+/// always passes [`mask_secrets`].
+fn render_prompts_with(
+    batches: &[ReviewBatch],
+    contexts: &[Vec<ContextItem>],
+    limit: usize,
+    mask: &dyn Fn(&str) -> String,
+) -> Result<Vec<String>, ReviewError> {
     batches
         .iter()
         .enumerate()
@@ -1302,7 +1315,7 @@ fn render_prompts(
             if holds_key_block(&code) {
                 return Err(key_block(batch));
             }
-            let mut prompt = mask_secrets(&code);
+            let mut prompt = mask(&code);
             if let Some(items) = contexts.get(i) {
                 write_context(&mut prompt, items);
             }
@@ -2555,6 +2568,37 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn the_rescan_backstop_fails_a_prompt_the_mask_left_a_secret_in() {
+        // [MAGI S6 loop 17, R4] The finished prompt is scanned again after the mask. A source
+        // that hands back unmasked text (here: an identity mask) must fail the review, nothing
+        // sent; the real mask passes the same batch.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let batch = || ReviewBatch {
+            index: 0,
+            tokens: 1,
+            companion_tokens: 0,
+            items: vec![BatchItem::WholeFile {
+                file: "a.rs".into(),
+                text: format!("let k = \"{key}\";\n"),
+                lines: 1,
+            }],
+        };
+        let unmasked = render_prompts_with(&[batch()], &[vec![]], usize::MAX, &|t| t.to_string());
+        assert!(
+            matches!(
+                unmasked,
+                Err(ReviewError::NotReviewable {
+                    cause: "secret",
+                    ..
+                })
+            ),
+            "{unmasked:?}"
+        );
+        let masked = render_prompts(&[batch()], &[vec![]], usize::MAX).expect("masked passes");
+        assert!(!masked[0].contains("sk-ant-"));
     }
 
     #[test]
