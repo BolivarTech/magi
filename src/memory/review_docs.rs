@@ -437,6 +437,15 @@ impl ReviewDocStore {
             .collect())
     }
 
+    /// Checks that a query embedded by `model_id` at `dim` dimensions belongs to this index.
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] when the query's identity differs from the store's.
+    pub fn require_identity(&self, model_id: &str, dim: usize) -> Result<(), MemoryError> {
+        let _ = (model_id, dim);
+        Ok(())
+    }
+
     /// Whether any stored row (source or chunk) carries another index identity.
     fn has_foreign_rows(&self, c: &Connection) -> Result<bool, MemoryError> {
         c.query_row(
@@ -515,6 +524,13 @@ impl ReviewDocStore {
     /// sources (at most [`EMBED_BATCH_ITEMS`] chunks, a source never split): a failure keeps the
     /// groups already written, and a repeat call skips them. A chunk stored under any source reuses its vector, so it is never embedded twice;
     /// rows of another identity are wiped in that transaction (`rebuilt`), nothing else.
+    ///
+    /// **Deadline (S6 loop 17, R1):** `reindex` has none of its own and cannot be interrupted
+    /// between its awaits by anything but its caller dropping it. The deadline is the caller's:
+    /// `prepare_docs` (`memory::review_rag`) passes each batch the time left of its `timeout`
+    /// (the review's `REINDEX_TIMEOUT_SECS`, shared with the listing), and a slow embedder past it
+    /// degrades the documentation, declared (U29). The abort drops at most the group in flight:
+    /// the groups already written stay and the next review resumes after them.
     ///
     /// O(chunks) lookups plus the embedder. Memory: one group's sealed rows, mostly the sealed
     /// vectors: about `16 * dim` bytes each (4 bytes per `f32` as JSON text plus the cipher

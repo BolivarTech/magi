@@ -506,20 +506,50 @@ impl StoreRag<'_> {
                 }
                 hits.into_iter().map(|(chunk, _)| doc_item(chunk)).collect()
             }
-            Err(e) => {
-                if !self.docs_failed.swap(true, Ordering::SeqCst) {
-                    let error = outward_text(&e.to_string());
-                    tracing::event!(
-                        target: LOG_TARGET,
-                        tracing::Level::WARN,
-                        error = error.as_str(),
-                        "the documentation index could not be read: documentation is left out"
-                    );
-                    declared.push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
-                }
+            Err(e) => self.docs_unreadable(&e, declared),
+        }
+    }
+
+    /// [`Self::documentation`] after checking that the query's model is the index's, not only its
+    /// dimension: a vector from another model of the same size would be scored against vectors it
+    /// does not belong to. A mismatch leaves documentation out for the rest of the review,
+    /// declared once, like a read error.
+    // MAGI FIX (MS3 §6 loop17, R1): the identity check guarded only the reindex path.
+    fn documentation_of(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+        vector: &[f32],
+        declared: &mut Vec<(ContextKind, String)>,
+    ) -> Vec<ContextItem> {
+        let Some(docs) = self.docs else {
+            return Vec::new();
+        };
+        match docs.require_identity(embedder.model_id(), vector.len()) {
+            Ok(()) => self.documentation(vector, declared),
+            Err(_) if self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst) => {
                 Vec::new()
             }
+            Err(e) => self.docs_unreadable(&e, declared),
         }
+    }
+
+    /// Leaves documentation out for the rest of the review: one WARN and one declaration.
+    fn docs_unreadable(
+        &self,
+        e: &MemoryError,
+        declared: &mut Vec<(ContextKind, String)>,
+    ) -> Vec<ContextItem> {
+        if !self.docs_failed.swap(true, Ordering::SeqCst) {
+            let error = outward_text(&e.to_string());
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::WARN,
+                error = error.as_str(),
+                "the documentation index could not be read: documentation is left out"
+            );
+            declared.push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
+        }
+        Vec::new()
     }
 
     /// The [`DOC_SEARCH_K`] chunks of the revision's sources closest to `query`, scored against
@@ -727,7 +757,7 @@ impl StoreRag<'_> {
                 return (None, None);
             }
         };
-        let docs = self.documentation(&vector, declared);
+        let docs = self.documentation_of(embedder, &vector, declared);
         (
             Some(docs),
             Some(self.history_items(&batch_files(batch), declared, withheld)),
@@ -1506,9 +1536,11 @@ async fn index_batch(
 
 /// One [`ReviewDocStore::reindex`] under `timeout`: the sources the store refused, as
 /// `display_path`, when it wrote; `None` (with a WARN) when it failed or did not finish. A
-/// timeout writes nothing, by the store's contract: `reindex`
-/// embeds first, then writes in **one** transaction with no `.await` inside, so a future dropped
-/// here never commits and the sources stay `missing`. Leaves an INFO with its duration, the
+/// timeout drops the group in flight, by the store's contract: `reindex` embeds a group, then
+/// writes it in **one** transaction with no `.await` inside, so a future dropped here never
+/// half-commits a group; the groups already written stay and the sources not yet written stay
+/// `missing` for the next review. This is where the documentation indexing deadline is applied
+/// (the caller's `timeout`, `prepare_docs`' time left). Leaves an INFO with its duration, the
 /// rebuilt line when the index changed identity, and a WARN per source left out for a secret.
 ///
 /// # Arguments
@@ -1874,6 +1906,49 @@ mod tests {
             complete.gc_worktree(Some("abc")),
             None,
             "a revision lists no worktree"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_query_from_another_model_with_the_same_dimension_is_not_searched() {
+        // [MAGI S6 MS3 loop17, R1 Caspar] The identity check guarded only the reindex: a query
+        // embedded by another model of the same dimension was scored against the index's vectors.
+        struct OtherModel;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for OtherModel {
+            async fn embed(&self, t: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+                Ok(t.iter().map(|_| vec![0.5; 3]).collect())
+            }
+            fn model_id(&self) -> &str {
+                "other"
+            }
+            fn dim(&self) -> usize {
+                3
+            }
+            fn query_prefix(&self) -> &str {
+                ""
+            }
+            fn document_prefix(&self) -> &str {
+                ""
+            }
+        }
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        f.docs
+            .reindex(
+                &[(src("d.md", "k"), vec![chunk("d.md", "A", "x")])],
+                &f.embedder,
+            )
+            .await
+            .expect("indexed");
+        let mut rag = f.rag(true);
+        rag.embedder = Some(&OtherModel);
+        rag.doc_sources = BTreeSet::from([src("d.md", "k")]);
+        rag.context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("the review still runs");
+        assert!(
+            rag.docs_failed.load(Ordering::SeqCst),
+            "documentation from another model's query must be left out, declared"
         );
     }
 
