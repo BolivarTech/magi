@@ -1899,6 +1899,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_review_with_more_allowed_rows_than_the_index_bound_still_gets_its_best_chunk() {
+        // [MAGI S6 MS3 loop16, R1 Melchior; controller ruling] An allowed set is not capped by
+        // MAX_DOC_CHUNKS (a revision may reach more chunks than one review indexes), and an error
+        // past the cap left documentation unavailable on any such repo. The scan is paged and
+        // keeps a running top-k, so the best chunk is found however many rows there are, even
+        // when it is the last one read.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::with_vectors(&[("target", vec![1.0, 0.0, 0.0])]);
+        store
+            .reindex(
+                &[(src("d.md", "k"), vec![chunk("d.md", "T", "target")])],
+                &e,
+            )
+            .await
+            .expect("index the target");
+        let filler = store.seal_vector(&[0.0, 1.0, 0.0]).expect("seal");
+        {
+            let conn = store.connection_for_test();
+            let mut c = conn.lock().expect("lock");
+            let tx = c.transaction().expect("tx");
+            for i in 0..=MAX_DOC_CHUNKS {
+                // "!" sorts before any hex digit, so the target is also last in key order.
+                tx.execute(
+                    "INSERT INTO code_review_docs \
+                     (key,chunk_hash,path,section_blob,text_blob,embedding_blob,dim,index_id) \
+                     VALUES ('k', ?1, 'd.md', x'00', x'00', ?2, 3, ?3)",
+                    rusqlite::params![format!("!{i:06}"), filler, store.index_id],
+                )
+                .expect("filler");
+            }
+            // Last in rowid order too: a scan that stops after its first page misses it.
+            tx.execute(
+                "UPDATE code_review_docs SET rowid = 999999999 WHERE chunk_hash NOT LIKE '!%'",
+                [],
+            )
+            .expect("bump");
+            tx.commit().expect("commit");
+        }
+        let allowed = BTreeSet::from([src("d.md", "k")]);
+        let vectors = store
+            .load_vectors(3, &allowed)
+            .expect("more rows than the old cap is not an error");
+        let hits = store
+            .search_loaded(&vectors, &[1.0, 0.0, 0.0], 1)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.text, "target");
+    }
+
+    #[tokio::test]
     async fn a_reindex_whose_embedder_fails_leaves_the_previous_index_whole() {
         // Embed first, write once.
         let (store, _dir) = store_for_test();
