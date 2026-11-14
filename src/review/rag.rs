@@ -331,14 +331,16 @@ pub fn assemble(
     })
 }
 
-/// The `trimmed` label of a documentation index cut at its bounds: it names both, since either
-/// can cut ([`crate::review::docs::bounded`]).
+/// The `trimmed` label of a documentation index cut at its bounds: it names the bound that cut
+/// ([`crate::review::docs::bounded_capped`]), and both when the caller did not say which.
 fn truncated_label(d: &IndexDeclarations) -> String {
-    let _ = (d.chunk_cap, d.byte_cap);
-    format!(
-        "document index truncated at MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS}) or \
-         MAX_DOC_INDEX_BYTES ({MAX_DOC_INDEX_BYTES})"
-    )
+    let chunks = format!("MAX_DOC_CHUNKS ({MAX_DOC_CHUNKS})");
+    let bytes = format!("MAX_DOC_INDEX_BYTES ({MAX_DOC_INDEX_BYTES})");
+    match (d.chunk_cap, d.byte_cap) {
+        (true, false) => format!("document index truncated at {chunks}"),
+        (false, true) => format!("document index truncated at {bytes}"),
+        _ => format!("document index truncated at {chunks} or {bytes}"),
+    }
 }
 
 /// Adds what indexing left out to `a`: `withheld` is summed, a truncation becomes a
