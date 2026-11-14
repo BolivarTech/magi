@@ -633,11 +633,10 @@ impl StoreRag<'_> {
         if self.history_failed.load(Ordering::SeqCst) {
             return Vec::new();
         }
-        // MAGI FIX (MS3 §6 loop16): no git, no entry can be checked against HEAD, so none is
-        // served; said once (R2 Caspar).
-        if self.history_git.is_none() && !self.history_no_git_declared.swap(true, Ordering::SeqCst)
-        {
-            declared.push((ContextKind::History, HISTORY_NO_GIT.to_string()));
+        // MAGI FIX (MS3 §6 loop17, R2 Melchior/Balthasar): with no git nothing read could be
+        // served, so the store is not read (the cause is declared by `declare_no_git`).
+        if self.history_git.is_none() {
+            return Vec::new();
         }
         let on_line = |commit: &str| {
             self.history_git
@@ -771,8 +770,30 @@ impl StoreRag<'_> {
     fn both_layers_down(&self) -> bool {
         let docs =
             self.docs.is_none() || self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst);
-        let history = self.history.is_none() || self.history_failed.load(Ordering::SeqCst);
+        let history = self.history.is_none() || self.history_unservable();
         docs && history
+    }
+
+    /// Whether no history entry can be served for the rest of the review, for a cause declared
+    /// once on its own: a failed read, or no git to check an entry against `HEAD`. O(1).
+    fn history_unservable(&self) -> bool {
+        self.history_failed.load(Ordering::SeqCst) || self.history_git.is_none()
+    }
+
+    /// Declares, once per review, that history is not served for want of a git; only when the
+    /// review has a history and an embedder (without one, history is out for that cause).
+    // MAGI FIX (MS3 §6 loop16): no git, no entry can be checked against HEAD, so none is
+    // served; said once (R2 Caspar).
+    // MAGI FIX (MS3 §6 loop17, R2): said here, whatever the batch's path, now that a no-git
+    // review neither embeds a query for the history nor reads it.
+    fn declare_no_git(&self, declared: &mut Vec<(ContextKind, String)>) {
+        if self.history.is_some()
+            && self.embedder.is_some()
+            && self.history_git.is_none()
+            && !self.history_no_git_declared.swap(true, Ordering::SeqCst)
+        {
+            declared.push((ContextKind::History, HISTORY_NO_GIT.to_string()));
+        }
     }
 
     /// What a batch with no room left declares for documentation and history: `no room` for each
@@ -787,7 +808,7 @@ impl StoreRag<'_> {
         let embedder_down = self.embedder_down.load(Ordering::SeqCst);
         let docs_down =
             self.docs_unavailable || self.docs_failed.load(Ordering::SeqCst) || embedder_down;
-        let history_down = self.history_failed.load(Ordering::SeqCst) || embedder_down;
+        let history_down = self.history_unservable() || embedder_down;
         [
             // MAGI FIX (MS3 §6 loop12): a review that indexed no source has nothing to cut. The
             // history layer is not checked the same way: its emptiness is a store read per batch,
@@ -846,6 +867,7 @@ impl RagSource for StoreRag<'_> {
         let memory = self.docs.is_some() || self.history.is_some();
         let mut declared = Vec::new();
         let mut withheld = 0usize;
+        self.declare_no_git(&mut declared);
         let (docs, history) = match (memory, self.embedder) {
             (false, _) | (true, None) => (None, None),
             (true, Some(_)) if !room => {
