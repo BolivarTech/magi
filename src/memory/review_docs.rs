@@ -1205,15 +1205,26 @@ fn refuse_inconsistent_chunks(sources: &[&(DocSource, Vec<DocChunk>)]) -> Result
     Ok(())
 }
 
+/// The bytes one text adds to a request body: its JSON string (quotes and escapes included) plus
+/// `prefix_len` for the document prefix (a short fixed label, assumed free of escapes: declared).
+/// O(text).
+fn json_len(prefix_len: usize, text: &str) -> usize {
+    // `serde_json` writes a `str` as its escaped, quoted form; `to_string` cannot fail on a str.
+    prefix_len + serde_json::to_string(text).map_or(text.len().saturating_mul(6), |j| j.len())
+}
+
 /// `chunks` cut into consecutive requests that close at [`EMBED_BATCH_ITEMS`] texts or at
-/// [`EMBED_BATCH_BYTES`] of text (each text counts `prefix_len` more bytes), whichever trips
-/// first; a chunk alone over the byte bound still forms its own request. O(chunks).
+/// [`EMBED_BATCH_BYTES`] of serialized text (each text counts `prefix_len` more bytes, its JSON
+/// escapes included), whichever trips first; a chunk alone over the byte bound still forms its
+/// own request. O(total text).
 // MAGI FIX (MS3 §6 loop16): the items bound alone allowed a 512 KiB body (R1 Melchior).
 fn embed_batches<'a, 'b>(chunks: &'a [&'b DocChunk], prefix_len: usize) -> Vec<&'a [&'b DocChunk]> {
     let mut batches = Vec::new();
     let (mut start, mut bytes) = (0usize, 0usize);
     for (i, chunk) in chunks.iter().enumerate() {
-        let size = prefix_len + chunk.text.len();
+        // MAGI FIX (S6 loop 17, R1): the bound is on the serialized body: a text full of quotes or
+        // control characters doubles (or sextuples) once JSON-escaped.
+        let size = json_len(prefix_len, &chunk.text);
         let full =
             i > start && (i - start >= EMBED_BATCH_ITEMS || bytes + size > EMBED_BATCH_BYTES);
         if full {
