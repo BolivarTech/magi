@@ -117,6 +117,12 @@ const LOG_TARGET: &str = "magi_rs::review";
 /// work (file loads, unit lookups) on generated code, where one name can occur millions of times.
 pub const MAX_CALLER_SCAN_PER_NAME: usize = 1_024;
 
+/// Callers kept per batch by [`callers_for`], over all names (three names at
+/// [`MAX_CALLERS_PER_NAME`]): each carries a whole unit, so the changed names of a large
+/// whole-file batch cannot fill the room that documentation and history are served from, as
+/// [`MAX_DEFINITIONS_TOTAL`] does for definitions.
+pub const MAX_CALLERS_TOTAL: usize = 3 * MAX_CALLERS_PER_NAME;
+
 /// What indexing left out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IndexDeclarations {
@@ -688,7 +694,7 @@ pub fn callers_for(
     sources: &dyn ContentSource,
     registry: &LanguageRegistry,
     unread: &mut Vec<String>,
-) -> (Vec<ContextItem>, Vec<String>) {
+) -> (Vec<ContextItem>, RetrievalCuts) {
     let mut items = Vec::new();
     let mut capped = Vec::new();
     let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
@@ -754,7 +760,13 @@ pub fn callers_for(
             capped.push((*name).to_string());
         }
     }
-    (items, capped)
+    (
+        items,
+        RetrievalCuts {
+            per_name: capped,
+            total: false,
+        },
+    )
 }
 
 /// The units that contain a batch item's changed lines, as `Unit` items with their `lines`
@@ -2381,7 +2393,7 @@ mod tests {
             vec![(ContextKind::Caller, "b.rs", "use_it")],
             "the definition in a.rs is not its own caller"
         );
-        assert!(capped.is_empty());
+        assert_eq!(capped, RetrievalCuts::default());
     }
 
     #[test]
@@ -2407,7 +2419,7 @@ mod tests {
             &mut Vec::new(),
         );
         assert_eq!(callers.len(), MAX_CALLERS_PER_NAME);
-        assert_eq!(capped, vec!["parse".to_string()]);
+        assert_eq!(capped.per_name, vec!["parse".to_string()]);
     }
 
     #[test]
@@ -2434,7 +2446,7 @@ mod tests {
             callers.is_empty(),
             "the scan stops at the bound: {callers:?}"
         );
-        assert_eq!(capped, vec!["parse".to_string()], "and says so");
+        assert_eq!(capped.per_name, vec!["parse".to_string()], "and says so");
     }
 
     #[test]
@@ -2467,9 +2479,46 @@ mod tests {
             &LanguageRegistry::new(),
             &mut Vec::new(),
         );
-        assert_eq!(capped, vec!["parse".to_string()]);
+        assert_eq!(capped.per_name, vec!["parse".to_string()]);
         let labels: Vec<_> = callers.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, vec!["early"], "the first file's caller survives");
+    }
+
+    #[test]
+    fn callers_stop_at_their_batch_total_declared_once() {
+        // [MAGI S6 MS3 loop17, R2 Caspar] Definitions got a batch total and callers only a
+        // per-name cap: a whole-file batch over a hub module brought every name's callers, each
+        // a whole unit.
+        use crate::review::test_support::MapSource;
+        let names: Vec<String> = (0..MAX_CALLERS_TOTAL + 5)
+            .map(|i| format!("n{i}"))
+            .collect();
+        let d: String = names.iter().map(|n| format!("fn {n}() {{}}\n")).collect();
+        let c: String = names
+            .iter()
+            .map(|n| format!("fn call_{n}() {{\n    {n}();\n}}\n\n"))
+            .collect();
+        let files = vec![
+            ("c.rs".to_string(), c.clone()),
+            ("d.rs".to_string(), d.clone()),
+        ];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        let src = MapSource::new(&[("c.rs", c.as_str()), ("d.rs", d.as_str())], &[]);
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (callers, cuts) = callers_for(
+            &refs,
+            &index,
+            &src,
+            &LanguageRegistry::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(callers.len(), MAX_CALLERS_TOTAL);
+        assert!(
+            cuts.per_name.is_empty(),
+            "one caller per name is never over the per-name cap: {:?}",
+            cuts.per_name
+        );
+        assert!(cuts.total, "the batch total is declared, once");
     }
 
     #[test]
@@ -2495,7 +2544,7 @@ mod tests {
             &LanguageRegistry::new(),
             &mut Vec::new(),
         );
-        assert!(capped.is_empty(), "{capped:?}");
+        assert_eq!(capped, RetrievalCuts::default());
         assert_eq!(callers.len(), MAX_CALLERS_PER_NAME);
         assert!(callers.iter().all(|c| c.file == "b.rs"), "{callers:?}");
     }

@@ -45,7 +45,7 @@ use magi_rs::review::rag::{
     assemble, callers_for, charged_tokens, containing_units_cached, declare_index, declare_lexical,
     definitions_for, doc_search_query, item_cost, Assembled, ContextItem, ContextKind,
     IndexDeclarations, UnitCache, CONTEXT_ITEM_FRAME_TOKENS, MAX_CALLERS_PER_NAME,
-    MAX_DEFINITIONS_PER_NAME, MAX_DEFINITIONS_TOTAL, UNREADABLE_CONTEXT,
+    MAX_CALLERS_TOTAL, MAX_DEFINITIONS_PER_NAME, MAX_DEFINITIONS_TOTAL, UNREADABLE_CONTEXT,
 };
 use magi_rs::review::secrets::{
     display_path, find_secret, holds_key_block, mask_secrets, masked_pattern, outward_text,
@@ -866,12 +866,23 @@ impl RagSource for StoreRag<'_> {
             a.without_embedder = false;
         }
         a.withheld = a.withheld.saturating_add(withheld);
-        a.trimmed.extend(capped.into_iter().map(|name| {
+        a.trimmed.extend(capped.per_name.into_iter().map(|name| {
             (
                 ContextKind::Caller,
                 format!("{name}: more than {MAX_CALLERS_PER_NAME} callers"),
             )
         }));
+        // MAGI FIX (MS3 §6 loop17, R2 Caspar): callers had no batch total; reaching it is one
+        // cause, declared once per batch.
+        if capped.total {
+            a.trimmed.push((
+                ContextKind::Caller,
+                format!(
+                    "callers cut at MAX_CALLERS_TOTAL ({MAX_CALLERS_TOTAL}) for this batch: the \
+                     later ones were left out"
+                ),
+            ));
+        }
         a.trimmed
             .extend(capped_defs.per_name.into_iter().map(|name| {
                 (
