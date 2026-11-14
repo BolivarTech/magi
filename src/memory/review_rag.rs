@@ -113,6 +113,12 @@ const LOG_TARGET: &str = "magi_rs::review";
 /// The `trimmed` label of a documentation or history source that is unavailable for the review.
 const INDEX_UNAVAILABLE: &str = "index unavailable";
 
+/// The `trimmed` label of documentation left out because the indexing deadline
+/// ([`REINDEX_TIMEOUT_SECS`] for the whole preparation) passed while sources were still being
+/// indexed: each group written is kept (`reindex` commits per group), so a later review resumes.
+const INDEX_STILL_BUILDING: &str = "index still being built: the indexing deadline passed; what \
+                                    was indexed is kept and a later review resumes it";
+
 /// The `trimmed` label of documentation or history left out of a batch because nothing more
 /// could fit in its budget (its query is then never embedded).
 const NO_ROOM: &str = "no room left in the batch";
@@ -937,8 +943,15 @@ impl RagSource for StoreRag<'_> {
             // it, left documentation out undeclared unless the caller also set the flag.
             let not_opened = self.docs.is_none() && self.embedder.is_some();
             if memory && (self.docs_unavailable || not_opened) {
+                // MAGI FIX (MS3 §6 loop17, R2 Caspar): a cold index cut by its deadline read as
+                // a down one.
+                let label = if self.doc_index.still_indexing && !not_opened {
+                    INDEX_STILL_BUILDING
+                } else {
+                    INDEX_UNAVAILABLE
+                };
                 a.trimmed
-                    .push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
+                    .push((ContextKind::Documentation, label.to_string()));
             }
         }
         Ok(a)
@@ -1531,6 +1544,7 @@ pub async fn prepare_docs(
     let kept = bounded_into(&mut prep, chunked);
     for batch in reindex_batches(kept) {
         let left = deadline.saturating_duration_since(Instant::now());
+        prep.doc_index.still_indexing |= left.is_zero();
         if left.is_zero() || !index_batch(docs, &batch, embedder, left, &mut prep).await {
             let cause = "a batch of documentation sources was not indexed";
             return degraded(prep, cause, started);
@@ -1569,8 +1583,14 @@ async fn index_batch(
     timeout: Duration,
     prep: &mut DocPrep,
 ) -> bool {
-    let Some(refused) = reindex_or_degrade(docs, batch, embedder, timeout).await else {
-        return false;
+    // MAGI FIX (MS3 §6 loop17, R2 Caspar): a bound that passed is a cold index (kept, resumed
+    // by a later review), declared apart from a failure.
+    let refused = match reindex_or_degrade(docs, batch, embedder, timeout).await {
+        Ok(refused) => refused,
+        Err(stop) => {
+            prep.doc_index.still_indexing |= stop == IndexStop::TimedOut;
+            return false;
+        }
     };
     for (source, _) in batch {
         if refused.contains(&display_path(&source.path)) {
@@ -1581,8 +1601,17 @@ async fn index_batch(
     true
 }
 
+/// Why a bounded reindex did not complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexStop {
+    /// The store or the embedder failed.
+    Failed,
+    /// The bound passed first: the groups written are kept, the rest stays `missing`.
+    TimedOut,
+}
+
 /// One [`ReviewDocStore::reindex`] under `timeout`: the sources the store refused, as
-/// `display_path`, when it wrote; `None` (with a WARN) when it failed or did not finish. A
+/// `display_path`, when it wrote; an [`IndexStop`] (with a WARN) when it failed or did not finish. A
 /// timeout drops the group in flight, by the store's contract: `reindex` embeds a group, then
 /// writes it in **one** transaction with no `.await` inside, so a future dropped here never
 /// half-commits a group; the groups already written stay and the sources not yet written stay
@@ -1598,13 +1627,19 @@ async fn index_batch(
 ///
 /// # Returns
 ///
-/// The refused sources when the rest is indexed now, `None` otherwise.
+/// The refused sources when the rest is indexed now.
+///
+/// # Errors
+///
+/// [`IndexStop`], already logged: a failure apart from a bound that passed first (a cold index
+/// that a later review resumes, declared `still_indexing`).
+// MAGI FIX (MS3 §6 loop17, R2 Caspar): `None` for both read a cold index as a down one.
 pub async fn reindex_or_degrade(
     docs: &ReviewDocStore,
     sources: &[(DocSource, Vec<DocChunk>)],
     embedder: &dyn EmbeddingProvider,
     timeout: Duration,
-) -> Option<Vec<String>> {
+) -> Result<Vec<String>, IndexStop> {
     let started = Instant::now();
     match tokio::time::timeout(timeout, docs.reindex(sources, embedder)).await {
         Ok(Ok(stats)) => {
@@ -1628,7 +1663,7 @@ pub async fn reindex_or_degrade(
                     "a documentation source matches a secret pattern and was left out"
                 );
             }
-            Some(stats.refused)
+            Ok(stats.refused)
         }
         Ok(Err(e)) => {
             let error = outward_text(&e.to_string());
@@ -1638,7 +1673,7 @@ pub async fn reindex_or_degrade(
                 error = error.as_str(),
                 "the documentation index could not be updated"
             );
-            None
+            Err(IndexStop::Failed)
         }
         Err(_) => {
             tracing::event!(
@@ -1647,7 +1682,7 @@ pub async fn reindex_or_degrade(
                 ms = millis(started.elapsed()),
                 "the documentation index was not updated in time"
             );
-            None
+            Err(IndexStop::TimedOut)
         }
     }
 }
@@ -2713,7 +2748,7 @@ mod tests {
         assert!(
             reindex_or_degrade(&f.docs, &docs, &f.embedder, bound)
                 .await
-                .is_some(),
+                .is_ok(),
             "a healthy embedder indexes"
         );
         // [CP2 MS3 loop 13] Another source: `docs` is indexed now and would be skipped without calling the embedder, so
@@ -2722,9 +2757,10 @@ mod tests {
             src("README.md", "k2"),
             vec![chunk("README.md", "Usage", "how a works, v2")],
         )];
-        assert!(reindex_or_degrade(&f.docs, &other, &FailingEmbedder, bound)
-            .await
-            .is_none());
+        assert_eq!(
+            reindex_or_degrade(&f.docs, &other, &FailingEmbedder, bound).await,
+            Err(IndexStop::Failed)
+        );
     }
 
     #[tokio::test]
@@ -2878,7 +2914,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(r, Ok(None)),
+            matches!(r, Ok(Err(IndexStop::TimedOut))),
             "the reindex bound fires before the test's own: {r:?}"
         );
     }
