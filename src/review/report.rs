@@ -1036,7 +1036,7 @@ fn listed(text: &str) -> String {
 /// memory, so that is far below `usize::MAX` and the loop ends before a saturating add could
 /// repeat a value. The counter is still `checked_add`: running out is a typed
 /// `KeySuffixesExhausted` from `distinct_key_from` (both crate-private), which this function maps
-/// to a fixed key.
+/// to a fixed key, itself suffixed when `taken` already holds it, so no count is overwritten.
 ///
 /// # Arguments
 /// * `taken` - The object the key goes into.
@@ -1068,8 +1068,17 @@ pub fn distinct_key(taken: &serde_json::Map<String, Value>, base: String) -> Str
 fn distinct_key_after(taken: &serde_json::Map<String, Value>, base: &str, first: usize) -> String {
     // MAGI FIX (MS3 §6 loop15): the counter is checked, not saturating; running out of
     // suffixes (unreachable in memory) is a typed failure that lands on a fixed key.
-    distinct_key_from(taken, base, first)
-        .unwrap_or_else(|KeySuffixesExhausted| KEY_SUFFIXES_EXHAUSTED_KEY.to_string())
+    // MAGI FIX (MS3 §6 loop17, R6b2 Balthasar): that fixed key could already be taken, and the
+    // insert then overwrote the count; it is made distinct the same way. Its own suffixes start
+    // at 2, so running out a second time would need `usize::MAX` keys in memory: the fixed key is
+    // the last resort only then.
+    distinct_key_from(taken, base, first).unwrap_or_else(|KeySuffixesExhausted| {
+        if !taken.contains_key(KEY_SUFFIXES_EXHAUSTED_KEY) {
+            return KEY_SUFFIXES_EXHAUSTED_KEY.to_string();
+        }
+        distinct_key_from(taken, KEY_SUFFIXES_EXHAUSTED_KEY, 2)
+            .unwrap_or_else(|KeySuffixesExhausted| KEY_SUFFIXES_EXHAUSTED_KEY.to_string())
+    })
 }
 
 /// The key a `base` whose suffixes ran out is written under (see [`KeySuffixesExhausted`]).
