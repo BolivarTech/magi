@@ -3835,6 +3835,37 @@ mod tests {
         assert_eq!(f.embedder.calls(), 0, "no chunk of it was embedded");
     }
 
+    #[tokio::test]
+    async fn a_markdown_source_with_a_key_block_is_omitted_not_masked_and_never_embedded() {
+        // [MAGI S6 MS3 loop17, R5 Caspar] The documentation path's contract is OMISSION for a
+        // multi-line private-key block (RV22's exception), not masking: the body has no pattern
+        // of its own, so masking could not cover it. The embedder's request proves it: neither
+        // the key's body nor its clean sibling section is sent.
+        let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
+        let end = concat!("-----", "END ", "PRIVATE KEY-----");
+        let body = "MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8w";
+        let text = format!("# Keys\n{begin}\n{body}\n{end}\n# Other\nfine sibling text\n");
+        let f = RagFixture::new(&[("README.md", text.as_str())]).await;
+        let embedder = Recording(std::sync::Mutex::new(Vec::new()));
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &embedder,
+            BOUND,
+        )
+        .await;
+        let sent = embedder.0.lock().expect("lock").clone();
+        assert!(sent.is_empty(), "nothing of it was embedded: {sent:?}");
+        assert_eq!(prep.withheld_sources, vec!["README.md".to_string()]);
+        assert!(prep.doc_sources.is_empty(), "{:?}", prep.doc_sources);
+        assert!(prep.masked_sources.is_empty(), "omitted, never masked");
+    }
+
     /// Records every text it is asked to embed. [T3.7]
     struct Recording(std::sync::Mutex<Vec<String>>);
     #[async_trait::async_trait]

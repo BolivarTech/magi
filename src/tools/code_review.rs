@@ -1610,7 +1610,10 @@ impl ProductionReviewRunner {
         if let Some(cause) = overran_listing(left) {
             return unavailable(Some(docs), cause);
         }
-        // Raw content on purpose: `prepare_docs` masks every chunk before it is embedded (RV22).
+        // Raw content on purpose: `prepare_docs` masks every one-line secret of a chunk before it
+        // is embedded and OMITS a source holding a multi-line private-key block, whole (RV22's
+        // exception; the embedder's request proves it, `a_markdown_source_with_a_key_block_is_
+        // omitted_not_masked_and_never_embedded` in `memory/review_rag.rs`).
         let source = CachedSource::new(inner.as_ref());
         let keep = |p: &str| !is_never_reviewed(p) && !ignored.contains(p);
         let prep = prepare_docs(
