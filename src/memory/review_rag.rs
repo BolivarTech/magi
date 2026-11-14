@@ -1799,6 +1799,15 @@ pub fn reclassify_budget(deadline: Option<std::time::Instant>) -> Duration {
 /// `MAX_GC_REFS` ref-tree listings (past that the clean-up is skipped, never started) and one
 /// `DELETE` per dead source; it runs after the review has produced its report, and a failure only
 /// leaves rows that the next review's clean-up deletes (the index is derived data).
+///
+/// Deadline (MAGI FIX, MS3 §6 loop17, R2 Caspar): unlike [`reclassify_budget`], this function
+/// takes none, on purpose. Its clock is its caller's: the runner's post-report step checks the
+/// post-report bound and the run's cancellation before starting it (and the history step leaves
+/// it a reserve of that bound), and the wait on the whole step is itself bounded, so a clean-up
+/// still running when the bound passes keeps running on its blocking thread without holding the
+/// review. Once started, each listing is one git call under the runner's own per-call timeout,
+/// so its worst case is `MAX_GC_REFS + 1` such calls; checking a clock between listings would cut
+/// a clean-up half way for no saving the outer bound does not already give.
 pub fn collect_garbage(
     docs: &ReviewDocStore,
     git: Option<&dyn GitCommand>,

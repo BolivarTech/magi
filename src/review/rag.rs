@@ -594,7 +594,7 @@ fn ranked_identifiers(text: &str) -> impl Iterator<Item = &str> {
 /// flag, never one entry per later name).
 ///
 /// The input is the batch's raw code: every identifier counts, quoted or not. The names of code
-/// lines are served first and those of comment lines ([`is_comment_line`]) after them, each in the
+/// lines are served first and those of comment lines (`is_comment_line`) after them, each in the
 /// order it first appears, so a comment block cannot spend [`MAX_DEFINITIONS_TOTAL`] before the
 /// callees of the code below it. Accepted over-retrieval (declared): a name in a comment, in a
 /// trailing comment or in a string still fetches its definition when slots are left, and a name
@@ -705,7 +705,7 @@ fn first_k<T: Ord>(items: impl Iterator<Item = T>, k: usize) -> (Vec<T>, bool) {
 /// extractor, or gone, gives none; a unit already given is not repeated.
 ///
 /// O(occurrences of `names` · log S + bytes of the files read) time and O(S) memory per name,
-/// S = the scan bound ([`first_k`]).
+/// S = the scan bound (a bounded selection, `first_k`).
 ///
 /// # Arguments
 ///
