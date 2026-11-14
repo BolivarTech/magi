@@ -444,6 +444,11 @@ pub(crate) const POST_REPORT_LIMIT_SECS: u64 = 2 * RECLASSIFY_BUDGET_SECS;
 const POST_REPORT_BOUND_REACHED: &str =
     "the post-report work reached its bound: the rest of the clean-up is left for the next review";
 
+/// What the run log and the report say when the documentation index clean-up was skipped (more
+/// than `MAX_GC_REFS` local refs, or a git that did not answer): the index keeps its rows, and a
+/// later review cleans them (the purge by SQL stays available, README).
+const GC_NOT_CLEANED: &str = "warning: the documentation index was not cleaned (too many local git refs, or git did not answer); its stale rows stay until a later review cleans them";
+
 /// Whether `deadline` has passed; never without one. O(1).
 fn past(deadline: Option<std::time::Instant>) -> bool {
     deadline.is_some_and(|d| std::time::Instant::now() >= d)
@@ -2181,7 +2186,7 @@ fn follow_up_steps(
             Ok(None) => tracing::event!(
                 target: REVIEW_LOG_TARGET,
                 tracing::Level::WARN,
-                "the documentation index was not cleaned: too many local refs, or git did not answer"
+                "{GC_NOT_CLEANED}"
             ),
             Err(e) => {
                 let error = egress_text(&e.to_string());
@@ -3837,6 +3842,39 @@ mod tests {
         );
         assert_eq!(git.0.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(memory.history().all().expect("all").is_empty());
+    }
+
+    /// More distinct refs than `MAX_GC_REFS`: the clean-up is skipped.
+    struct ManyRefsGit;
+    impl GitCommand for ManyRefsGit {
+        fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+            match args.first() {
+                Some(&"for-each-ref") => Ok((0..=magi_rs::review::docs::MAX_GC_REFS)
+                    .map(|i| format!("h{i}\n"))
+                    .collect::<String>()
+                    .into_bytes()),
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_skipped_index_clean_up_reaches_the_report_not_only_the_run_log() {
+        // [MAGI S6 MS3 loop17, R1 Caspar] Past `MAX_GC_REFS` the clean-up is skipped; only the run
+        // log said so, which a TUI or stdout-only consumer never reads.
+        use crate::memory::review_docs::test_embedder::FakeEmbedder;
+        let (_db, _mem, memory) = review_memory();
+        let embedder = FakeEmbedder::new(3);
+        let docs = memory.doc_store(&embedder).await.expect("store");
+        let follow = FollowUp {
+            findings: Vec::new(),
+            rev: None,
+            worktree: Some(BTreeSet::new()),
+            docs: Some(docs),
+            repository: true,
+        };
+        let warning = follow_up_work_until(&memory, &ManyRefsGit, follow, None);
+        assert_eq!(warning.as_deref(), Some(GC_NOT_CLEANED));
     }
 
     #[tokio::test]
