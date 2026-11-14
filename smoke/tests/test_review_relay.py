@@ -218,7 +218,8 @@ class RelayTests(unittest.TestCase):
         self.assertIsNotNone(executor._setup_expired)
 
     def test_r21_declares_its_three_reviews(self) -> None:
-        # MAGI FIX (MS3 §6 loop13): the declared cost is the sum of the three reviews, one clock.
+        # MAGI FIX (MS3 §6 loop13): the declared cost is the sum of the three reviews; the measured
+        # one has its own third (loop16), so the sum bounds the worst case (loop17).
         self.assertEqual(3 * runs.TRIO_RUNS_MEASURED_S["R18"], runs.TRIO_RUNS_MEASURED_S["R21"])
         self.assertEqual(3 * runs.DEFINITIONS["R20"].timeout_s, runs.DEFINITIONS["R21"].timeout_s)
 

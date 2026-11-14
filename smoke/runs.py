@@ -723,10 +723,12 @@ LARGE_CONSULT_CEILING_S = 20184
 #: four-line file and the gate, plus what R17 does not do: indexing that file's
 #: one doc comment and embedding the batch's query with the environment's
 #: embedder, seconds on a local one. Replace it at the first real run too.
-#: R20 carries R18's provisional figure too. R21 runs three reviews under ONE
-#: clock (MAGI FIX, MS3 §6 loop13): its figure is their sum, 3 x R18's, and its
-#: ``timeout_s`` is 3 x R20's, shared by the setup reviews and the measured one.
-#: Replace them at the first run.
+#: R20 carries R18's provisional figure too. R21 runs three reviews (MAGI FIX, MS3
+#: §6 loop13): its figure is their sum, 3 x R18's, and its ``timeout_s`` is 3 x
+#: R20's. The two setup reviews share two thirds of it and the measured review has
+#: its own third (:func:`measured_allowance`, loop16), so the declared clock bounds
+#: the worst case, every review running to its timeout (loop17); only the harness's
+#: own bookkeeping after the measured review is outside it. Replace them at the first run.
 TRIO_RUNS_MEASURED_S: dict[str, int] = {"R4": 283, "R5": 170, "R8": 67,
                                         "R10": 67, "R12": 1500, "R17": 300,
                                         "R18": 300, "R20": 300, "R21": 3 * 300,
