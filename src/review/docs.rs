@@ -189,12 +189,16 @@ const PY_TRIPLE_QUOTES: [&str; 2] = ["\"\"\"", "'''"];
 /// ```
 // MAGI FIX (MS3 §6 loop10): `docs/api.txt` was a source that never yields chunks.
 pub fn is_doc_source(path: &str) -> bool {
-    path.ends_with(".md")
+    // MAGI FIX (S6 loop 17, R1): compared in ASCII lower case, as Windows and macOS file systems
+    // are (`Readme.md`); the stored path keeps its own case.
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".md")
         && DOC_SOURCES.iter().any(|s| {
+            let s = s.to_ascii_lowercase();
             if s.ends_with('/') {
-                path.starts_with(s)
+                lower.starts_with(&s)
             } else {
-                path == *s
+                lower == s
             }
         })
 }
