@@ -4497,6 +4497,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn without_a_git_and_without_documentation_no_query_is_embedded() {
+        // [MAGI S6 MS3 loop17, R2 Melchior/Balthasar] A no-git review still embedded a query and
+        // read the history store per batch for entries `served_on_heads_line` always discards.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let mut rag = f.rag(true);
+        rag.docs = None;
+        rag.history_git = None;
+        let a = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        assert_eq!(f.embedder.calls(), 0, "nothing could be served");
+        assert!(
+            a.trimmed
+                .iter()
+                .any(|(k, label)| *k == ContextKind::History && label == HISTORY_NO_GIT),
+            "the cause is still declared: {:?}",
+            a.trimmed
+        );
+    }
+
+    #[tokio::test]
     async fn a_review_without_git_declares_that_history_was_not_served() {
         // [MAGI S6 MS3 loop16, R2 Caspar] Without a git no entry can be checked against HEAD, so
         // none is served; that was said nowhere.
