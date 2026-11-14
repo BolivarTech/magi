@@ -3252,6 +3252,8 @@ class RequestBodies:
         self._recorded: list[tuple[str, bytes]] = []
         self._headers: list[bytes] = []
         self._lost = False
+        self._in_flight = 0
+        self._idle = threading.Condition(self._lock)
 
     def record(self, path: str, body: bytes, headers: bytes = b"") -> None:
         """Keep one request, or mark the record incomplete past the cap.
@@ -3300,10 +3302,41 @@ class RequestBodies:
         with self._lock:
             return tuple(self._recorded), tuple(self._headers), not self._lost
 
+    def enter(self) -> None:
+        """Count one connection the relay accepted (on the accepting thread, before its handler runs)."""
+        with self._lock:
+            self._in_flight += 1
+
+    def leave(self) -> None:
+        """Count one connection the relay is done with."""
+        with self._idle:
+            self._in_flight -= 1
+            self._idle.notify_all()
+
+    def settle(self, timeout: float) -> bool:
+        """Wait for every accepted connection to finish; past *timeout*, mark the record incomplete.
+
+        MAGI FIX (MS3 §6 loop17, R7a1 Caspar): the relay's handler threads are daemons that its
+        shutdown does not wait for, so one still reading a body when the run ended recorded or
+        lost after the result's snapshot, and the snapshot read complete.
+
+        Args:
+            timeout: Seconds to wait.
+
+        Returns:
+            bool: Whether every connection finished in time.
+        """
+        with self._idle:
+            settled = self._idle.wait_for(lambda: self._in_flight == 0, timeout)
+            if not settled:
+                self._lost = True
+            return settled
+
     @property
     def in_flight(self) -> int:
         """int: The connections the relay accepted and has not finished with."""
-        return 0
+        with self._lock:
+            return self._in_flight
 
     @property
     def complete(self) -> bool:
@@ -3318,8 +3351,11 @@ class _RelayHandler(_RecordingHandler):
     Answers HTTP/1.0 and closes, so the streamed body needs no framing of its
     own (MAGI FIX, MS3 §6 loop13, declared: ``Content-Length`` and
     ``Transfer-Encoding`` are dropped from the reply and EOF delimits the body,
-    so a reply cut short reads as complete to the product; the relay observes
-    requests, never the integrity of a response); a request it cannot keep whole (chunked, or over
+    so a reply cut short reads as complete to the product. MAGI FIX, loop17: an
+    upstream reply that ends before its declared length, or a chunked one cut
+    mid-chunk, marks the record incomplete, so the run is ``CANNOT_TEST``; one
+    the upstream itself delimits by EOF cannot be told from a whole one, and
+    stays undetected); a request it cannot keep whole (chunked, or over
     :data:`RELAY_MAX_BODY_BYTES`) is refused and marks the record incomplete.
     """
 
@@ -3404,6 +3440,11 @@ class _RelayHandler(_RecordingHandler):
             while chunk := reply.read1(MODEL_COUNTER_CHUNK_BYTES):
                 self.wfile.write(chunk)
                 self.wfile.flush()
+            if reply.length:
+                # MAGI FIX (MS3 §6 loop17, R7a1 Caspar): the upstream closed before its declared
+                # length; the product reads the relay's EOF as a whole reply, so the run is not a
+                # verdict on it (a cut chunked reply raises IncompleteRead, caught by the caller).
+                self.server.bodies.lose()
         finally:
             conn.close()
 
@@ -3414,6 +3455,31 @@ class _RelayHandler(_RecordingHandler):
             fmt: The format string the base class passes.
             *args: Its arguments.
         """
+
+
+class _RelayServer(_BoundedThreadingServer):
+    """The relay's server: counts each accepted connection on its record until it is shut down."""
+
+    def process_request(self, request, client_address) -> None:
+        """Count the connection before its handler can run, then serve it.
+
+        Args:
+            request: The accepted socket.
+            client_address: The peer's address.
+        """
+        self.bodies.enter()
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request) -> None:
+        """Close the connection and count it done (every served or refused connection ends here).
+
+        Args:
+            request: The socket to close.
+        """
+        try:
+            super().shutdown_request(request)
+        finally:
+            self.bodies.leave()
 
 
 @contextlib.contextmanager
@@ -3441,7 +3507,7 @@ def recording_relay(upstream: str):
     if parts.scheme not in ("http", "https") or not parts.hostname or "@" in parts.netloc:
         raise HarnessError("the recording relay needs a plain http(s) upstream without "
                            "credentials, not %r" % upstream)
-    server = _BoundedThreadingServer(("127.0.0.1", 0), _RelayHandler)
+    server = _RelayServer(("127.0.0.1", 0), _RelayHandler)
     server.daemon_threads = True
     server.bodies, server.upstream = RequestBodies(), parts
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -3450,8 +3516,13 @@ def recording_relay(upstream: str):
         yield "http://127.0.0.1:%d%s" % (server.server_address[1], parts.path), server.bodies
     finally:
         server.shutdown()
+        # MAGI FIX (MS3 §6 loop17, R7a1): a connection that outlives the settle, or an accept
+        # loop that outlives its join, may still record or lose: the record is incomplete.
+        server.bodies.settle(RELAY_SETTLE_TIMEOUT_S)
         server.server_close()
         thread.join(timeout=ERROR_BACKEND_TIMEOUT_S)
+        if thread.is_alive():
+            server.bodies.lose()
 
 
 #: The path endings of a trio completion request (Ollama's native chat and the
