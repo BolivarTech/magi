@@ -1495,7 +1495,12 @@ impl ProductionReviewRunner {
     ///
     /// # Errors
     /// When the workspace cannot be canonicalized for the guard.
-    pub(crate) fn new(parts: ReviewRunnerParts) -> anyhow::Result<Self> {
+    pub(crate) fn new(mut parts: ReviewRunnerParts) -> anyhow::Result<Self> {
+        // MAGI FIX (S6 loop 17, R5): an embedder is reachable only through the stores, so
+        // `--no-memory` (no stores) cannot carry one.
+        if parts.memory.is_none() {
+            parts.embedder = None;
+        }
         let guard = PathGuard::new(parts.workspace.clone())?;
         let workspace = guard.workspace_root().to_path_buf();
         Ok(Self {
@@ -2046,18 +2051,31 @@ const CLEANUP_RESERVE_SECS: u64 = 10;
 
 /// The history budget of one follow-up: [`reclassify_budget`] under `deadline`, nothing once the
 /// run was cancelled.
+// MAGI FIX (S6 loop 17, R5): the history took the whole bound and starved the clean-up; a
+// cancelled run still spent its budget.
 fn history_budget(
     deadline: Option<std::time::Instant>,
-    _cleanup_follows: bool,
-    _cancel: &CancellationToken,
+    cleanup_follows: bool,
+    cancel: &CancellationToken,
 ) -> Duration {
-    reclassify_budget(deadline)
+    if cancel.is_cancelled() {
+        return Duration::ZERO;
+    }
+    let reserve = Duration::from_secs(if cleanup_follows {
+        CLEANUP_RESERVE_SECS
+    } else {
+        0
+    });
+    reclassify_budget(deadline.map(|d| {
+        let left = d.saturating_duration_since(std::time::Instant::now());
+        std::time::Instant::now() + left.saturating_sub(reserve)
+    }))
 }
 
 /// Whether the derived work (the index clean-up) must not start: the bound passed or the run was
 /// cancelled.
-fn post_report_stopped(deadline: Option<std::time::Instant>, _cancel: &CancellationToken) -> bool {
-    past(deadline)
+fn post_report_stopped(deadline: Option<std::time::Instant>, cancel: &CancellationToken) -> bool {
+    past(deadline) || cancel.is_cancelled()
 }
 
 /// [`follow_up_work_until`] that also ends at the run's `cancel`.
@@ -2184,8 +2202,21 @@ fn record_history(
 
 /// The reclassification budget for a review of `sha`: `budget`, or nothing when `sha` is not an
 /// ancestor of the comparison head.
-fn reclassification_budget(_git: &dyn GitCommand, _sha: &str, budget: Duration) -> Duration {
-    budget
+// MAGI FIX (S6 loop 17, R5): the comparison head was assumed to descend from the reviewed commit.
+fn reclassification_budget(git: &dyn GitCommand, sha: &str, budget: Duration) -> Duration {
+    if git
+        .run(&["merge-base", "--is-ancestor", sha, HISTORY_HEAD])
+        .is_ok()
+    {
+        return budget;
+    }
+    tracing::event!(
+        target: REVIEW_LOG_TARGET,
+        tracing::Level::INFO,
+        "the reviewed revision is not an ancestor of HEAD: its history is recorded without \
+         reclassifying earlier entries against HEAD"
+    );
+    Duration::ZERO
 }
 
 /// Whether `input` reviews a git revision (a commit, a range, two branches), whose history is
