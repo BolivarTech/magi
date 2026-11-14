@@ -2755,6 +2755,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn masked_code_stays_named_beside_an_ambiguous_side() {
+        // [MAGI S6 MS3 loop16, R6b2] `guard.or_else(masked)` dropped the masked-code cause as soon
+        // as another guard applied, so the report named one protection of two.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.99));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let masked = format!(
+            "let k = \"{}github-token>\";\n",
+            crate::review::secrets::REDACTED_OPEN
+        );
+        let v = g
+            .judge_ambiguous_side(&finding(Severity::Warning, Some(1)), masked.as_str(), None)
+            .await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("ambiguous diff side"),
+                vec!["ambiguous diff side", "masked code"]
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn a_quoted_marker_is_never_filtered() {
         // MAGI FIX (MS3 §6 loop14): the declared false trigger of the masked-code guard: clean
         // code, but the finding's own title quotes the mask marker.
