@@ -789,6 +789,77 @@ class LoopSeventeenRelayTests(unittest.TestCase):
                                                     timeout=5).read())
         self.assertTrue(rec.complete)
 
+    def test_the_dry_run_and_the_live_staging_run_one_list_of_checks(self) -> None:
+        # R7a1 Balthasar: two copies of the checks could drift, and the dry run would stop
+        # pre-flighting a check the live path makes.
+        calls = []
+
+        def spy(original_text, config, url):
+            calls.append(url)
+            return ["off: spied"]
+        with tempfile.TemporaryDirectory() as tmp, unittest.mock.patch.object(runs, "_staging_problems", spy):
+            ws = pathlib.Path(tmp)
+            (ws / ".magi").mkdir()
+            config = ws / ".magi" / "magi.toml"
+            config.write_text('base_url = "http://127.0.0.1:9/v1"\n', encoding="utf-8")
+            self.assertEqual(["off: spied"], runs.relay_staging_problems(config))
+            definition = runs.RunDefinition(
+                run_id="RX", stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+                records_requests=True, argv=("code-review",) + runs.REVIEW_FLAGS)
+            with self.assertRaisesRegex(HarnessError, "off: spied"):
+                with runs.RunExecutor(None, None, None)._recorded_requests(definition, ws, []):
+                    pass
+        self.assertEqual(runs._STAGING_DRY_RUN_URL, calls[0])
+        self.assertEqual(2, len(calls), calls)
+        self.assertTrue(calls[1].startswith("http://127.0.0.1:"), calls)
+
+    def test_completeness_is_its_own_question(self) -> None:
+        # R7a1 Melchior: `None` (lost) and `()` (nothing sent) are both falsy.
+        base = _result("R18", 0, {})
+        self.assertTrue(base.requests_complete)
+        self.assertTrue(_with(base, request_bodies=(), request_headers=()).requests_complete)
+        for gone in ({"request_bodies": None}, {"request_headers": None}):
+            with self.subTest(gone=gone):
+                self.assertFalse(_with(base, **gone).requests_complete)
+
+    def test_a_missing_header_record_is_never_read_as_no_header(self) -> None:
+        # R7a1 Balthasar: the headers get the raising accessor the bodies have.
+        with self.assertRaises(HarnessError):
+            runs.relayed_headers(None)
+        self.assertEqual((b"a",), runs.relayed_headers((b"a",)))
+
+    def test_no_scenario_reads_a_relay_record_through_or(self) -> None:
+        for path in sorted(pathlib.Path(rc.__file__).parent.glob("*.py")):
+            source = path.read_text(encoding="utf-8").replace("\r", "")
+            for needle in ("request_bodies or ", "request_headers or "):
+                with self.subTest(path=path.name, needle=needle):
+                    self.assertFalse(needle in source, "%s reads %r" % (path.name, needle))
+
+    def test_the_relay_forwards_the_operator_credential_it_never_records(self) -> None:
+        # R7b1 Caspar: the record holding no key proved nothing about the upstream receiving it.
+        seen = []
+
+        class _Headers(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 - the http.server hook name
+                self.rfile.read(int(self.headers["Content-Length"]))
+                seen.append(dict(self.headers.items()))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *args) -> None:
+                """Keep the test output quiet."""
+        upstream = self._upstream(_Headers)
+        with runs.recording_relay(upstream) as (url, rec):
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            opener.open(urllib.request.Request(url + "/embeddings", data=b"x", headers={
+                "Authorization": "Bearer REALCREDENTIAL", "X-Api-Key": "REALCREDENTIAL"}), timeout=5).read()
+        received = {k.lower(): v for k, v in seen[0].items()}
+        self.assertEqual("Bearer REALCREDENTIAL", received.get("authorization"))
+        self.assertEqual("REALCREDENTIAL", received.get("x-api-key"))
+        self.assertNotIn(b"REALCREDENTIAL", rec.headers[0])
+
 
 if __name__ == "__main__":
     unittest.main()

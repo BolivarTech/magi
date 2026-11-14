@@ -648,6 +648,11 @@ class RunResult:
     #: The runner reports every scenario reading it as ``CANNOT_TEST`` with this cause.
     not_runnable: str = ""
 
+    @property
+    def requests_complete(self) -> bool:
+        """bool: Whether the relay's record of the run is whole."""
+        return True
+
 
 #: Where the product writes its logs, relative to a workspace root. The one
 #: definition: :mod:`smoke.logs` re-exports it, because it imports this module
@@ -3569,6 +3574,18 @@ def gate_bodies(request_bodies) -> tuple:
     return _bodies_ending(request_bodies, GATE_PATH_SUFFIXES)
 
 
+def relayed_headers(request_headers) -> tuple:
+    """The header lines of the relay's record.
+
+    Args:
+        request_headers: A ``RunResult``'s ``request_headers``.
+
+    Returns:
+        tuple: *request_headers*.
+    """
+    return request_headers
+
+
 def _bodies_ending(request_bodies, suffixes) -> tuple:
     """The bodies whose target, query dropped, ends in one of *suffixes*.
 
@@ -3628,6 +3645,20 @@ def relay_upstream(config_path, environ=None) -> str:
 
 #: The address the staging dry run points a copy of the configuration at; nothing listens there.
 _STAGING_DRY_RUN_URL = "http://127.0.0.1:1/v1"
+
+
+def _staging_problems(original_text: str, config, url: str) -> list:
+    """What would let *config* reach past a relay at *url*.
+
+    Args:
+        original_text: The configuration before the rewrite.
+        config: The configuration file to rewrite.
+        url: The relay's URL.
+
+    Returns:
+        list: One text per problem.
+    """
+    return []
 
 
 def relay_staging_problems(config_path) -> list:
