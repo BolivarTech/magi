@@ -442,8 +442,14 @@ impl ReviewDocStore {
     /// # Errors
     /// [`MemoryError::Storage`] when the query's identity differs from the store's.
     pub fn require_identity(&self, model_id: &str, dim: usize) -> Result<(), MemoryError> {
-        let _ = (model_id, dim);
-        Ok(())
+        let query_id = doc_index_id(model_id, dim);
+        if query_id == self.index_id {
+            return Ok(());
+        }
+        Err(MemoryError::Storage(format!(
+            "the query's embedder identity `{query_id}` differs from the index identity `{}`",
+            self.index_id
+        )))
     }
 
     /// Whether any stored row (source or chunk) carries another index identity.
