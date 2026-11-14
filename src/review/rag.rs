@@ -457,21 +457,26 @@ fn read_text(
         .transpose()
 }
 
-/// What a definition or caller file that could not be read declares, after its path.
+/// What a definition or caller file that could not be read, or was gone when read, declares,
+/// after its path.
 pub const UNREADABLE_CONTEXT: &str = "could not be read and was left out";
 
-/// The new side of a context file, or `None` when it is gone or cannot be read; a read error
-/// pushes the file onto `unread`, so it costs its own items only, declared, never the batch.
+/// The new side of a context file, or `None` when it is gone or cannot be read; either pushes
+/// the file onto `unread`, so it costs its own items only, declared, never the batch (the index
+/// named it, so a side gone since is a loss to declare like a read error).
 fn read_or_note(
     sources: &dyn ContentSource,
     file: &str,
     unread: &mut Vec<String>,
 ) -> Option<String> {
     // MAGI FIX (MS3 §6 loop9): one unreadable file failed the batch's whole context.
-    read_text(sources, file, false).unwrap_or_else(|_| {
+    // MAGI FIX (MS3 §6 loop17, R2 Caspar): a file read back gone (`Ok(None)`) was dropped
+    // with no declaration.
+    let text = read_text(sources, file, false).ok().flatten();
+    if text.is_none() {
         unread.push(display_path(file));
-        None
-    })
+    }
+    text
 }
 
 /// Lines `first..=last` (1-based) of `text`, joined by `\n`. O(`last`).
