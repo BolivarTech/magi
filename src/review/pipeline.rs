@@ -4902,6 +4902,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_deletion_only_hunk_reviews_the_old_side_numbers_of_its_removed_lines() {
+        // [MAGI S6 MS3 loop17, R6b1] A finding at the number a removed line had survives RV09:
+        // the hunk's new side is empty (`+12,0`), so only the old side can claim lines 10-12.
+        struct Unreadable;
+        impl ContentSource for Unreadable {
+            fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Err(ReviewError::Io(format!("{path}: gone")))
+            }
+            fn read_old(&self, _: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let batches = vec![ReviewBatch {
+            index: 0,
+            items: vec![BatchItem::Hunk {
+                file: "a.rs".into(),
+                text: String::new(),
+                first_line: 12,
+                last_line: 11,
+                old_first_line: 10,
+                old_last_line: 12,
+            }],
+            tokens: 0,
+            companion_tokens: 0,
+        }];
+        let reviewed = reviewed_of(&batches, &BTreeSet::from([0]), &Unreadable);
+        assert!(reviewed.contains_line("a.rs", 11), "the old-side number");
+        assert!(
+            !reviewed.contains_line("a.rs", 20),
+            "nothing else is claimed"
+        );
+    }
+
     #[tokio::test]
     async fn a_clock_that_runs_out_mid_review_consolidates_the_finished_batches() {
         let dir = workspace(4);
