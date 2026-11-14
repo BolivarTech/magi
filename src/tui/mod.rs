@@ -1377,6 +1377,19 @@ impl Default for TuiCodeReviewCommand {
     }
 }
 
+/// What the notice says while the post-report work (the review history, the documentation index
+/// clean-up) is awaited: no key is read meanwhile, and the wait has its bound.
+const CODE_REVIEW_SAVING: &str =
+    "saving the review history and cleaning the documentation index (up to 30 s; no key is read meanwhile)";
+
+/// What a delivered `/code-review` leaves for the post-report drain.
+pub(crate) struct CodeReviewDrain {
+    /// The runner whose reviews left the work.
+    runner: Arc<dyn crate::tools::code_review::CodeReviewRunner>,
+    /// The run's cancellation.
+    cancel: tokio_util::sync::CancellationToken,
+}
+
 /// A `/code-review` error as the transcript may show it: the transcript sanitizer first, then
 /// the tool path's `egress_text` (control characters stripped again, URL credentials redacted,
 /// the RV22 detector last), so a control byte inside a key cannot hide it from the detector.
@@ -2448,7 +2461,22 @@ impl App {
     ///
     /// # Arguments
     /// * `review` - What [`Self::approve_code_review`] returned.
+    #[cfg(test)]
     pub(crate) async fn run_approved_code_review(&mut self, review: ApprovedCodeReview) {
+        let drain = self.run_review_only(review).await;
+        self.drain_code_review_follow_up(drain).await;
+    }
+
+    /// Runs an approved `/code-review` up to its delivered report or error, without waiting for
+    /// the post-report work: the caller redraws, then hands the result to
+    /// [`Self::drain_code_review_follow_up`].
+    ///
+    /// # Arguments
+    /// * `review` - What [`Self::approve_code_review`] returned.
+    ///
+    /// # Returns
+    /// What the post-report drain needs.
+    pub(crate) async fn run_review_only(&mut self, review: ApprovedCodeReview) -> CodeReviewDrain {
         let ApprovedCodeReview(PendingCodeReview { cmd, runner, plan }) = review;
         let budget = cmd
             .timeout
@@ -2473,10 +2501,21 @@ impl App {
                 apply_response(self, AgentResponse::Error(code_review_error_text(&e)));
             }
         }
-        // After the report (or the error) is on screen: the history and the index clean-up. Its
-        // warning goes through the UI, never to stderr while the alternate screen is up.
-        // MAGI FIX (MS3 §6 loop11): after a failed review too: the shared runner may hold an
-        // earlier review's history (`failed_review_still_drains`).
+        CodeReviewDrain { runner, cancel }
+    }
+
+    /// Waits for the post-report work of a delivered review: the history and the index
+    /// clean-up, announced first and bounded by `finish_after_delivered_report`'s explicit
+    /// deadline ([`crate::tools::code_review::REVIEW_DEADLINE_MARGIN_SECS`]). Its warning goes
+    /// through the UI, never to stderr while the alternate screen is up.
+    // MAGI FIX (MS3 §6 loop11): after a failed review too: the shared runner may hold an
+    // earlier review's history (`failed_review_still_drains`).
+    // MAGI FIX (S6 loop 17, R5b): split from the run, so the caller redraws the report first.
+    pub(crate) async fn drain_code_review_follow_up(&mut self, drain: CodeReviewDrain) {
+        let CodeReviewDrain { runner, cancel } = drain;
+        if runner.has_after_report() {
+            apply_response(self, AgentResponse::Info(CODE_REVIEW_SAVING.to_string()));
+        }
         if let Some(warning) =
             crate::tools::code_review::finish_after_delivered_report(runner.as_ref(), &cancel).await
         {
@@ -4352,7 +4391,10 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 // Drawn after the notice and before the run: the review is
                                 // awaited in line and the screen does not move until it ends.
                                 terminal.draw(|f| ui(f, &mut app))?;
-                                app.run_approved_code_review(review).await;
+                                let drain = app.run_review_only(review).await;
+                                // The report is on screen before the bounded post-report wait.
+                                terminal.draw(|f| ui(f, &mut app))?;
+                                app.drain_code_review_follow_up(drain).await;
                                 continue;
                             }
                             PromptKey::Handled => continue,
@@ -9578,6 +9620,9 @@ end"
                 failure: None,
             })
         }
+        fn has_after_report(&self) -> bool {
+            true
+        }
         fn after_report(&self) -> Option<crate::tools::code_review::PostReport> {
             Some(Box::new(|_, _| Some("HISTORY-WARNING".to_string())))
         }
@@ -9630,6 +9675,32 @@ end"
         let key = concat!("sk-ant-api03-", "AAAAAAAAAA\u{1b}AAAAAAAAAA"); // allow-secret-scan
         let text = code_review_error_text(&format!("cannot read {key}"));
         assert!(!text.contains("AAAAAAAAAAAAAAAAAAAA"), "{text}");
+        // [MAGI S6 MS3 loop17, R5b] The non-secret fragment survives, and no control character
+        // does: a guard that blanked the whole line would also pass the line above.
+        assert!(text.contains("cannot read"), "{text}");
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn the_report_is_on_screen_before_the_post_report_drain_starts() {
+        // [MAGI S6 MS3 loop17, R5b Balthasar] The drain waits up to the post-report bound with
+        // no key read; the report must already be delivered (the caller redraws between the two)
+        // and the wait is announced.
+        let mut app = App::new_for_test();
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            Arc::new(WarningRunner { fail: false }),
+            shown_plan(),
+        );
+        let review = app.approve_code_review().expect("pending");
+        let drain = app.run_review_only(review).await;
+        let before = app.messages.join("\n");
+        assert!(before.contains("REPORT-BODY"), "{before}");
+        assert!(!before.contains("HISTORY-WARNING"), "{before}");
+        app.drain_code_review_follow_up(drain).await;
+        let after = app.messages.join("\n");
+        assert!(after.contains(CODE_REVIEW_SAVING), "{after}");
+        assert!(after.contains("HISTORY-WARNING"), "{after}");
     }
 
     #[test]

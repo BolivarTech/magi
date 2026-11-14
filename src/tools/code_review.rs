@@ -1562,6 +1562,13 @@ impl ProductionReviewRunner {
     /// nothing is sent to the trio, every chunk passed the secret detector before any embedding,
     /// and what was indexed is reused by the next review of the same revision.
     ///
+    /// Declared limit (S6 loop 17, R5): the working-tree candidates come from the same
+    /// full-content resolution the review uses, so a tree above that resolution's own caps
+    /// fails the listing and the review runs without documentation, said once as `unavailable`
+    /// (the error arm below); the digest re-check's one re-plan before this is not part of the
+    /// outbound reserve (it is local git work, counted in `prep_ms`). A path-only listing is the
+    /// follow-up that lifts the cap.
+    ///
     /// A working-tree review lists the tree here and again for the review (and computes the
     /// ignored paths twice): local git calls, bounded and counted in `prep_ms`, kept apart so the
     /// documentation side never shares state with the reviewed side. Its candidates come from the
