@@ -3592,6 +3592,27 @@ def gate_bodies(request_bodies) -> tuple:
     return _bodies_ending(request_bodies, GATE_PATH_SUFFIXES)
 
 
+#: The path ending of an embedding request (the OpenAI-compatible ``/embeddings`` the product's
+#: embedder calls).
+EMBEDDING_PATH_SUFFIXES = ("/embeddings",)
+
+
+def embedding_bodies(request_bodies) -> tuple:
+    """The bodies of the embedder's requests among *request_bodies* (MAGI FIX, MS3 §6 loop17).
+
+    Args:
+        request_bodies: ``(target, body)`` pairs, as :class:`RequestBodies` keeps them.
+
+    Returns:
+        tuple: The bodies whose target's path ends in one of :data:`EMBEDDING_PATH_SUFFIXES`.
+
+    Example:
+        >>> embedding_bodies((("/api/chat", b"a"), ("/v1/embeddings", b"b")))
+        (b'b',)
+    """
+    return _bodies_ending(request_bodies, EMBEDDING_PATH_SUFFIXES)
+
+
 def relayed_headers(request_headers) -> tuple:
     """The header lines of the relay's record (MAGI FIX, MS3 §6 loop17, R7a1), as :func:`trio_bodies` reads bodies.
 

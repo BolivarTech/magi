@@ -53,7 +53,8 @@ S53_ASSERTIONS = (
     "anthropic-key, and masked_unlisted is 0",
     "code_review.skipped is empty and skipped_unlisted is 0: the keyed file was reviewed",
     "the toy key reaches neither stdout, stderr, the run log nor any request the relay forwarded, "
-    "and a trio prompt carries the file's code with the key masked",
+    "and a trio prompt carries the file's code with the key masked, and an embedding request went "
+    "through the relay",
 )
 
 #: What a trio prompt must carry for S53: the masked file's code and the mask in the key's place.
@@ -267,6 +268,12 @@ def _with_masked_prompt(leak, run):
     Returns:
         Finding: *leak*, or a ``FAIL`` when no trio prompt carries the code with the key masked.
     """
+    # MAGI FIX (MS3 §6 loop17, R7a1): the leak check over relayed requests proves nothing about
+    # an embedder that bypassed the relay; R18's doc comment makes the review embed through it.
+    if not runs.embedding_bodies(run.request_bodies):
+        return code_review.finding(S53_ASSERTIONS, 3, Outcome.FAIL, "R18",
+                                   "no embedding request went through the relay, so the leak check "
+                                   "never saw the embedder's traffic")
     if any(all(n in b for n in S53_TRIO_NEEDLES) for b in runs.trio_bodies(run.request_bodies)):
         return leak
     return code_review.finding(S53_ASSERTIONS, 3, Outcome.FAIL, "R18",
