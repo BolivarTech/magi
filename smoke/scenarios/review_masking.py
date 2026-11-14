@@ -80,6 +80,10 @@ SKIPPED_UNLISTED_KEY = "skipped_unlisted"
 S53_EXPECTED_MASKED = [{"path": runs.REVIEW_MASKED_FILE, "cause": "secret",
                         "pattern": runs.REVIEW_MASKED_PATTERN}]
 
+#: The keys of a ``masked`` entry the product serializes only when non-zero
+#: (``skip_serializing_if``): a closed set, pinned against the struct by ``test_rust_sync``.
+S53_OPTIONAL_MASKED_KEYS = frozenset({"redacted_lines"})
+
 #: What S54's omission list must read: the key-block file, as ``secret``.
 S54_EXPECTED_OMISSIONS = [(runs.REVIEW_KEYBLOCK_FILE, "secret")]
 
@@ -191,9 +195,24 @@ def _normalized_masked(items):
         strings"): an extra field or another cause fails loudly
         (``test_a_masked_entry_with_an_extra_field_fails``).
     """
-    return [dict(item, path=code_review.slashed(item["path"]))
+    return [_without_optional_count(dict(item, path=code_review.slashed(item["path"])))
             if isinstance(item, dict) and isinstance(item.get("path"), str) else item
             for item in items]
+
+
+def _without_optional_count(entry):
+    """Drop the optional keys of :data:`S53_OPTIONAL_MASKED_KEYS` that hold a positive integer.
+
+    Args:
+        entry: One ``masked`` entry (a dict).
+
+    Returns:
+        dict: *entry* without each optional key whose value is the shape the product writes (an
+        ``int``, not a ``bool``, above zero: it serializes the count only when non-zero). A key
+        of any other value stays and fails the exact comparison.
+    """
+    return {key: value for key, value in entry.items()
+            if not (key in S53_OPTIONAL_MASKED_KEYS and type(value) is int and value > 0)}
 
 
 @scenario("S53", assertions=S53_ASSERTIONS, run="R18", needs_backend=True, inspects_timeouts=True)
