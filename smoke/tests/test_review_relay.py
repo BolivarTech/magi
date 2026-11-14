@@ -612,15 +612,6 @@ class RelayScenarioTests(unittest.TestCase):
         other = ("/v1/systemone", json.dumps({"input": ["c"]}).encode())
         self.assertEqual(["a", "b"], rc._embedded_texts((query, single, other)))
 
-    def test_a_result_without_output_is_a_missing_capture_not_a_crash(self) -> None:
-        # MAGI FIX (MS3 §6 loop12, R7a Melchior): S52, S53, S55 and S56 read `run.output.*`
-        # unguarded; S57 alone had the guard.
-        for sid, run_id, texts in (("S52", "R17", rc.S52_ASSERTIONS), ("S53", "R18", rm.S53_ASSERTIONS),
-                                   ("S55", "R18", rc.S55_ASSERTIONS), ("S56", "R20", rc.S56_ASSERTIONS)):
-            with self.subTest(sid=sid):
-                r = _with(_result(run_id, 0, {}), output=None)
-                self.assertTrue(all(o is C for o in _judged(sid, r, texts)), sid)
-
     def test_s53_needs_the_header_record(self) -> None:
         # MAGI FIX (MS3 §6 loop13, R7b): bodies without their headers is an incomplete record,
         # pinned like missing bodies (CANNOT_TEST), never "the headers held no key".
@@ -644,13 +635,6 @@ class RelayScenarioTests(unittest.TestCase):
             executor._run_setup(definition, pathlib.Path("."))
         self.assertEqual([False], [d.records_requests for d in seen])
 
-    def test_s54_without_output_is_three_findings(self) -> None:
-        # MAGI FIX (MS3 §6 loop13, R7a Melchior): the leak check read `run.output.*` on a result
-        # that left no capture; S54 yields its three findings, as its five siblings do.
-        r = _with(_result("R19", 0, {}), output=None)
-        outcomes = _outcomes("S54", r)
-        self.assertEqual(3, len(outcomes))
-
     def test_s57_serves_validated_history(self) -> None:
         found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3,
                                                "title": "off by one"}]}}
@@ -671,8 +655,6 @@ class RelayScenarioTests(unittest.TestCase):
                                     ((first, first), pending, [P, F]), ((first, first), other, [P, F])):
             r = _with(_result("R21", 0, {}), request_bodies=bodies, setup_outputs=setup)
             self.assertEqual(want, _judged("S57", r, rc.S57_ASSERTIONS), bodies)
-        r = _with(_result("R21", 0, {}), request_bodies=served, setup_outputs=(first, first), output=None)
-        self.assertEqual([C, C], _judged("S57", r, rc.S57_ASSERTIONS))
 
     def test_s57_a_malformed_findings_value_is_cannot_test_not_a_crash(self) -> None:
         # MAGI FIX (MS3 §6 loop14, R7a2 Caspar): `findings or ()` iterated a non-list value.
@@ -745,6 +727,27 @@ class LoopSeventeenClockTests(unittest.TestCase):
             self.assertEqual(runs.measured_allowance(definition), granted[-1], run_id)
         # The measured review's allowance is one review like R20's, so the declared 3 x R20 holds.
         self.assertEqual(runs.DEFINITIONS["R20"].timeout_s, runs.measured_allowance(runs.DEFINITIONS["R21"]))
+
+
+class LoopSeventeenResultTests(unittest.TestCase):
+    """MAGI FIX (MS3 §6 loop17, R7a1 Melchior): ``RunResult.output`` is never ``None``.
+
+    These replace loop12's ``test_a_result_without_output_is_a_missing_capture_not_a_crash``,
+    loop13's ``test_s54_without_output_is_three_findings`` and the ``output=None`` cases of
+    ``test_s57_serves_validated_history`` and S58's missing-capture test: every executor path
+    builds a capture (an empty one for a hang or an unrunnable run), so those exercised a state
+    production never reaches, while three sibling scenarios read ``run.output`` unguarded.
+    """
+
+    def test_a_result_cannot_be_built_without_its_capture(self) -> None:
+        with self.assertRaises(HarnessError):
+            _with(_result("R18", 0, {}), output=None)
+
+    def test_no_scenario_guards_a_capture_that_cannot_be_missing(self) -> None:
+        for path in sorted(pathlib.Path(rc.__file__).parent.glob("*.py")):
+            source = path.read_text(encoding="utf-8").replace("\r", "")
+            with self.subTest(path=path.name):
+                self.assertFalse("run.output is None" in source, "%s guards run.output" % path.name)
 
 
 class LoopSeventeenRelayTests(unittest.TestCase):

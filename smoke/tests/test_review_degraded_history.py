@@ -87,7 +87,16 @@ class DegradedHistoryScenarioTests(unittest.TestCase):
 
     def test_a_missing_capture_or_setup_is_cannot_test(self) -> None:
         self.assertEqual([C, C, C], _judged(_with(_run(_degraded()), setup_outputs=())))
-        self.assertEqual([C, C, C], _judged(_with(_run(_degraded()), output=None)))
+
+    def test_no_seeded_finding_leaves_the_history_declaration_cannot_test(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1 Caspar): with no located finding in the first review
+        # there is no history to be unretrievable; that is the trio's answer, not a product FAIL.
+        for findings in ([], [{"file": "other.rs", "line": 3, "title": "x"}],
+                         [{"file": runs.REVIEW_HISTORY_FILE, "line": 99, "title": "x"}]):
+            with self.subTest(findings=findings):
+                setup = tuple(_out(0, {"code_review": {"findings": findings}}) for _ in range(2))
+                for measured in (_degraded(), _degraded(trimmed=[])):
+                    self.assertEqual([P, C, P], _judged(_with(_run(measured), setup_outputs=setup)))
 
     def test_a_stdout_that_is_not_json_fails_the_declarations(self) -> None:
         bad = _with(_run(_degraded()), output=_out(0, None))
