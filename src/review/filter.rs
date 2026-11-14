@@ -1120,6 +1120,25 @@ mod tests {
         assert!(fallback_diff(clean, Some(b"fn f() {}\n"), None).is_some());
     }
     #[test]
+    fn the_content_verdict_omits_every_text_the_one_egress_predicate_withholds() {
+        // [MAGI S6 MS3 loop17, R6a2 Melchior/R6a1] the filter's verdict asked `find_secret` (and
+        // `holds_key_block`), not the module's egress predicate: a hidden-character split token
+        // was held raw by the cache and judged clean here.
+        for text in crate::review::secrets::withheld_corpus() {
+            assert!(crate::review::secrets::leaks_secret(&text), "{text:?}");
+            for sides in [[Some(text.as_bytes()), None], [None, Some(text.as_bytes())]] {
+                assert!(
+                    matches!(
+                        content_verdict("a.rs", sides),
+                        Some(Verdict::Skip(SkipCause::Secret))
+                    ),
+                    "{text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn joined_key_header_is_omitted() {
         // [MAGI S6 MS3 loop13, R6a Caspar, critical] `holds_key_block` (the hold decision)
         // saw a header joined across two literals that `find_secret` (the omission decision)

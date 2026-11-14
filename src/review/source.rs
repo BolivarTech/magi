@@ -1166,6 +1166,20 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_holds_raw_every_text_the_one_egress_predicate_withholds() {
+        // [MAGI S6 MS3 loop17, R6a2/R6a1] `held_side`, the filter, the doc egress and the diff
+        // re-scan once asked four different questions; the corpus is shared with them all.
+        for text in crate::review::secrets::withheld_corpus() {
+            let held = held_side(Some(text.clone().into_bytes()), MAX_MASKED_SIDE_BYTES);
+            assert!(held.raw_secret, "{text:?}");
+            assert!(
+                held.mask.is_none(),
+                "a withheld side is never served masked: {text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_binary_side_holding_a_secret_split_by_a_nul_is_held_as_raw_secret() {
         // [MAGI S6 MS3 loop6, R6a Caspar] A NUL inside a token (`ghp_\0AAAA…`) ends the token's
         // tail, so no pattern matches the side and it was not held as raw secret: once released

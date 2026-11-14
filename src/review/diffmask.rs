@@ -455,6 +455,40 @@ mod tests {
     }
 
     #[test]
+    fn the_fallback_rescan_reads_through_every_diff_marker() {
+        // [MAGI S6 MS3 loop17, R6a1 Caspar] the re-scan read the raw text, where only a space
+        // marker is whitespace: a name and its value on `+` (or `-`) lines were not a pair.
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let side = format!("aws_secret_key =\nfn f() {{}}\n\"{value}\"\n");
+        assert_eq!(find_secret(&side), None, "premise: each side is clean");
+        for marker in [' ', '+', '-'] {
+            let diff = format!("@@ -1,2 +1,2 @@\n{marker}aws_secret_key =\n{marker}\"{value}\"\n");
+            assert_eq!(
+                fallback_diff(&diff, Some(side.as_bytes()), Some(side.as_bytes())),
+                None,
+                "marker {marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_fallback_rescan_uses_the_egress_predicate() {
+        // [MAGI S6 MS3 loop17, R6a1 Melchior/Balthasar] a token a hidden character splits, shown
+        // verbatim by a clean side, passed `find_secret`.
+        let token = format!("ghp_AAAA\u{200b}{}", "A".repeat(40)); // allow-secret-scan
+        let side = format!("{token}\n");
+        let diff = format!(" {token}\n");
+        assert_eq!(
+            fallback_diff(
+                &format!("@@ -1,1 +1,1 @@\n{diff}"),
+                Some(side.as_bytes()),
+                Some(side.as_bytes())
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn crlf_side_lines_match_a_crlf_diff_without_a_divergence() {
         // [MAGI S6 MS3 loop15, R6a1] a side line keeps its `\r` as git shows it, so a CRLF file's
         // diff lines (which carry the same `\r`) match their side lines: no divergence is

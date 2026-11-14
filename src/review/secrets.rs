@@ -1451,6 +1451,30 @@ pub fn leaks_secret(text: &str) -> bool {
     find_secret(text).is_some() || hides_secret_behind_hidden_chars(text)
 }
 
+/// Texts that hold a secret no single pattern pass finds on its own (a key header spelled across
+/// literals, a token a hidden character or a tab split, a lower-case armor): every egress
+/// predicate of a review must withhold each of them. The shared corpus of the tests that pin
+/// that no predicate is weaker than another (`no_egress_predicate_is_weaker_than_leaks_secret`
+/// here, in `source` and in `filter`).
+#[cfg(test)]
+pub(crate) fn withheld_corpus() -> Vec<String> {
+    let (b, k, d) = (PEM_BEGIN, PEM_PRIVATE_KEY, ARMOR_DASHES);
+    let token = |gap: &str| format!("see ghp_AAAA{gap}{}\n", "A".repeat(40)); // allow-secret-scan
+    vec![
+        format!("let h = \"{b}\" \"RSA {k}\";\nMIIBOgIBAAJBAK\n"),
+        format!("concat!(\"{b}\", \"RSA PRIVATE\", \" KEY{d}\")\nMIIBOg\n"),
+        format!("{b}RSA PRIVATE KEY-----\nMIIBOg\n").replace("BEGIN RSA", "BEGINRSA"),
+        format!("{SSH2_PLAIN_PRIVATE_KEY}\nAAAAB3NzaC1yc2E\n"),
+        format!("{PGP_PRIVATE_KEY}\nbody\n"),
+        format!("{b}RSA PRIVATE KEY\u{200b}{d}\nMIIBOg\n"),
+        format!("{b}RSA PRIVATE KEY\t{d}\nMIIBOg\n"),
+        format!("{b}RSA {k}\nMIIBOg\n").to_ascii_lowercase(),
+        token("\u{200b}"),
+        token("\t"),
+        token("\u{202e}"),
+    ]
+}
+
 /// The characters that can break, reorder or hide text on a terminal or a log viewer: every
 /// format character (Unicode category Cf, as of Unicode 16; the unassigned code points of the
 /// tag block are included) and the line and paragraph separators (Zl, Zp, U+2028..U+2029).
@@ -2122,6 +2146,59 @@ mod tests {
             let out = outward_text(&raw);
             assert!(!out.contains("AAAAAAAAAA"), "{hidden:?}: {out}");
             assert!(out.contains("redacted"), "{out}");
+        }
+    }
+
+    #[test]
+    fn no_egress_predicate_is_weaker_than_leaks_secret() {
+        // [MAGI S6 MS3 loop17, R6a2/R6a1] `leaks_secret` lacked `holds_key_block`, so a header
+        // only the spaceless reader knows went to the embedder while `held_side` withheld it.
+        for text in withheld_corpus() {
+            assert!(leaks_secret(&text), "{text:?}");
+            // Every term of the one predicate: none may answer false where `leaks_secret` is true.
+            let terms = [
+                find_secret(&text).is_some(),
+                holds_key_block(&text),
+                hides_secret_behind_hidden_chars(&text),
+            ];
+            assert!(terms.iter().any(|t| *t), "{text:?}: no term fires");
+        }
+        assert!(!leaks_secret("fn f() {}\n"));
+    }
+
+    #[test]
+    fn key_block_detection_ignores_case_like_the_binary_path() {
+        // [MAGI S6 MS3 loop17, R6a2 Caspar] `-----begin rsa private key-----` held no block on
+        // the text path while the binary path refused it.
+        let lower = format!("{PEM_BEGIN}RSA {PEM_PRIVATE_KEY}\nMIIBOg\n").to_ascii_lowercase();
+        let mixed = format!("{PEM_BEGIN}Rsa {PEM_PRIVATE_KEY}\nMIIBOg\n")
+            .replace("PRIVATE KEY", "Private Key");
+        for text in [lower, mixed] {
+            assert!(holds_key_block(&text), "{text:?}");
+            assert!(holds_secret_prefix(&text), "binary path agrees: {text:?}");
+        }
+        assert!(!holds_key_block(
+            "-----begin the story-----\nonce upon a time\n"
+        ));
+    }
+
+    #[test]
+    fn outward_text_masks_the_union_of_every_strip_pass() {
+        // [MAGI S6 MS3 loop17, R6a2] one ZWSP-split and one tab-split secret in one text: the
+        // pass that masked the first made the output skip the pass that finds the second.
+        let zwsp = "sk-ant-api03-AAAAAAAAAA\u{200b}AAAAAAAAAA".to_string(); // allow-secret-scan
+        let tab = format!("ghp_AAAA\t{}", "A".repeat(40)); // allow-secret-scan
+        for text in [
+            format!("first {zwsp}\nthen {tab}\nlast\r\n"),
+            format!("then {tab}\nfirst {zwsp}\nlast\r\n"),
+        ] {
+            let out = outward_text(&text);
+            assert!(
+                !out.contains("AAAAAAAAAA") && !out.contains("ghp_AAAA"),
+                "{out}"
+            );
+            assert_eq!(out.matches("redacted").count(), 2, "{out}");
+            assert!(out.contains("last\\r\\n"), "breaks kept: {out}");
         }
     }
 
