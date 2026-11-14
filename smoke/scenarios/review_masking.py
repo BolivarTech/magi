@@ -132,12 +132,12 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodie
     needles = code_review.with_slices(needles, bodies)
     outputs = (("stdout", (run.output.stdout,)), ("stderr", (run.output.stderr,)),
                ("the run log", run.review_log or ()))
-    if relayed:
+    if relayed and run.requests_complete:
         # MAGI FIX (MS3 §6 loop10): the target (its query) is read too, not the body alone.
         outputs += (("a forwarded request", tuple(t.encode("utf-8", "surrogateescape") + b"\n" + b
-                                                  for t, b in run.request_bodies or ())),
+                                                  for t, b in run.request_bodies)),
                     # MAGI FIX (MS3 §6 loop11): the headers leave the process too.
-                    ("a forwarded request's headers", run.request_headers or ()))
+                    ("a forwarded request's headers", runs.relayed_headers(run.request_headers)))
     # MAGI FIX (MS3 §6 loop14, R7a2): the loop variable no longer shadows the `bodies` parameter.
     leaked = [name for name, captured in outputs
               if any(needle in body for needle in needles for body in captured)]
@@ -145,7 +145,7 @@ def _leak_finding(texts, index, run_id, run, needles, what, relayed=False, bodie
         return code_review.finding(texts, index, Outcome.FAIL, run_id,
                                     "%s appears in %s" % (what, ", ".join(leaked)))
     # MAGI FIX (MS3 §6 loop13): the headers are part of the record, pinned like the bodies.
-    if relayed and (run.request_bodies is None or run.request_headers is None):
+    if relayed and not run.requests_complete:
         return code_review.finding(texts, index, Outcome.CANNOT_TEST, run_id,
                                     "the relay's record of the run is missing or incomplete")
     if run.review_log_unreadable:

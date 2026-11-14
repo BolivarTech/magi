@@ -650,8 +650,14 @@ class RunResult:
 
     @property
     def requests_complete(self) -> bool:
-        """bool: Whether the relay's record of the run is whole."""
-        return True
+        """bool: Whether the relay's record of the run is whole (MAGI FIX, MS3 §6 loop17, R7a1).
+
+        The one completeness test: ``None`` (no complete record) and ``()``
+        (complete, nothing sent) are both falsy, so a scenario asks this rather
+        than the truth of :attr:`request_bodies`. The executor sets both fields
+        from one locked snapshot, ``None`` together when the record is incomplete.
+        """
+        return self.request_bodies is not None and self.request_headers is not None
 
 
 #: Where the product writes its logs, relative to a workspace root. The one
@@ -3575,14 +3581,20 @@ def gate_bodies(request_bodies) -> tuple:
 
 
 def relayed_headers(request_headers) -> tuple:
-    """The header lines of the relay's record.
+    """The header lines of the relay's record (MAGI FIX, MS3 §6 loop17, R7a1), as :func:`trio_bodies` reads bodies.
 
     Args:
         request_headers: A ``RunResult``'s ``request_headers``.
 
     Returns:
         tuple: *request_headers*.
+
+    Raises:
+        HarnessError: When it is ``None`` (no complete record), which is never "no header".
     """
+    if request_headers is None:
+        raise HarnessError("the relay's header record is missing or incomplete; a scenario must "
+                           "check RunResult.requests_complete before reading it")
     return request_headers
 
 
@@ -3648,17 +3660,25 @@ _STAGING_DRY_RUN_URL = "http://127.0.0.1:1/v1"
 
 
 def _staging_problems(original_text: str, config, url: str) -> list:
-    """What would let *config* reach past a relay at *url*.
+    """Point *config* at a relay at *url* and say what could still reach past it.
+
+    MAGI FIX (MS3 §6 loop17, R7a1 Balthasar): the one list of staging checks, run by the dry run
+    (:func:`relay_staging_problems`) and by the live staging (:meth:`RunExecutor._recorded_requests`),
+    so a check added to one is made by both.
 
     Args:
         original_text: The configuration before the rewrite.
-        config: The configuration file to rewrite.
+        config: The configuration file, rewritten in place.
         url: The relay's URL.
 
     Returns:
-        list: One text per problem.
+        list: One text per problem; empty when every endpoint reaches the relay.
+
+    Raises:
+        HarnessError: When the file cannot be rewritten or read back.
     """
-    return []
+    point_config_at(config, url)
+    return list(endpoints_off_the_counter(config, url) + changes_besides_endpoints(original_text, config))
 
 
 def relay_staging_problems(config_path) -> list:
@@ -3681,9 +3701,7 @@ def relay_staging_problems(config_path) -> list:
         with tempfile.TemporaryDirectory() as scratch:
             copy = pathlib.Path(scratch) / "magi.toml"
             copy.write_bytes(original)
-            point_config_at(copy, _STAGING_DRY_RUN_URL)
-            return list(endpoints_off_the_counter(copy, _STAGING_DRY_RUN_URL)
-                        + changes_besides_endpoints(original_text, copy))
+            return _staging_problems(original_text, copy, _STAGING_DRY_RUN_URL)
     except (OSError, UnicodeError, HarnessError) as exc:
         return ["could not stage %s: %s" % (config_path, exc)]
 
@@ -4416,9 +4434,7 @@ class RunExecutor:
             return
         with recording_relay(upstream) as (url, bodies):
             try:
-                point_config_at(config, url)
-                off = (endpoints_off_the_counter(config, url)
-                       + changes_besides_endpoints(original_text, config))
+                off = _staging_problems(original_text, config, url)
                 if off:
                     raise HarnessError("run %s records its requests, but its configuration "
                                        "could still reach past the relay: %s"

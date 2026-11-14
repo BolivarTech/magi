@@ -562,6 +562,6 @@ def _dirty_doc_sent(run) -> list:
     needle = runs.REVIEW_DIRTY_DOC
     places = [target for target, body in run.request_bodies
               if needle in body or needle.decode("utf-8", "replace") in target]
-    if any(needle in header for header in run.request_headers or ()):
+    if any(needle in header for header in runs.relayed_headers(run.request_headers)):
         places.append("a header")
     return places
