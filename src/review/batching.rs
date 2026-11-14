@@ -1099,12 +1099,74 @@ mod tests {
         // gains a whole prefix, so a file of short lines reallocated as it grew. The hint now
         // counts the prefixes: the buffer ends exactly full, never regrown (for numbers within
         // `LINE_NUMBER_WIDTH` digits: `wide_number_widens_prefix`).
+        // [MAGI S6 MS3 loop17, R6b1 Caspar/Balthasar] The claim is about the hint, not the
+        // allocator: `with_capacity(hint)` never reallocates while the output fits the hint, so
+        // the test compares the hint with the output (the buffer's own capacity is the
+        // allocator's business and may round up).
         let short = "a\n".repeat(1_000);
         let numbered = number_lines(&short, 1);
-        assert_eq!(numbered.capacity(), numbered.len());
+        assert_eq!(
+            numbered_capacity(&short),
+            numbered.len(),
+            "exact for short lines"
+        );
         let hunk = format!("@@ -1,1000 +1,1000 @@\n{}", " a\n".repeat(1_000));
         let shown = number_hunk(&hunk, (1, 1));
-        assert_eq!(shown.capacity(), shown.len());
+        assert_eq!(
+            numbered_capacity(&hunk),
+            shown.len(),
+            "the header's blank prefix too"
+        );
+        assert!(numbered.capacity() >= numbered.len() && shown.capacity() >= shown.len());
+    }
+
+    #[test]
+    fn a_line_the_headerless_shape_accepts_is_one_the_walker_reads_as_a_body_line() {
+        // [MAGI S6 MS3 loop17, R6b1 Melchior] `headerless_shape` took a `\r`-led line as a body
+        // line, while `step_body_line` reads it as `Other` (no number, no counter): the shape
+        // check and the walker disagreed on what a body line is.
+        for line in [
+            "",
+            " a",
+            "+a",
+            "-a",
+            "\\ No newline at end of file",
+            "\ra",
+            "x",
+            "@@",
+        ] {
+            let shape = headerless_shape(line, false);
+            let read = step_body_line(&mut (1, 1), line);
+            let body = read != BodyLine::Other || line.starts_with('\\');
+            assert_eq!(shape, body, "{line:?}: shape {shape}, walker {read:?}");
+        }
+    }
+
+    #[test]
+    fn the_companion_is_called_twice_for_a_whole_file_item_and_once_for_a_hunk() {
+        // [MAGI S6 MS3 loop17, R6b1 Melchior/Balthasar] The purity contract of
+        // `plan_batches_with` (a whole-file item's companion is asked twice) lived in prose only;
+        // a change in the count must change that contract, so it is pinned here.
+        let src = MapSource::new(&[("a.rs", "fn a() {}\n")], &[]);
+        let reg = LanguageRegistry::new();
+        let calls = std::cell::Cell::new(0usize);
+        let counting = |_: &BatchItem| {
+            calls.set(calls.get() + 1);
+            Ok(Vec::new())
+        };
+        let whole = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: None,
+        }];
+        plan_batches_with(&whole, &src, &reg, 10_000, &counting).expect("plans");
+        assert_eq!(calls.get(), 2, "sized alone, then packed");
+        calls.set(0);
+        let hunk = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some("@@ -1,1 +1,1 @@\n-fn a() {}\n+fn b() {}\n".into()),
+        }];
+        plan_batches_with(&hunk, &src, &reg, 10_000, &counting).expect("plans");
+        assert_eq!(calls.get(), 1, "packed only");
     }
 
     #[test]
