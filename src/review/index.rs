@@ -16,9 +16,8 @@ use super::languages::{
 /// its place list, about 70 bytes plus the name. At the cap, with 16-byte names, about 170 MB
 /// of heap (computed from that layout, not measured), plus at most 64 MB of places
 /// ([`MAX_INDEX_OCCURRENCES`]), on top of the content cache. The definitions map is not under
-/// this cap: one entry per named top-level unit (the name, a copy of its path and two lines,
-/// about 60 bytes plus both strings), so it grows with the reviewed units and is bounded by the
-/// reviewed bytes the content cache admits (`MAX_REVIEW_TOTAL_BYTES`), not by a count of its own.
+/// this cap but under its own, [`MAX_INDEX_DEFINITIONS`]: one entry per named unit (the name, a
+/// copy of its path and two lines, about 60 bytes plus both strings).
 // MAGI FIX (MS3 §6 loop5): each occurring name was stored twice (set and place-map key), and the
 // estimate left the second copy, the list headers and the map slots out.
 pub const MAX_INDEX_IDENTIFIERS: usize = 2_000_000;
@@ -29,6 +28,12 @@ pub const MAX_INDEX_IDENTIFIERS: usize = 2_000_000;
 /// every line of a generated file adds one place per line. Past it some callers are missing,
 /// declared ([`LexicalIndex::callers_complete`]).
 pub const MAX_INDEX_OCCURRENCES: usize = 8_000_000;
+
+/// Definition places (`(file, first_line, last_line)`) the index records before it stops
+/// recording more: about 60 bytes plus both strings each, so about 60 MB of places at the cap
+/// (an estimate, a starting point). Past it some definitions are missing, declared
+/// ([`LexicalIndex::definitions_complete`]).
+pub const MAX_INDEX_DEFINITIONS: usize = 500_000;
 
 /// Extensions that name a file even when nothing reviewed has them: a citation such as `conf.toml`
 /// is a file name, not the symbol `toml`. A citation whose extension is in none of this list, the
@@ -122,6 +127,12 @@ pub struct LexicalIndex {
     places_cap: usize,
     /// False once a place was dropped at `places_cap`.
     callers_complete: bool,
+    /// Definition places recorded so far, against `definitions_cap`.
+    definition_places: usize,
+    /// [`MAX_INDEX_DEFINITIONS`], or a smaller cap in tests.
+    definitions_cap: usize,
+    /// False once a definition was dropped at `definitions_cap`.
+    definitions_complete: bool,
 }
 
 impl LexicalIndex {
@@ -140,6 +151,7 @@ impl LexicalIndex {
             registry,
             MAX_INDEX_IDENTIFIERS,
             MAX_INDEX_OCCURRENCES,
+            MAX_INDEX_DEFINITIONS,
         )
     }
 
@@ -160,6 +172,7 @@ impl LexicalIndex {
             registry,
             MAX_INDEX_IDENTIFIERS,
             MAX_INDEX_OCCURRENCES,
+            MAX_INDEX_DEFINITIONS,
         )
     }
 
@@ -169,7 +182,30 @@ impl LexicalIndex {
         registry: &LanguageRegistry,
         cap: usize,
     ) -> Self {
-        Self::build_with_limit(files, &[], registry, cap, MAX_INDEX_OCCURRENCES)
+        Self::build_with_limit(
+            files,
+            &[],
+            registry,
+            cap,
+            MAX_INDEX_OCCURRENCES,
+            MAX_INDEX_DEFINITIONS,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_with_definition_cap(
+        files: &[(String, String)],
+        registry: &LanguageRegistry,
+        cap: usize,
+    ) -> Self {
+        Self::build_with_limit(
+            files,
+            &[],
+            registry,
+            MAX_INDEX_IDENTIFIERS,
+            MAX_INDEX_OCCURRENCES,
+            cap,
+        )
     }
 
     fn build_with_limit(
@@ -178,6 +214,7 @@ impl LexicalIndex {
         registry: &LanguageRegistry,
         cap: usize,
         places_cap: usize,
+        definitions_cap: usize,
     ) -> Self {
         let mut index = Self {
             identifiers: HashMap::new(),
@@ -195,6 +232,9 @@ impl LexicalIndex {
             places: 0,
             places_cap,
             callers_complete: true,
+            definition_places: 0,
+            definitions_cap,
+            definitions_complete: true,
         };
         for (path, _) in files {
             if let Some(ext) = extension_of(path) {
@@ -308,6 +348,12 @@ impl LexicalIndex {
             if !seen.insert((unit.name.clone(), unit.start_line, unit.end_line)) {
                 continue;
             }
+            // MAGI FIX (S6 loop 17, R6b1): the map had no count of its own, unlike its siblings.
+            if self.definition_places >= self.definitions_cap {
+                self.definitions_complete = false;
+                return;
+            }
+            self.definition_places += 1;
             let place = (file.to_string(), unit.start_line, unit.end_line);
             self.definitions.entry(unit.name).or_default().push(place);
         }
@@ -432,7 +478,20 @@ impl LexicalIndex {
         registry: &LanguageRegistry,
         cap: usize,
     ) -> Self {
-        Self::build_with_limit(files, &[], registry, MAX_INDEX_IDENTIFIERS, cap)
+        Self::build_with_limit(
+            files,
+            &[],
+            registry,
+            MAX_INDEX_IDENTIFIERS,
+            cap,
+            MAX_INDEX_DEFINITIONS,
+        )
+    }
+
+    /// False when `build` stopped recording definitions at [`MAX_INDEX_DEFINITIONS`]: some
+    /// definitions may be missing from the context.
+    pub fn definitions_complete(&self) -> bool {
+        self.definitions_complete
     }
 }
 
@@ -816,6 +875,25 @@ mod tests {
     }
 
     #[test]
+    fn definitions_stop_at_their_cap_and_the_index_says_some_may_be_missing() {
+        // [MAGI S6 MS3 loop17, R6b1] The definitions map was the one structure with no count of
+        // its own: generated code with a million small functions grew it without bound.
+        let text = "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n".to_string();
+        let files = [("a.rs".to_string(), text)];
+        let reg = LanguageRegistry::new();
+        let whole = LexicalIndex::build(&files, &reg);
+        assert!(whole.definitions_complete());
+        assert_eq!(whole.definitions("d").len(), 1);
+        let capped = LexicalIndex::build_with_definition_cap(&files, &reg, 2);
+        assert!(!capped.definitions_complete());
+        let kept: usize = ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| capped.definitions(n).len())
+            .sum();
+        assert_eq!(kept, 2, "no more places than the cap");
+    }
+
+    #[test]
     fn the_identifier_cap_also_says_callers_may_be_missing() {
         // [MAGI S6 MS3 loop5, R2 Melchior] The identifier cap stopped the scan, so no occurrence
         // of any later file was recorded, but only the places cap cleared `callers_complete`:
@@ -838,8 +916,14 @@ mod tests {
         let files = [("a.rs".to_string(), "alpha beta\n".to_string())];
         let old = [("a.rs".to_string(), "gamma delta epsilon\n".to_string())];
         let registry = LanguageRegistry::new();
-        let capped =
-            LexicalIndex::build_with_limit(&files, &old, &registry, 3, MAX_INDEX_OCCURRENCES);
+        let capped = LexicalIndex::build_with_limit(
+            &files,
+            &old,
+            &registry,
+            3,
+            MAX_INDEX_OCCURRENCES,
+            MAX_INDEX_DEFINITIONS,
+        );
         assert!(
             !capped.is_complete(),
             "precondition: the old side hit the cap"

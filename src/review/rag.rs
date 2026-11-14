@@ -385,6 +385,16 @@ pub fn declare_lexical(a: &mut Assembled, index: &LexicalIndex) {
             ),
         ));
     }
+    if !index.definitions_complete() {
+        a.trimmed.push((
+            ContextKind::Definition,
+            format!(
+                "definition index cut at MAX_INDEX_DEFINITIONS ({}): some definitions may be \
+                 missing",
+                crate::review::index::MAX_INDEX_DEFINITIONS
+            ),
+        ));
+    }
     // MAGI FIX (MS3 §6 loop13): the identifier cap leaves the definitions incomplete as well.
     if !index.is_complete() {
         a.trimmed.push((
