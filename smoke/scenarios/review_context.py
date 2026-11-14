@@ -1,7 +1,7 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
 # Date: 2026-11-08
-"""S52, S55 -- ``code-review`` retrieves its documentation and history, or says it could not.
+"""S52, S55-S58 -- ``code-review`` retrieves its documentation and history, or says it could not.
 
 * **S52** (R17, the real trio): the review workspace's ``[embedding]`` points at
   an endpoint that answers an HTTP error at once
@@ -42,6 +42,11 @@ declare ``inspects_timeouts``, so the runner reports it as ``CANNOT_TEST``.
   title and ``(attended)``. Only that third review is relayed: the claim is
   about what it sends. With no located finding in the first review (the trio's
   answer) the second assertion is ``CANNOT_TEST``.
+
+* **S58** (R22, RV07, RV-S8): R21's seeding against the live embedder, then the
+  measured review with ``[embedding]`` on a served error: it still delivers its
+  findings and declares, for the history layer, that the embedder did not
+  answer. Not relayed: the declaration is read, not the absence of egress.
 
 MAGI FIX (MS3 §6 loop9): every review here was of a working tree and read its
 own flags; R18, R20 and R21 send every request through the recording relay, so
@@ -332,8 +337,8 @@ _TOKEN_CODE = "pub fn token"
 S56_ASSERTIONS = (
     "exit 0",
     "the embedder was sent the reviewed commit's doc comment as a chunk, and the trio its code",
-    "no request the relay forwarded carries the working tree's doc comment, and no embedding "
-    "request carries the parent commit's",
+    "no request the relay forwarded carries the working tree's doc comment, and no embedded "
+    "chunk is the parent commit's doc comment alone",
 )
 
 #: S57 (R21, RV08): history validated across revisions reaches the trio.
@@ -378,6 +383,11 @@ def documentation_comes_from_the_reviewed_commit(run):
     # model as an embedded chunk. The parent's doc comment may appear in a trio prompt as the
     # REMOVED lines of the very diff under review (R20's fixture: parent commit, then HEAD), so
     # it is looked for in embedding requests only; the dirty working-tree copy is in no diff.
+    if run.request_headers is None:
+        # MAGI FIX (MS3 §6 loop16, R7a2): a missing header record is no header free of the doc.
+        yield Finding(assertion=texts[2], outcome=Outcome.CANNOT_TEST, run_id="R20",
+                      detail="the relay's header record is missing")
+        return
     dirty = _dirty_doc_sent(run)
     # MAGI FIX (MS3 §6 loop14, R7a2): the retrieval query is an embedding request too, built from
     # the batch's raw hunk, so it carries the parent's removed doc line beside the code. Only a
