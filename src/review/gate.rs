@@ -322,6 +322,29 @@ fn holds_armor_end(text: &str) -> bool {
     })
 }
 
+/// The label of the armor `word` (`"BEGIN "` or `"END "`) in `text`: what follows the word up to
+/// the closing dashes, trimmed, when a dash run ([`SSH2_DASHES`] or longer, with SSH2's space
+/// allowed) comes right before it. `-----BEGIN RSA PRIVATE KEY-----` gives `RSA PRIVATE KEY`;
+/// `None` when the line has no such armor. O(length of `text`).
+fn armor_label<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let at = text.find(word)?;
+    let before = text.get(..at)?.trim_end_matches(' ');
+    if !before.ends_with(SSH2_DASHES) {
+        return None;
+    }
+    let label = text.get(at + word.len()..)?.split('-').next()?.trim();
+    (!label.is_empty()).then_some(label)
+}
+
+/// Whether `text` closes a block opened with the armor label `opened` (`None` for an opener
+/// whose label could not be read): an armor `END` line ([`holds_armor_end`]) whose own label is
+/// that one. A footer of another label (a certificate's inside a key's armor) leaves the block
+/// open: the safe direction. O(length of `text`).
+// MAGI FIX (MS3 §6 loop17, R6b2 Melchior): any END line closed the block, whatever its label.
+fn closes_block(text: &str, opened: Option<&str>) -> bool {
+    holds_armor_end(text) && opened.is_none_or(|label| armor_label(text, "END ") == Some(label))
+}
+
 /// Whether the window [`numbered_window`] cuts around `line` overlaps a private-key block of
 /// `code` (RV10's state is the finding plus ±[`GATE_CONTEXT_LINES`]; RV22's exception keeps a
 /// block out of it).
@@ -401,18 +424,18 @@ fn window_meets_block(blocks: &[(u32, u32)], line: u32) -> bool {
 /// (`u32::MAX`). O(bytes of `code`) times the cost of `opens`.
 fn tracked_blocks(code: &str, opens: &dyn Fn(&str) -> bool) -> Vec<(u32, u32)> {
     let mut blocks = Vec::new();
-    let mut opened: Option<u32> = None;
+    let mut opened: Option<(u32, Option<&str>)> = None;
     for (n, text) in (1u32..).zip(code.lines()) {
         match opened {
-            None if opens(text) => opened = Some(n),
-            Some(start) if holds_armor_end(text) => {
+            None if opens(text) => opened = Some((n, armor_label(text, "BEGIN "))),
+            Some((start, label)) if closes_block(text, label) => {
                 blocks.push((start, n));
                 opened = None;
             }
             _ => {}
         }
     }
-    if let Some(start) = opened {
+    if let Some((start, _)) = opened {
         blocks.push((start, u32::MAX));
     }
     blocks
@@ -423,14 +446,14 @@ fn tracked_blocks(code: &str, opens: &dyn Fn(&str) -> bool) -> Vec<(u32, u32)> {
 /// window. Independent of the finding, so computed once per file. O(bytes of `code`).
 // MAGI FIX (MS3 §6 loop7): that fallback was off once any block was tracked by its lines.
 fn untracked_block(code: &str, opens: &dyn Fn(&str) -> bool) -> bool {
-    let mut opened = false;
+    let mut opened: Option<Option<&str>> = None;
     let mut outside = String::new();
     for text in code.lines() {
-        if !opened && opens(text) {
-            opened = true;
-        } else if opened && holds_armor_end(text) {
-            opened = false;
-        } else if !opened {
+        if opened.is_none() && opens(text) {
+            opened = Some(armor_label(text, "BEGIN "));
+        } else if opened.is_some_and(|label| closes_block(text, label)) {
+            opened = None;
+        } else if opened.is_none() {
             outside.push_str(text);
             outside.push('\n');
         }
