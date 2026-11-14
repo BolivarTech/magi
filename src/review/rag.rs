@@ -1446,6 +1446,36 @@ mod tests {
     }
 
     #[test]
+    fn a_context_file_that_reads_back_gone_is_declared_like_an_unreadable_one() {
+        // [MAGI S6 MS3 loop17, R2 Caspar] A definition or caller file the index knows but the
+        // source answers `Ok(None)` for (gone since the index was built) was dropped silently.
+        struct Gone;
+        impl ContentSource for Gone {
+            fn read(&self, _p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+            fn read_old(&self, _p: &str) -> Result<Option<Vec<u8>>, ReviewError> {
+                Ok(None)
+            }
+        }
+        let files = vec![
+            ("a.rs".to_string(), "fn parse() {}\n".to_string()),
+            (
+                "b.rs".to_string(),
+                "fn use_it() {\n    parse();\n}\n".to_string(),
+            ),
+        ];
+        let index = LexicalIndex::build(&files, &LanguageRegistry::new());
+        let mut unread = Vec::new();
+        let (defs, _) = definitions_for("parse();", &index, &Gone, &mut unread);
+        assert!(defs.is_empty());
+        let reg = LanguageRegistry::new();
+        let (callers, _) = callers_for(&["parse"], &index, &Gone, &reg, &mut unread);
+        assert!(callers.is_empty());
+        assert_eq!(unread, vec!["a.rs".to_string(), "b.rs".to_string()]);
+    }
+
+    #[test]
     fn a_non_utf8_side_names_its_file_as_display_path_shows_it() {
         // [MAGI S6 MS3 loop17, R2 Caspar] `read_text` put the raw path into `NotReviewable`, the
         // one error path of this module that bypassed `display_path`.
