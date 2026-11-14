@@ -63,6 +63,13 @@ const COMBINED_HUNK_MARKER: &str = "@@@";
 /// digits (a file past 999 999 lines, which the 8 MiB per-file cap allows) widens its own prefix:
 /// the columns no longer line up, but the `|` still ends the number and the diff marker still
 /// follows it, which is all [`LINE_NUMBER_LEGEND`] tells the trio to read.
+///
+/// Cost (declared, MAGI S6 MS3 loop17, R6b1): the prefix is `LINE_NUMBER_WIDTH + 1` = 7 bytes
+/// per line, charged like any text (`rendered_tokens`, 4 bytes a token), so about 1.75 tokens a
+/// line. On code whose lines average 35 to 45 bytes that is roughly 15 to 20 % of every batch's
+/// code budget, so a review needs about a sixth more batches than an unnumbered one would. The
+/// price buys line numbers the trio reads instead of counting (the T3.7 defect); the effect on
+/// the batch count is recorded under PM-S-15.
 const LINE_NUMBER_WIDTH: usize = 6;
 
 /// The character that closes the line-number prefix.
@@ -358,8 +365,6 @@ fn push_line_prefix(out: &mut String, number: Option<u32>) {
     use std::fmt::Write;
     // Writing to a `String` cannot fail; the prefix goes straight into the output buffer, with no
     // per-line temporary.
-    // MAGI FIX (MS3 §6 loop14): format strings capture any identifier in scope, consts included
-    // (`{x:>W$}` and `{SEP}`), since the 2021 edition's implicit captures; this compiles as is.
     let _ = match number {
         Some(n) => write!(out, "{n:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}"),
         None => write!(out, "{:>LINE_NUMBER_WIDTH$}{LINE_NUMBER_SEPARATOR}", ""),
