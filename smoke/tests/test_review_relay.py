@@ -816,6 +816,16 @@ class LoopSeventeenRelayTests(unittest.TestCase):
         self.assertEqual(2, len(calls), calls)
         self.assertTrue(calls[1].startswith("http://127.0.0.1:"), calls)
 
+    def test_s53_needs_an_embedding_request_through_the_relay(self) -> None:
+        # R7a1: the leak check over relayed requests says nothing of an embedder that bypassed
+        # the relay; R18's file carries a doc comment, so its review embeds through it.
+        doc = {"code_review": {"masked": rm.S53_EXPECTED_MASKED, "masked_unlisted": 0,
+                               "skipped": [], "skipped_unlisted": 0}}
+        healthy = _result("R18", 0, doc)
+        self.assertEqual([P], _judged("S53", healthy, rm.S53_ASSERTIONS[3:]))
+        trio_only = _with(healthy, request_bodies=R18_HEALTHY_REQUESTS[-1:], request_headers=(b"h: 1\n",))
+        self.assertEqual([F], _judged("S53", trio_only, rm.S53_ASSERTIONS[3:]))
+
     def test_completeness_is_its_own_question(self) -> None:
         # R7a1 Melchior: `None` (lost) and `()` (nothing sent) are both falsy.
         base = _result("R18", 0, {})
