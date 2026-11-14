@@ -2094,6 +2094,41 @@ mod tests {
     }
 
     #[test]
+    fn identifiers_in_comment_lines_never_displace_a_callee_from_the_code() {
+        // [MAGI S6 MS3 loop17, R2 Melchior] The total was spent in order of first appearance over
+        // the raw text, comments included: names in a doc block above a function took every slot
+        // and its real callee was left out, with room to spare.
+        use crate::review::test_support::MapSource;
+        let many: Vec<(String, String)> = (0..MAX_DEFINITIONS_TOTAL + 6)
+            .map(|i| (format!("g{i:02}.rs"), format!("fn name{i}() {{}}\n")))
+            .chain([("z.rs".to_string(), "fn callee() {}\n".to_string())])
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            many.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+        let index = LexicalIndex::build(&many, &LanguageRegistry::new());
+        let src = MapSource::new(&borrowed, &[]);
+        // A hunk: every line carries its diff prefix, as the batch text does.
+        let text: String = (0..MAX_DEFINITIONS_TOTAL + 6)
+            .map(|i| format!("+/// See name{i} and its cousins.\n"))
+            .chain([
+                " # note name0\n".to_string(),
+                "+    callee();\n".to_string(),
+            ])
+            .collect();
+        let (defs, cuts) = definitions_for(&text, &index, &src, &mut Vec::new());
+        assert_eq!(
+            defs.first().map(|d| d.label.as_str()),
+            Some("callee"),
+            "a name of the code comes before every name of a comment"
+        );
+        assert_eq!(defs.len(), MAX_DEFINITIONS_TOTAL);
+        assert!(
+            cuts.total,
+            "the comment names past the total are still declared cut"
+        );
+    }
+
+    #[test]
     fn a_spent_total_with_no_later_definition_declares_no_cut() {
         // [MAGI S6 MS3 loop17, R2] The scan stops at the first later name that would have
         // served; names without a definition (keywords, outside symbols) cut nothing.
