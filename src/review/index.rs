@@ -44,8 +44,9 @@ const KNOWN_FILE_EXTENSIONS: [&str; 14] = [
 const FIELD_ACCESS_RECEIVERS: [&str; 5] = ["self", "Self", "this", "super", "cls"];
 
 /// Levels of nested blocks `record_definitions` splits: the depth the containing-unit lookup
-/// splits (`MAX_BLOCK_SPLIT_DEPTH` in `rag`), so both find the same methods.
-const MAX_DEFINITION_DEPTH: usize = 8;
+/// splits (`MAX_BLOCK_SPLIT_DEPTH` in `rag`, defined as this constant, so the two cannot drift
+/// apart and find different methods).
+pub(crate) const MAX_DEFINITION_DEPTH: usize = 8;
 
 /// Separator of a qualified citation (`Baz::qux`).
 pub(crate) const PATH_SEPARATOR: &str = "::";

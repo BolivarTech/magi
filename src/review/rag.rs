@@ -140,7 +140,9 @@ pub const DOC_QUERY_MAX_BYTES: usize = 8_192;
 /// Deepest a block is cut to find the narrowest unit around a line (a method of an impl in a
 /// module in a module is three levels); each level must be strictly smaller, so the bound only
 /// stops a pathological nesting.
-const MAX_BLOCK_SPLIT_DEPTH: usize = 8;
+///
+/// One owned constant with the definition index's depth (S6 loop 17, R6b1).
+const MAX_BLOCK_SPLIT_DEPTH: usize = crate::review::index::MAX_DEFINITION_DEPTH;
 
 impl ContextItem {
     /// The text the prompt carries for the item (before fence escaping): a containing unit
