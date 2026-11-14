@@ -209,7 +209,8 @@ class RelayTests(unittest.TestCase):
         step = runs.Invocation(argv=("code-review",), timeout_s=60)
         definition = runs.RunDefinition(
             run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS, stdin=b"",
-            needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=100, setup=(step, step, step))
+            needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=3 * 60 + runs.MIN_MEASURED_ALLOWANCE_S,
+            setup=(step, step, step))
         with unittest.mock.patch.object(executor, "_invoke", invoke), \
                 unittest.mock.patch.object(runs.time, "monotonic", lambda: clock[0]):
             executor._run_setup(definition, pathlib.Path("."))
@@ -616,8 +617,8 @@ class RelayScenarioTests(unittest.TestCase):
         step = runs.Invocation(argv=("code-review",), timeout_s=5)
         definition = runs.RunDefinition(
             run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS, stdin=b"",
-            needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60, records_requests=True,
-            setup=(step,))
+            needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=5 + runs.MIN_MEASURED_ALLOWANCE_S,
+            records_requests=True, setup=(step,))
         seen = []
         with unittest.mock.patch.object(executor, "_invoke", lambda d, s: seen.append(d)):
             executor._run_setup(definition, pathlib.Path("."))
@@ -674,6 +675,24 @@ class RelayScenarioTests(unittest.TestCase):
             r = _with(_result("R21", 0, {}), request_bodies=(("/api/chat", frame + item),),
                       setup_outputs=(first, first))
             self.assertEqual([P, P], _judged("S57", r, rc.S57_ASSERTIONS), shown)
+
+
+class LoopSeventeenClockTests(unittest.TestCase):
+    """MAGI FIX (MS3 §6 loop17, R7a1/R7b1): a run's clock and what it declares."""
+
+    @staticmethod
+    def _with_setup(timeout_s: int) -> "runs.RunDefinition":
+        step = runs.Invocation(argv=("code-review",), timeout_s=900)
+        return runs.RunDefinition(
+            run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS, stdin=b"",
+            needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=timeout_s, setup=(step, step))
+
+    def test_a_setup_that_leaves_the_measured_review_too_little_is_a_harness_error(self) -> None:
+        for timeout_s in (2 * 900 - 1, 2 * 900, 2 * 900 + runs.MIN_MEASURED_ALLOWANCE_S - 1):
+            with self.subTest(timeout_s=timeout_s), self.assertRaises(HarnessError):
+                self._with_setup(timeout_s)
+        enough = self._with_setup(2 * 900 + runs.MIN_MEASURED_ALLOWANCE_S)
+        self.assertEqual(runs.MIN_MEASURED_ALLOWANCE_S, runs.measured_allowance(enough))
 
 
 if __name__ == "__main__":

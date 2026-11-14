@@ -517,8 +517,8 @@ class RelayBeforeSetupTests(unittest.TestCase):
     def test_an_unstageable_relay_spends_no_setup_invocation(self) -> None:
         definition = runs.RunDefinition(
             run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
-            stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
-            records_requests=True,
+            stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL,
+            timeout_s=5 + runs.MIN_MEASURED_ALLOWANCE_S, records_requests=True,
             setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
         with tempfile.TemporaryDirectory() as tmp:
             executor = _executor(pathlib.Path(tmp))
@@ -536,8 +536,8 @@ class RelayBeforeSetupTests(unittest.TestCase):
         # [MAGI S6 MS3 loop15, R7a1 Melchior] the checks that ran once the relay was up now run first.
         definition = runs.RunDefinition(
             run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
-            stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
-            records_requests=True,
+            stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL,
+            timeout_s=5 + runs.MIN_MEASURED_ALLOWANCE_S, records_requests=True,
             setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
         with tempfile.TemporaryDirectory() as tmp:
             executor = _executor(pathlib.Path(tmp))

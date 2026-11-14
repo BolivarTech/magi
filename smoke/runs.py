@@ -3566,6 +3566,14 @@ def relay_staging_problems(config_path) -> list:
         return ["could not stage %s: %s" % (config_path, exc)]
 
 
+#: The least wall clock a run's measured invocation may be left after its setup invocations'
+#: own timeouts (MAGI FIX, MS3 §6 loop17, R7a1): a minute, under the fastest review the harness
+#: has measured (R8's 67 s, :data:`TRIO_RUNS_MEASURED_S`). A definition that leaves less is an
+#: arithmetic slip that would time the measured review out and blame the product for it, so
+#: :meth:`RunDefinition.__post_init__` refuses it as a harness error.
+MIN_MEASURED_ALLOWANCE_S = 60
+
+
 def measured_allowance(definition: RunDefinition) -> int:
     """The wall clock the measured invocation of *definition* gets, in seconds.
 

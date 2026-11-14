@@ -109,7 +109,8 @@ class DegradedHistoryRunTests(unittest.TestCase):
         # The setup is how the history is seeded, against the live embedder; only the measured
         # run is pointed away. The other rewrites stay refused beside a setup.
         base = dict(run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
-                    stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
+                    stdin=b"", needs_trio=True, payload_size=runs.PAYLOAD_SMALL,
+                    timeout_s=5 + runs.MIN_MEASURED_ALLOWANCE_S,
                     setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
         runs.RunDefinition(**base, unreachable_embedder=True)
 
@@ -119,8 +120,8 @@ class DegradedHistoryRunTests(unittest.TestCase):
             self.skipTest("git is required")
         definition = runs.RunDefinition(
             run_id="RX", argv=("code-review", runs.REVIEW_WORKSPACE_TOKEN) + runs.REVIEW_FLAGS,
-            stdin=b"", needs_trio=False, payload_size=runs.PAYLOAD_SMALL, timeout_s=60,
-            unreachable_embedder=True,
+            stdin=b"", needs_trio=False, payload_size=runs.PAYLOAD_SMALL,
+            timeout_s=5 + runs.MIN_MEASURED_ALLOWANCE_S, unreachable_embedder=True,
             setup=(runs.Invocation(argv=("code-review",), timeout_s=5),))
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
