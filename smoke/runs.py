@@ -2339,7 +2339,7 @@ _HISTORY_BUGGY = (b"/// Returns the mean of the values.\n"
                   b"}\n")
 #: How many lines the seeded buggy file has: a finding must land inside it to become history.
 REVIEW_HISTORY_BUGGY_LINES = _HISTORY_BUGGY.count(b"\n")
-_HISTORY_FIXED =(b"/// Returns the mean of the values, 0 for none, without overflow.\n"
+_HISTORY_FIXED = (b"/// Returns the mean of the values, 0 for none, without overflow.\n"
                   b"pub fn mean(values: &[i32]) -> i32 {\n"
                   b"    if values.is_empty() {\n"
                   b"        return 0;\n"

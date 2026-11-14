@@ -632,9 +632,12 @@ surplus. A checkable requirement with no scenario is a declared hole.
   it can only miss a leak, never invent one. (6) Declared holes, no scenario (MAGI §6 MS3
   loop 16): RV19's embed-once property (RV-S37: what two revisions share is embedded once) and
   its index GC (RV-S39: unreachable versions deleted with `DELETE FROM`) are observable only
-  from an integrated run with a real embedder and database over two reviews whose docs differ in
-  one section; the harness has neither, and S55 expects the first embedding of a fresh
-  environment, not a reuse. They are covered by the unit suite alone. (7) S57's fixture needs the
+  from an integrated run over two reviews whose docs differ in one section. The harness does have
+  an embedder and a database, but the index lives in the persistent database every scenario
+  shares (`smoke/env`), so what a run embeds depends on what earlier runs left there; a
+  deterministic count or deletion needs a database of its own, which the harness does not build,
+  and S55 expects the first embedding of a fresh environment, not a reuse. They are covered by
+  the unit suite alone. (7) S57's fixture needs the
   trio to report a located finding inside the seeded file, a model answer: without one the
   assertion is `CANNOT_TEST`, never a pass.
 

@@ -143,9 +143,9 @@ class ReviewRunDefinitionTests(unittest.TestCase):
         self.assertFalse(definition.needs_trio)
 
     def test_trio_review_runs(self) -> None:
-        # [MAGI S6 MS3 loop11, R7b Balthasar] Renamed: the old name said four context runs. Five
+        # [MAGI S6 MS3 loop11, R7b Balthasar] Renamed: the old name said four context runs. Six
         # reach the trio: R12 (S47) the large review; R17 (S52) a one-batch review whose embedder
-        # is unreachable; R18 (S53) a file whose content holds a one-line key, masked; R20 (S56)
+        # is unreachable; R18 (S53) a file whose content holds a one-line key, masked; R20 (S56),
         # R21 (S57) and R22 (S58) the revision and history reviews.
         reviewing = {rid for rid, d in runs.DEFINITIONS.items()
                      if d.argv[0] == "code-review" and d.needs_trio}

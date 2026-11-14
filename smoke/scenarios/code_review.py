@@ -1442,10 +1442,8 @@ def _exclusion_finding(run, stderr):
                     % (", ".join(run.protected_visible),
                        ", ".join(missing) if found else "any of them"))
 
-#: The helpers sibling scenarios (`review_masking`) build on: a public surface, so a
-#: refactor of the private names here fails at import, never in silence (MAGI FIX, MS3 §6 loop10).
-
-#: MAGI FIX (MS3 §6 loop13): the one alias left. ``tests/test_rust_sync.py`` credits the scenarios'
-#: ``section.get(key)`` reads only through a helper named ``_list_under`` (``_LIST_UNDER``), so the
-#: definition keeps that name and the sibling scenarios import it under this public one.
+#: The public name sibling scenarios (``review_masking``) read lists through: a refactor of the
+#: private name fails at import, never in silence (MAGI FIX, MS3 §6 loop10). ``tests/test_rust_sync.py``
+#: credits the scenarios' ``section.get(key)`` reads only through a helper named ``_list_under``
+#: (``_LIST_UNDER``), so the definition keeps that name and this is the one alias of it.
 list_under = _list_under
