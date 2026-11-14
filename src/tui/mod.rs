@@ -1394,6 +1394,13 @@ pub(crate) struct CodeReviewDrain {
 /// the tool path's `egress_text` (control characters stripped again, URL credentials redacted,
 /// the RV22 detector last), so a control byte inside a key cannot hide it from the detector.
 /// One helper for the plan, the run and the post-report warning arms (`plan_refusal_is_masked`).
+///
+/// # Arguments
+/// * `e` - The error (or warning) text, which may carry a control byte, a credential URL or a
+///   key-shaped string.
+///
+/// # Returns
+/// The text safe for the transcript: no control character, no credential, the rest intact.
 // MAGI FIX (MS3 §6 loop8): the plan arm redacted URL credentials alone.
 fn code_review_error_text(e: &dyn std::fmt::Display) -> String {
     // MAGI FIX (MS3 §6 loop11): sanitized, then masked, as `egress_safe` orders it, so a control

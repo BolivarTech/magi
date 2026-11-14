@@ -8910,6 +8910,11 @@ mod tests {
         ));
         assert!(!logged.contains("sk-ant-"), "{logged}");
         assert!(!logged.contains("u:p@"), "{logged}");
+        // [MAGI S6 MS3 loop17, R5b] The non-secret cause survives the masking.
+        assert!(
+            logged.contains("embedder at") && logged.contains("refused key"),
+            "{logged}"
+        );
     }
     /// Prefixes of the development identifiers that must never reach a user (requirements,
     /// scenarios, decisions, premortem gaps, review findings).
@@ -10364,7 +10369,7 @@ mod tests {
                 })
                 .unwrap_or("");
             assert!(
-                statement.contains("startup_notices")
+                list == "startup_notices"
                     || (!list.is_empty() && after.starts_with(&format!("emit_notices({list})"))),
                 "announced with the call: {statement}"
             );
@@ -10413,6 +10418,8 @@ mod tests {
         let out = review_setup_cause(&format!("refused {key} \u{1b}[2J"));
         assert!(!out.contains("BBBBBBBBBB"), "{out}");
         assert!(!out.contains('\u{1b}'), "{out:?}");
+        // [MAGI S6 MS3 loop17, R5b] The non-secret cause survives.
+        assert!(out.contains("refused"), "{out:?}");
     }
 
     #[test]
@@ -10422,6 +10429,8 @@ mod tests {
         let key = concat!("sk-ant-api03-", "BBBBBBBBBB\u{1b}BBBBBBBBBB"); // allow-secret-scan
         let out = post_report_warning_line(&format!("history: {key} \u{9b}2J"));
         assert!(!out.contains("BBBBBBBBBB"), "{out}");
+        // [MAGI S6 MS3 loop17, R5b] The non-secret cause survives.
+        assert!(out.contains("history:"), "{out:?}");
         assert!(
             !out.contains('\u{1b}') && !out.contains('\u{9b}'),
             "{out:?}"
