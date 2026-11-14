@@ -1411,6 +1411,11 @@ fn code_review_error_text(e: &dyn std::fmt::Display) -> String {
 /// The runner a `/code-review` command runs on: the session's, or with `--no-memory` the same
 /// runner without its review stores ([`crate::tools::code_review::CodeReviewRunner::stateless`]).
 ///
+/// Declared (S6 loop 17, R5b): the session's embedder client is built eagerly at startup, so a
+/// `--no-memory` review never calls it but its construction already happened (it sends
+/// nothing); and `--no-memory` exists on this slash command and on the subcommand only: the
+/// agent's `code-review` tool has no such flag and runs on the session's stores.
+///
 /// # Errors
 /// The stateless runner's build error: the review is refused, never run with the stores.
 fn runner_for_command(

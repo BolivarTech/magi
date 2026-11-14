@@ -5093,6 +5093,10 @@ fn optional_code_review_runner(
 /// A review error before any model call goes to stderr and to the run log
 /// ([`emit_review_error`]); a failed consolidation prints the paid batch reports and exits 1.
 ///
+/// Declared (S6 loop 17, R5b): the report is on stdout before the bounded post-report work
+/// (history, index clean-up) runs, and that wait has no signal of its own here; a warning from
+/// it goes to stderr and the run log, so a consumer reading only stdout cannot see the wait.
+///
 /// # Arguments
 /// * `h` - The output and log flags, as [`headless_args_of`] maps them: taking them as
 ///   `HeadlessArgs` keeps this funnel under the scan that every headless funnel passes.
