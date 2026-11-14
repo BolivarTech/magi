@@ -56,7 +56,7 @@ use magi_rs::vault::MaskedDek;
 
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
-use crate::memory::review_docs::{DocVectors, ReviewDocStore, EMBED_BATCH_ITEMS};
+use crate::memory::review_docs::{DocLoss, DocVectors, ReviewDocStore, EMBED_BATCH_ITEMS};
 use crate::memory::review_history::{ReviewHistoryStore, MAX_HISTORY_PER_BATCH};
 
 /// Wall-clock bound on one reclassification pass of the review history, checked between
@@ -486,16 +486,20 @@ impl StoreRag<'_> {
             return Vec::new();
         }
         match self.search_docs(docs, vector) {
-            Ok((hits, vanished)) => {
+            Ok((hits, loss)) => {
                 // MAGI FIX (MS3 §6 loop15): rows deleted since the vectors were loaded (another
                 // process's clean-up) are declared once; the surviving hits still serve.
                 // MAGI FIX (MS3 §6 loop16): the loss touched those rows or sources only; the rest
                 // keeps serving (it switched the whole layer off for the review).
-                if vanished > 0 && !self.docs_shrunk.swap(true, Ordering::SeqCst) {
+                // MAGI FIX (MS3 §6 loop17, R1): the review-level loss (sources and rows gone
+                // under it) and the per-batch one (hits missed) are logged apart, never summed.
+                if loss.any() && !self.docs_shrunk.swap(true, Ordering::SeqCst) {
                     tracing::event!(
                         target: LOG_TARGET,
                         tracing::Level::WARN,
-                        vanished = vanished,
+                        sources_gone = loss.sources_gone,
+                        rows_gone = loss.rows_gone,
+                        hits_missed = loss.hits_missed,
                         "documentation rows vanished during the review: the index shrank under it"
                     );
                     declared.push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
@@ -538,7 +542,7 @@ impl StoreRag<'_> {
         &self,
         docs: &ReviewDocStore,
         query: &[f32],
-    ) -> Result<(Vec<(DocChunk, f32)>, usize), MemoryError> {
+    ) -> Result<(Vec<(DocChunk, f32)>, DocLoss), MemoryError> {
         let cached = relock(&self.doc_vectors).clone();
         let vectors = match cached {
             Some(vectors) if vectors.dim() == query.len() => vectors,
@@ -549,7 +553,6 @@ impl StoreRag<'_> {
             }
         };
         docs.search_loaded_counting(&vectors, query, DOC_SEARCH_K)
-            .map(|(hits, vanished)| (hits, vanished + vectors.vanished_sources()))
     }
 
     /// Whether `entry` may be served: `served_as_validated` on `HEAD` through
@@ -1891,10 +1894,10 @@ mod tests {
         rag.doc_sources = BTreeSet::from([src("d.md", "k"), src("cut.md", "k2")]);
         // [loop16, R1 Caspar] ... and it loses that source only: the other serves, the loss is
         // counted for the review to declare.
-        let (hits, vanished) = rag
+        let (hits, loss) = rag
             .search_docs(&f.docs, &[0.5, 0.5, 0.5])
             .expect("the indexed source serves");
-        assert_eq!((hits.len(), vanished), (1, 1));
+        assert_eq!((hits.len(), loss.sources_gone), (1, 1));
     }
 
     /// A git for which every reviewed commit is on `HEAD`'s line (the fixture's history is).

@@ -29,7 +29,7 @@
 //! // ... read and chunk only `todo`, then:
 //! store.reindex(&chunked, &e).await?;
 //! let vectors = store.load_vectors(query_vector.len(), &allowed)?; // once per review
-//! let (hits, vanished) = store.search_loaded_counting(&vectors, &query_vector, 5)?; // per batch
+//! let (hits, loss) = store.search_loaded_counting(&vectors, &query_vector, 5)?; // per batch
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -157,6 +157,27 @@ pub struct DocVectors {
     expected_rows: usize,
     /// Allowed sources that were no longer indexed when the vectors were loaded.
     vanished_sources: usize,
+}
+
+/// What one documentation search could not serve, by kind: a review loss that every batch
+/// sees again (`sources_gone`, `rows_gone`: the index shrank under the review) kept apart from
+/// the per-batch one (`hits_missed`: a best hit whose row was deleted after the scan), so a
+/// caller never adds the first kind once per batch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DocLoss {
+    /// Allowed sources no longer indexed when the vectors were loaded.
+    pub sources_gone: usize,
+    /// Rows counted at load that the scan no longer found.
+    pub rows_gone: usize,
+    /// Best hits whose row was deleted between the scan and the read of their text.
+    pub hits_missed: usize,
+}
+
+impl DocLoss {
+    /// Whether anything was lost.
+    pub fn any(&self) -> bool {
+        self.sources_gone > 0 || self.rows_gone > 0 || self.hits_missed > 0
+    }
 }
 
 impl DocVectors {
@@ -885,7 +906,7 @@ impl ReviewDocStore {
     /// `vectors` was loaded (another process's clean-up): the review declares that loss.
     ///
     /// # Returns
-    /// The hits and the number of vanished rows.
+    /// The hits and a [`DocLoss`] saying what the search could not serve, by kind.
     ///
     /// # Errors
     /// As [`Self::search_loaded`].
@@ -895,7 +916,7 @@ impl ReviewDocStore {
         vectors: &DocVectors,
         query: &[f32],
         k: usize,
-    ) -> Result<(Vec<(DocChunk, f32)>, usize), MemoryError> {
+    ) -> Result<(Vec<(DocChunk, f32)>, DocLoss), MemoryError> {
         // MAGI FIX (MS3 §6 loop8): a mismatch matched nothing in silence.
         // MAGI FIX (MS3 §6 loop9): a NaN query ranked arbitrary chunks first.
         if query.len() != vectors.dim || query.iter().any(|x| !x.is_finite()) {
@@ -906,7 +927,7 @@ impl ReviewDocStore {
             )));
         }
         if k == 0 {
-            return Ok((Vec::new(), 0));
+            return Ok((Vec::new(), DocLoss::default()));
         }
         let (scored, seen) = self.scan_top_k(vectors, query, k, DOC_SCAN_PAGE_ROWS)?;
         // Rows counted at load that the scan no longer found were deleted since (another
@@ -943,7 +964,12 @@ impl ReviewDocStore {
                 score,
             ));
         }
-        Ok((hits, vanished))
+        let loss = DocLoss {
+            sources_gone: vectors.vanished_sources(),
+            rows_gone: 0,
+            hits_missed: vanished,
+        };
+        Ok((hits, loss))
     }
 
     /// The `k` rows of `vectors` most similar to `query`, best first, as `(score, key, chunk
@@ -3002,6 +3028,51 @@ mod tests {
             .expect("the search survives a vanished row");
         let paths: Vec<&str> = hits.iter().map(|(c, _)| c.path.as_str()).collect();
         assert_eq!(paths, vec!["b.md"]);
+    }
+
+    #[tokio::test]
+    async fn the_review_level_loss_is_kept_apart_from_the_per_batch_one() {
+        // [MAGI S6 MS3 loop17, R1 Caspar] One clean-up that deleted a source's rows was reported
+        // as "vanished" by every batch, summed with the per-batch hit misses: a caller that
+        // added the batches over-reported, one that took the maximum under-reported real misses.
+        let (store, _dir) = store_for_test();
+        let e =
+            FakeEmbedder::with_vectors(&[("x", vec![1.0, 0.0, 0.0]), ("y", vec![0.9, 0.1, 0.0])]);
+        store
+            .reindex(
+                &[
+                    (src("a.md", "k1"), vec![chunk("a.md", "A", "x")]),
+                    (src("b.md", "k2"), vec![chunk("b.md", "B", "y")]),
+                ],
+                &e,
+            )
+            .await
+            .expect("index");
+        let allowed: BTreeSet<DocSource> = [src("a.md", "k1"), src("b.md", "k2")].into();
+        let vectors = store.load_vectors(3, &allowed).expect("load");
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute(
+                "DELETE FROM code_review_docs WHERE key = ?1",
+                [tag_of(&store, TagDomain::Key, "k1")],
+            )
+            .expect("delete");
+        for batch in 0..2 {
+            let (_, loss) = store
+                .search_loaded_counting(&vectors, &[0.0, 1.0, 0.0], 1)
+                .expect("search");
+            assert_eq!(
+                loss,
+                DocLoss {
+                    sources_gone: 0,
+                    rows_gone: 1,
+                    hits_missed: 0,
+                },
+                "batch {batch}: the deleted row is a review-level loss, no hit was missed"
+            );
+        }
     }
 
     /// Another model with the same dimension as the store's.
