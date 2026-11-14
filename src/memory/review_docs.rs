@@ -490,13 +490,16 @@ impl ReviewDocStore {
     ///
     /// Checks the embedder's identity and the chunks' hashes, leaves out the sources with a
     /// secret ([`ReindexStats::refused`]), reads what is stored, embeds the rest in requests of at
-    /// most [`EMBED_BATCH_ITEMS`] texts (no lock held), then writes in one transaction: all or
-    /// nothing. A chunk stored under any source reuses its vector, so it is never embedded twice;
+    /// most [`EMBED_BATCH_ITEMS`] texts (no lock held), then writes one transaction per group of
+    /// sources (at most [`EMBED_BATCH_ITEMS`] chunks, a source never split): a failure keeps the
+    /// groups already written, and a repeat call skips them. A chunk stored under any source reuses its vector, so it is never embedded twice;
     /// rows of another identity are wiped in that transaction (`rebuilt`), nothing else.
     ///
-    /// O(chunks) lookups plus the embedder. Memory: one call's sealed rows, mostly the sealed
-    /// vectors (about 12 KB each at 768 dimensions); `prepare_docs` calls per batch of at most
-    /// [`EMBED_BATCH_ITEMS`] chunks or one source (a source of many chunks costs more, declared).
+    /// O(chunks) lookups plus the embedder. Memory: one group's sealed rows, mostly the sealed
+    /// vectors: about `16 * dim` bytes each (4 bytes per `f32` as JSON text plus the cipher
+    /// overhead, so about 12 KB at 768 dimensions and 48 KB at 3 072), at most
+    /// [`EMBED_BATCH_ITEMS`] rows per group (a source of many chunks is one group and costs more,
+    /// declared: its peak is `chunks * 16 * dim`, bounded by `MAX_DOC_CHUNKS`).
     ///
     /// # Errors
     /// [`MemoryError::Storage`] for another identity, a chunk whose hash or path does not match
@@ -523,20 +526,29 @@ impl ReviewDocStore {
         // cannot fail the others through its chunk hashes (R1 Melchior).
         let (safe, refused) = without_secret_sources(sources);
         refuse_inconsistent_chunks(&safe)?;
-        // The tags are computed before any lock is taken (cheap, but never under one).
-        let source_tags = self.source_tags(safe.iter().map(|e| &e.0))?;
-        let chunk_tags = self.chunk_tags(&safe)?;
-        let plan = self.plan(&safe, &source_tags, chunk_tags)?;
-        let fresh = embed_all(&plan.to_embed, embedder).await?;
-        let rows = self.encode_rows(&plan, &fresh, embedder.dim())?;
-        let rebuilt = self.write(&plan, &rows)?;
-        Ok(ReindexStats {
-            embedded: plan.to_embed.len(),
-            reused: plan.reusable.len(),
-            sources: plan.new_sources.len(),
-            rebuilt,
+        let mut stats = ReindexStats {
+            embedded: 0,
+            reused: 0,
+            sources: 0,
+            rebuilt: false,
             refused,
-        })
+        };
+        // MAGI FIX (S6 loop 17, R1): one transaction per group, so a late failure keeps the
+        // earlier groups (resumable: indexed sources are skipped next time) and the peak is one
+        // group's sealed rows, not the whole call's.
+        for group in source_groups(&safe) {
+            // The tags are computed before any lock is taken (cheap, but never under one).
+            let source_tags = self.source_tags(group.iter().map(|e| &e.0))?;
+            let chunk_tags = self.chunk_tags(group)?;
+            let plan = self.plan(group, &source_tags, chunk_tags)?;
+            let fresh = embed_all(&plan.to_embed, embedder).await?;
+            let rows = self.encode_rows(&plan, &fresh, embedder.dim())?;
+            stats.rebuilt |= self.write(&plan, &rows)?;
+            stats.embedded += plan.to_embed.len();
+            stats.reused += plan.reusable.len();
+            stats.sources += plan.new_sources.len();
+        }
+        Ok(stats)
     }
 
     /// The lookup tag of every distinct chunk hash of `sources`, by hash.
@@ -1203,6 +1215,27 @@ fn refuse_inconsistent_chunks(sources: &[&(DocSource, Vec<DocChunk>)]) -> Result
         }
     }
     Ok(())
+}
+
+/// `sources` cut into consecutive groups of at most [`EMBED_BATCH_ITEMS`] chunks, a source never
+/// split (one over the bound forms its own group). Each group is planned, embedded and written
+/// on its own by [`ReviewDocStore::reindex`]. O(sources).
+fn source_groups<'a, 'b>(
+    sources: &'a [&'b (DocSource, Vec<DocChunk>)],
+) -> Vec<&'a [&'b (DocSource, Vec<DocChunk>)]> {
+    let mut groups = Vec::new();
+    let (mut start, mut chunks) = (0usize, 0usize);
+    for (i, entry) in sources.iter().enumerate() {
+        if i > start && chunks + entry.1.len() > EMBED_BATCH_ITEMS {
+            groups.push(&sources[start..i]);
+            (start, chunks) = (i, 0);
+        }
+        chunks += entry.1.len();
+    }
+    if start < sources.len() {
+        groups.push(&sources[start..]);
+    }
+    groups
 }
 
 /// The bytes one text adds to a request body: its JSON string (quotes and escapes included) plus
