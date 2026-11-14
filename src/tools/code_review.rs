@@ -402,7 +402,11 @@ pub(crate) async fn finish_after_report(
     match finished {
         Some(Ok(warning)) => warning,
         Some(Err(join)) => {
-            let cause = egress_text(&join.to_string());
+            // MAGI FIX (S6 loop 17, R5): the failed task ran the history AND the index
+            // clean-up; the note names the stage it cannot tell apart.
+            let cause = egress_text(&format!(
+                "the post-report task (history or index clean-up) failed: {join}"
+            ));
             Some(format!("{HISTORY_NOT_UPDATED}: {cause}"))
         }
         None => {
@@ -756,7 +760,18 @@ pub(crate) fn envelope_fields(r: &Rendered) -> (String, Value, Value) {
 /// # Returns
 /// The usage.
 pub(crate) fn envelope_usage(r: &Rendered) -> magi_rs::headless::types::Usage {
-    let total = |key: &str| r.json["batch_totals"][key].as_u64().unwrap_or(0);
+    // MAGI FIX (S6 loop 17, R5): a summary whose shape changed reported zero tokens unsaid.
+    let total = |key: &str| {
+        r.json["batch_totals"][key].as_u64().unwrap_or_else(|| {
+            tracing::event!(
+                target: REVIEW_LOG_TARGET,
+                tracing::Level::WARN,
+                key = key,
+                "the review summary carries no token total for this key: usage reports zero"
+            );
+            0
+        })
+    };
     magi_rs::headless::types::Usage {
         input_tokens: total("input_tokens"),
         output_tokens: total("output_tokens"),
@@ -1717,14 +1732,18 @@ impl ProductionReviewRunner {
         let pathspec = match input {
             ReviewInput::File(p) | ReviewInput::Directory(p) => {
                 let guarded = self.guard(&self.workspace.join(p))?;
-                let rel: Vec<String> = guarded
-                    .strip_prefix(&self.workspace)
-                    .map(|r| {
-                        r.components()
-                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                // MAGI FIX (S6 loop 17, R5): a lossy conversion changed a non-Unicode component
+                // into a different pathspec (an empty ignore set); such a path is refused.
+                let rel: Vec<String> = match guarded.strip_prefix(&self.workspace) {
+                    Ok(r) => r
+                        .components()
+                        .map(|c| c.as_os_str().to_str().map(str::to_owned))
+                        .collect::<Option<Vec<String>>>()
+                        .ok_or_else(|| {
+                            ReviewError::Io("a path component is not valid Unicode".into())
+                        })?,
+                    Err(_) => Vec::new(),
+                };
                 if rel.is_empty() {
                     ".".to_string()
                 } else {
@@ -1947,10 +1966,7 @@ impl CodeReviewRunner for ProductionReviewRunner {
         Ok(Some(Arc::new(runner)))
     }
 
-    /// Records the history of each revision review left so far (anchored to the full SHA of its
-    /// new side) and cleans the documentation index, after the report ([`follow_up_work`]), as
-    /// owned work over its own git runner, so it can run on a blocking thread. Every pending
-    /// review is taken, oldest first: one whose surface reports later finds its work done.
+    /// Whether work is queued (not taking it).
     fn has_after_report(&self) -> bool {
         self.parts.memory.is_some()
             && !self
@@ -1960,6 +1976,10 @@ impl CodeReviewRunner for ProductionReviewRunner {
                 .is_empty()
     }
 
+    /// Records the history of each revision review left so far (anchored to the full SHA of its
+    /// new side) and cleans the documentation index, after the report (`follow_up_work`), as
+    /// owned work over its own git runner, so it can run on a blocking thread. Every pending
+    /// review is taken, oldest first: one whose surface reports later finds its work done.
     fn after_report(&self) -> Option<PostReport> {
         // MAGI FIX (MS3 §6 loop8): checked before the take, so a queue is never taken and lost.
         let memory = Arc::clone(self.parts.memory.as_ref()?);
