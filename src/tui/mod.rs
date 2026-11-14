@@ -1414,7 +1414,63 @@ fn runner_for_command(
     if !cmd.no_memory {
         return Ok(runner);
     }
-    Ok(runner.stateless()?.unwrap_or(runner))
+    // MAGI FIX (S6 loop 17, R5b): `Ok(None)` ("already stateless") is proved here, not trusted.
+    match runner.stateless()? {
+        Some(twin) => Ok(twin),
+        None if !runner.holds_review_stores() => Ok(runner),
+        None => Err(magi_rs::review::error::ReviewError::Io(
+            "this review runner holds review stores but reported it is already stateless; \
+             --no-memory is refused"
+                .into(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod no_memory_contract_tests {
+    use super::*;
+
+    /// Answers `Ok(None)` ("already stateless") while holding stores: the lie the call site
+    /// must catch.
+    struct ClaimsStateless;
+    #[async_trait::async_trait]
+    impl crate::tools::code_review::CodeReviewRunner for ClaimsStateless {
+        fn plan(
+            &self,
+            _input: &magi_rs::review::input::ReviewInput,
+        ) -> Result<crate::tools::code_review::ReviewPlan, magi_rs::review::error::ReviewError>
+        {
+            Err(magi_rs::review::error::ReviewError::Io("unused".into()))
+        }
+        async fn run(
+            &self,
+            _plan: crate::tools::code_review::ReviewPlan,
+            _budget: crate::tools::code_review::ReviewBudget,
+            _c: &tokio_util::sync::CancellationToken,
+        ) -> Result<crate::tools::code_review::Rendered, magi_rs::review::error::ReviewError>
+        {
+            Err(magi_rs::review::error::ReviewError::Io("unused".into()))
+        }
+        fn stateless(
+            &self,
+        ) -> Result<
+            Option<Arc<dyn crate::tools::code_review::CodeReviewRunner>>,
+            magi_rs::review::error::ReviewError,
+        > {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn a_runner_that_holds_stores_cannot_claim_it_is_already_stateless() {
+        // [MAGI S6 MS3 loop17, R5b Caspar] `Ok(None)` means "holds no stores"; the call site
+        // proves it instead of trusting it, so `--no-memory` can never run with the stores.
+        let cmd = TuiCodeReviewCommand {
+            no_memory: true,
+            ..TuiCodeReviewCommand::default()
+        };
+        assert!(runner_for_command(&cmd, Arc::new(ClaimsStateless)).is_err());
+    }
 }
 
 /// Why a line did not parse as a `/code-review` command.
@@ -9413,6 +9469,9 @@ end"
     }
     #[async_trait::async_trait]
     impl crate::tools::code_review::CodeReviewRunner for FakeTuiRunner {
+        fn holds_review_stores(&self) -> bool {
+            false
+        }
         fn plan(
             &self,
             _input: &magi_rs::review::input::ReviewInput,

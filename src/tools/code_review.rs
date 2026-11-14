@@ -310,6 +310,17 @@ pub(crate) trait CodeReviewRunner: Send + Sync {
             "this review runner did not declare how to run without its stores".into(),
         ))
     }
+
+    /// Whether this runner holds the review stores (and so an embedder). `stateless` answering
+    /// `Ok(None)` ("already stateless") is checked against this at the call site, so a runner
+    /// that holds stores cannot claim it. The default is `true`: an implementor that holds none
+    /// must say so.
+    ///
+    /// # Returns
+    /// `true` when the runner holds the review stores.
+    fn holds_review_stores(&self) -> bool {
+        true
+    }
 }
 
 /// Blocking work a review leaves for after its report: git and SQLite calls, never awaited on
@@ -1971,6 +1982,10 @@ impl CodeReviewRunner for ProductionReviewRunner {
         let runner =
             ProductionReviewRunner::new(parts).map_err(|e| ReviewError::Io(e.to_string()))?;
         Ok(Some(Arc::new(runner)))
+    }
+
+    fn holds_review_stores(&self) -> bool {
+        self.parts.memory.is_some()
     }
 
     /// Whether work is queued (not taking it).
