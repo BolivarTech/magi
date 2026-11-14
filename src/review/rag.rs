@@ -448,8 +448,9 @@ fn read_text(
     };
     bytes
         .map(|b| {
+            // MAGI FIX (MS3 §6 loop17, R2 Caspar): the raw path reached the error's text.
             String::from_utf8(b).map_err(|_| ReviewError::NotReviewable {
-                path: file.to_string(),
+                path: display_path(file),
                 cause: "not utf-8",
             })
         })
