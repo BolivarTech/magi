@@ -41,8 +41,7 @@ use crate::memory::error::MemoryError;
 use crate::memory::index::cosine;
 use cryptovault::CryptoVault;
 use magi_rs::review::docs::{
-    chunk_hash, doc_index_id, DocChunk, DocSource, MAX_DOC_CHUNKS, MAX_DOC_CHUNK_BYTES,
-    WORKTREE_KEY_PREFIX,
+    chunk_hash, doc_index_id, DocChunk, DocSource, MAX_DOC_CHUNK_BYTES, WORKTREE_KEY_PREFIX,
 };
 use magi_rs::review::secrets::{display_path, leaks_secret};
 use magi_rs::vault::MaskedDek;
@@ -70,7 +69,7 @@ const REUSE_LOOKUP_SQL: &str = "SELECT embedding_blob FROM code_review_docs \
 const ALLOWED_PAIRS_PER_QUERY: usize = 400;
 
 /// The `VALUES` list of `pairs` two-parameter rows, `(?, ?), (?, ?), ...`: the one builder of
-/// the batched pair queries ([`ReviewDocStore::allowed_vectors`], [`ReviewDocStore::load_chunks`],
+/// the batched pair queries ([`ReviewDocStore::vector_page`], [`ReviewDocStore::load_chunks`],
 /// [`ReviewDocStore::gc`]), so they cannot drift apart. O(pairs).
 fn pair_values(pairs: usize) -> String {
     vec!["(?, ?)"; pairs].join(", ")
@@ -96,6 +95,15 @@ pub struct ReindexStats {
     /// by mistake loses only itself at load time ([`DocVectors::vanished_sources`]).
     pub refused: Vec<String>,
 }
+
+/// Rows read and decrypted per page of a documentation scan: the peak of a search is one page
+/// of raw vector blobs (about 12 KB each at 768 dimensions, so about 3 MB) plus the `k` best
+/// rows, however many rows the revision's documentation holds. A larger page means fewer
+/// queries; a smaller one, a lower peak.
+pub(crate) const DOC_SCAN_PAGE_ROWS: usize = 256;
+
+/// A scored row: `(cosine score, source key, chunk hash)`.
+type ScoredRow = (f32, String, String);
 
 /// One allowed row read raw: key, chunk hash, encrypted vector and its `dim` column.
 type RawVector = (String, String, Vec<u8>, i64);
@@ -127,14 +135,17 @@ struct DocRow<'a> {
 /// One stored chunk read raw: its path and its still-encrypted section and text.
 type RawChunk = (String, Vec<u8>, Vec<u8>);
 
-/// The decrypted vectors of one review's allowed documentation rows, from
-/// [`ReviewDocStore::load_vectors`]: `(source key, chunk hash, vector)` of the given dimension.
+/// One review's allowed documentation sources, validated by [`ReviewDocStore::load_vectors`]
+/// and scanned page by page, never held decrypted, by [`ReviewDocStore::search_loaded_counting`].
 #[derive(Debug, Clone, Default)]
 pub struct DocVectors {
     /// The dimension every vector has.
     dim: usize,
-    /// `(source key, chunk hash, vector)` per allowed row.
-    rows: Vec<(String, String, Vec<f32>)>,
+    /// The allowed sources that are indexed under this identity.
+    sources: BTreeSet<DocSource>,
+    /// How many rows those sources held at load time: a scan that sees fewer reports the
+    /// difference as vanished rows (another process's clean-up), which the review declares.
+    expected_rows: usize,
     /// Allowed sources that were no longer indexed when the vectors were loaded.
     vanished_sources: usize,
 }
@@ -585,85 +596,76 @@ impl ReviewDocStore {
         self.search_loaded(&vectors, query, k)
     }
 
-    /// The decrypted vectors of the rows whose `(path, key)` is in `allowed`, of this identity:
-    /// loaded once per review, scored by [`Self::search_loaded`] per batch. Read raw under the
-    /// lock, decrypted after it (R-V08). A row not of `dim` (vector or `dim` column) is an error
-    /// (`load_dim_mismatch_is_an_error`).
+    /// Validates the review's allowed documentation sources and returns the handle that
+    /// [`Self::search_loaded_counting`] scans: no row is read here, so what a review holds
+    /// does not grow with the documentation of its revision.
     ///
     /// With rows of another identity stored, a non-empty `allowed` is an error, never an empty
     /// answer (another identity's rebuild may have wiped this review's rows); the review declares
     /// its documentation unavailable. An allowed source no longer indexed loses only itself: it
     /// is counted in [`DocVectors::vanished_sources`] and the rest serve
-    /// (`a_vanished_source_degrades_only_itself`). One snapshot. O(stored sources) plus O(r)
-    /// decryptions.
+    /// (`a_vanished_source_degrades_only_itself`). One snapshot. O(stored sources).
     ///
-    /// Peak, declared: at most [`MAX_DOC_CHUNKS`] rows (more is an error, `max_rows`), each a raw
-    /// vector blob of about 12 KB at 768 dimensions (JSON floats, sealed), so about 240 MB of
-    /// ciphertext at the bound, held together before they are decrypted; the connection lock is
-    /// held for that raw read only. The decrypted vectors are about 3 KB per row. `encode_rows`
-    /// declares its own peak the same way; the two do not overlap in one review (a review
-    /// indexes, then loads).
-    /// So the caller builds `allowed` from what it indexed: after `bounded`, without the sources
-    /// `netted_chunks` dropped and those [`ReindexStats::refused`] names (`allowed_excludes_refused`).
+    /// A row not of `dim` (vector or `dim` column) is an error at the scan that reaches it
+    /// (`load_dim_mismatch_is_an_error`), not here.
     ///
     /// # Errors
-    /// [`MemoryError::Storage`] if another identity holds the index, a row is not of `dim` or a
-    /// query fails; [`MemoryError::Crypto`] if decryption fails.
+    /// [`MemoryError::Storage`] if another identity holds the index or a query fails.
     // MAGI FIX (MS3 §6 loop6): a wipe by another identity read as an empty index.
     // MAGI FIX (MS3 §6 loop7): the check and the read took two locks, each its own snapshot.
+    // MAGI FIX (MS3 §6 loop16, R1; controller ruling): the rows were read whole and an error past
+    // `MAX_DOC_CHUNKS` left documentation unavailable on a large revision; the scan is now paged.
     pub fn load_vectors(
         &self,
         dim: usize,
         allowed: &BTreeSet<DocSource>,
     ) -> Result<DocVectors, MemoryError> {
-        self.load_vectors_within(dim, allowed, MAX_DOC_CHUNKS)
-    }
-
-    /// [`Self::load_vectors`] reading at most `max_rows` rows.
-    ///
-    /// # Errors
-    /// As [`Self::load_vectors`], and [`MemoryError::Storage`] when more than `max_rows` rows
-    /// match.
-    pub(crate) fn load_vectors_within(
-        &self,
-        dim: usize,
-        allowed: &BTreeSet<DocSource>,
-        max_rows: usize,
-    ) -> Result<DocVectors, MemoryError> {
-        let (candidates, vanished_sources) = {
-            let mut c = self.locked_conn();
-            let snapshot = c.transaction().map_err(db_err)?;
-            if !allowed.is_empty() && self.has_foreign_rows(&snapshot)? {
-                return Err(identity_conflict());
-            }
-            // MAGI FIX (MS3 §6 loop10): a source deleted after its reindex loaded as none.
-            // MAGI FIX (MS3 §6 loop16): it now loses that source only, counted; the rest serve.
-            let indexed = self.indexed_sources(&snapshot)?;
-            let (present, gone): (BTreeSet<DocSource>, BTreeSet<DocSource>) =
-                allowed.iter().cloned().partition(|s| indexed.contains(s));
-            (
-                self.allowed_vectors(&snapshot, &present, max_rows)?,
-                gone.len(),
-            )
-        };
-        let mut rows = Vec::with_capacity(candidates.len());
-        for (key, hash, blob, stored_dim) in candidates {
-            let vector = self.unseal_vector(&blob)?;
-            // MAGI FIX (MS3 §6 loop9): a row of another dimension was dropped in silence.
-            // MAGI FIX (MS3 §6 loop10): the `dim` column was never read back.
-            if vector.len() != dim || usize::try_from(stored_dim).ok() != Some(dim) {
-                return Err(MemoryError::Storage(format!(
-                    "a stored vector of dimension {} (column {stored_dim}) where {dim} was asked",
-                    vector.len()
-                )));
-            }
-            rows.push((key, hash, vector));
+        let mut c = self.locked_conn();
+        let snapshot = c.transaction().map_err(db_err)?;
+        if !allowed.is_empty() && self.has_foreign_rows(&snapshot)? {
+            return Err(identity_conflict());
         }
+        // MAGI FIX (MS3 §6 loop10): a source deleted after its reindex loaded as none.
+        // MAGI FIX (MS3 §6 loop16): it now loses that source only, counted; the rest serve.
+        let indexed = self.indexed_sources(&snapshot)?;
+        let (sources, gone): (BTreeSet<DocSource>, BTreeSet<DocSource>) =
+            allowed.iter().cloned().partition(|s| indexed.contains(s));
+        let expected_rows = self.count_rows(&snapshot, &sources)?;
         Ok(DocVectors {
             dim,
-            rows,
-            vanished_sources,
+            sources,
+            expected_rows,
+            vanished_sources: gone.len(),
         })
+    }
+
+    /// How many rows of this identity the `sources` hold, counted in batches of
+    /// [`ALLOWED_PAIRS_PER_QUERY`] pairs on the caller's connection `c`. O(rows) in SQLite, no
+    /// blob is copied.
+    fn count_rows(
+        &self,
+        c: &Connection,
+        sources: &BTreeSet<DocSource>,
+    ) -> Result<usize, MemoryError> {
+        let pairs: Vec<&DocSource> = sources.iter().collect();
+        let mut total = 0usize;
+        for batch in pairs.chunks(ALLOWED_PAIRS_PER_QUERY) {
+            let values = pair_values(batch.len());
+            let sql = format!(
+                "SELECT COUNT(*) FROM code_review_docs \
+                 WHERE index_id = ? AND (path, key) IN (VALUES {values})"
+            );
+            let mut args: Vec<&dyn rusqlite::ToSql> = vec![&self.index_id];
+            for s in batch {
+                args.push(&s.path);
+                args.push(&s.key);
+            }
+            let n: i64 = c
+                .query_row(&sql, rusqlite::params_from_iter(args), |r| r.get(0))
+                .map_err(db_err)?;
+            total = total.saturating_add(usize::try_from(n).unwrap_or(0));
+        }
+        Ok(total)
     }
 
     /// The `k` chunks of `vectors` most similar to `query`, best first; only their section and
@@ -716,31 +718,22 @@ impl ReviewDocStore {
         if k == 0 {
             return Ok((Vec::new(), 0));
         }
-        let mut scored: Vec<(f32, &str, &str)> = vectors
-            .rows
-            .iter()
-            // MAGI FIX (MS3 §6 loop10): an overflowing norm scored NaN; it now scores 0.
-            .map(|(key, hash, v)| {
-                let s = cosine(query, v);
-                (
-                    if s.is_finite() { s } else { 0.0 },
-                    key.as_str(),
-                    hash.as_str(),
-                )
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-        scored.truncate(k);
+        let (scored, seen) = self.scan_top_k(vectors, query, k, DOC_SCAN_PAGE_ROWS)?;
+        // Rows counted at load that the scan no longer found were deleted since (another
+        // process's clean-up): declared like a hit that vanished.
+        let gone_rows = vectors.expected_rows.saturating_sub(seen);
         // MAGI FIX (MS3 §6 loop4): a row deleted since `load_vectors` (another process's
         // clean-up) failed the whole search; it is now one hit fewer. The hits are read in one
         // query per `ALLOWED_PAIRS_PER_QUERY` pairs, not one query each.
-        let wanted: Vec<(&str, &str)> = scored.iter().map(|(_, k, h)| (*k, *h)).collect();
+        let wanted: Vec<(&str, &str)> = scored
+            .iter()
+            .map(|(_, k, h)| (k.as_str(), h.as_str()))
+            .collect();
         let mut rows = self.load_chunks(&wanted)?;
         let mut hits = Vec::with_capacity(scored.len());
-        let mut vanished = 0usize;
+        let mut vanished = gone_rows;
         for (score, key, hash) in scored {
-            let Some((path, section, text)) = rows.remove(&(key.to_string(), hash.to_string()))
-            else {
+            let Some((path, section, text)) = rows.remove(&(key.clone(), hash.clone())) else {
                 vanished += 1;
                 continue;
             };
@@ -757,47 +750,104 @@ impl ReviewDocStore {
         Ok((hits, vanished))
     }
 
-    /// `(key, chunk hash, encrypted vector)` of the allowed rows of this identity.
+    /// The `k` rows of `vectors` most similar to `query`, best first, as `(score, key, chunk
+    /// hash)`: a paged scan that reads and decrypts at most `page_rows` vectors at a time and
+    /// keeps only the running top `k`, so the peak is one page plus `k` rows whatever the size
+    /// of the allowed set. The connection lock is held for each page's raw read only and
+    /// released before any decryption (R-V08); a row deleted between pages is simply not seen.
     ///
-    /// The `(path, key)` filter runs in SQL, in batches of [`ALLOWED_PAIRS_PER_QUERY`] pairs
-    /// (so no query passes SQLite's 999-parameter limit), so the blobs of other revisions are
-    /// never copied under the connection lock. Runs on the caller's locked connection `c`.
-    fn allowed_vectors(
+    /// Complexity: O(r) decryptions and O(r * d) to score the `r` allowed rows, O((page + k) log
+    /// (page + k)) per page to merge; the whole scan repeats per batch of a review (declared:
+    /// the decrypted vectors are not cached, that is the bound).
+    ///
+    /// # Errors
+    /// [`MemoryError::Storage`] when a row is not of `vectors`' dimension (vector or `dim`
+    /// column) or a query fails; [`MemoryError::Crypto`] if decryption fails.
+    // MAGI FIX (MS3 §6 loop9): a row of another dimension was dropped in silence.
+    // MAGI FIX (MS3 §6 loop10): the `dim` column was never read back, and an overflowing norm
+    // scored NaN (it now scores 0).
+    fn scan_top_k(
         &self,
-        c: &Connection,
-        allowed: &BTreeSet<DocSource>,
-        max_rows: usize,
-    ) -> Result<Vec<RawVector>, MemoryError> {
-        let pairs: Vec<&DocSource> = allowed.iter().collect();
-        let mut out = Vec::new();
-        for batch in pairs.chunks(ALLOWED_PAIRS_PER_QUERY) {
-            let values = pair_values(batch.len());
-            let sql = format!(
-                "SELECT key, chunk_hash, embedding_blob, dim FROM code_review_docs \
-                 WHERE index_id = ? AND (path, key) IN (VALUES {values})"
-            );
-            let mut args: Vec<&dyn rusqlite::ToSql> = vec![&self.index_id];
-            for s in batch {
-                args.push(&s.path);
-                args.push(&s.key);
-            }
-            let mut stmt = c.prepare(&sql).map_err(db_err)?;
-            let rows = stmt
-                .query_map(rusqlite::params_from_iter(args), |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                })
-                .map_err(db_err)?;
-            for row in rows {
-                if out.len() >= max_rows {
-                    return Err(MemoryError::Storage(format!(
-                        "the documentation of this review holds more than {max_rows} rows: \
-                         left unread"
-                    )));
+        vectors: &DocVectors,
+        query: &[f32],
+        k: usize,
+        page_rows: usize,
+    ) -> Result<(Vec<ScoredRow>, usize), MemoryError> {
+        let page_rows = page_rows.max(1);
+        let sources: Vec<&DocSource> = vectors.sources.iter().collect();
+        let mut best: Vec<ScoredRow> = Vec::new();
+        let mut seen = 0usize;
+        for batch in sources.chunks(ALLOWED_PAIRS_PER_QUERY) {
+            let mut cursor: Option<(String, String)> = None;
+            loop {
+                let page = self.vector_page(batch, cursor.as_ref(), page_rows)?;
+                let full = page.len() >= page_rows;
+                seen += page.len();
+                cursor = page
+                    .last()
+                    .map(|(key, hash, _, _)| (key.clone(), hash.clone()));
+                for (key, hash, blob, stored_dim) in page {
+                    let vector = self.unseal_vector(&blob)?;
+                    if vector.len() != vectors.dim
+                        || usize::try_from(stored_dim).ok() != Some(vectors.dim)
+                    {
+                        return Err(MemoryError::Storage(format!(
+                            "a stored vector of dimension {} (column {stored_dim}) where {} was asked",
+                            vector.len(),
+                            vectors.dim
+                        )));
+                    }
+                    let s = cosine(query, &vector);
+                    best.push((if s.is_finite() { s } else { 0.0 }, key, hash));
                 }
-                out.push(row.map_err(db_err)?);
+                best.sort_by(|a, b| b.0.total_cmp(&a.0));
+                best.truncate(k);
+                if !full {
+                    break;
+                }
             }
         }
-        Ok(out)
+        Ok((best, seen))
+    }
+
+    /// One page of at most `page_rows` allowed rows of this identity for the sources in `batch`
+    /// (at most [`ALLOWED_PAIRS_PER_QUERY`], so no query passes SQLite's 999-parameter limit),
+    /// in `(key, chunk hash)` order and strictly after `after`. The `(path, key)` filter runs in
+    /// SQL, so the blobs of other revisions are never copied under the connection lock.
+    fn vector_page(
+        &self,
+        batch: &[&DocSource],
+        after: Option<&(String, String)>,
+        page_rows: usize,
+    ) -> Result<Vec<RawVector>, MemoryError> {
+        let values = pair_values(batch.len());
+        let cursor_clause = if after.is_some() {
+            "AND (key, chunk_hash) > (?, ?) "
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT key, chunk_hash, embedding_blob, dim FROM code_review_docs \
+             WHERE index_id = ? AND (path, key) IN (VALUES {values}) {cursor_clause}\
+             ORDER BY key, chunk_hash LIMIT {page_rows}"
+        );
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&self.index_id];
+        for s in batch {
+            args.push(&s.path);
+            args.push(&s.key);
+        }
+        if let Some((key, hash)) = after {
+            args.push(key);
+            args.push(hash);
+        }
+        let c = self.locked_conn();
+        let mut stmt = c.prepare(&sql).map_err(db_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(db_err)?;
+        rows.collect::<Result<_, _>>().map_err(db_err)
     }
 
     /// The raw `(path, section blob, text blob)` of each `(key, chunk hash)` in `wanted` that
@@ -1674,8 +1724,9 @@ mod tests {
             .execute("UPDATE code_review_docs SET dim = 5", [])
             .expect("tamper");
         let allowed = BTreeSet::from([src("d.md", "k")]);
+        let vectors = store.load_vectors(3, &allowed).expect("no row read yet");
         assert!(matches!(
-            store.load_vectors(3, &allowed),
+            store.search_loaded(&vectors, &[1.0, 0.0, 0.0], 5),
             Err(MemoryError::Storage(_))
         ));
     }
@@ -1723,7 +1774,7 @@ mod tests {
             .expect("dim 3");
         let allowed = BTreeSet::from([src("d.md", "k"), src("e.md", "k2")]);
         let whole = store.load_vectors(3, &allowed).expect("load");
-        assert_eq!((whole.rows.len(), whole.vanished_sources()), (2, 0));
+        assert_eq!((whole.sources.len(), whole.vanished_sources()), (2, 0));
         store
             .connection_for_test()
             .lock()
@@ -1731,7 +1782,7 @@ mod tests {
             .execute("DELETE FROM code_review_doc_sources WHERE key = 'k'", [])
             .expect("delete the source row");
         let partial = store.load_vectors(3, &allowed).expect("the other serves");
-        assert_eq!((partial.rows.len(), partial.vanished_sources()), (1, 1));
+        assert_eq!((partial.sources.len(), partial.vanished_sources()), (1, 1));
     }
 
     #[tokio::test]
@@ -1802,7 +1853,7 @@ mod tests {
         assert!(
             a.load_vectors(3, &BTreeSet::new())
                 .expect("nothing asked")
-                .rows
+                .sources
                 .is_empty(),
             "asking for nothing is never an error"
         );
@@ -1871,10 +1922,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loading_more_rows_than_the_bound_is_an_error_not_an_unbounded_read() {
-        // [MAGI S6 MS3 loop16, R1 Melchior] The allowed set is not capped by MAX_DOC_CHUNKS and
-        // every raw blob is held at once: the read stops at a bound and the review declares its
-        // documentation unavailable.
+    async fn a_page_boundary_loses_no_row_and_repeats_none() {
+        // The scan resumes strictly after the last row of a page: 5 rows in pages of 2 (a full
+        // page, a full page, a short one) and in pages of 5 (a full last page, then an empty one)
+        // all rank the same top-k.
         let (store, _dir) = store_for_test();
         let chunks: Vec<DocChunk> = (0..5)
             .map(|i| chunk("d.md", &format!("S{i}"), &format!("t{i}")))
@@ -1883,19 +1934,20 @@ mod tests {
             .reindex(&[(src("d.md", "k"), chunks)], &FakeEmbedder::new(3))
             .await
             .expect("dim 3");
-        let allowed = BTreeSet::from([src("d.md", "k")]);
-        assert_eq!(
-            store
-                .load_vectors_within(3, &allowed, 5)
-                .expect("at the bound")
-                .rows
-                .len(),
-            5
-        );
-        assert!(matches!(
-            store.load_vectors_within(3, &allowed, 4),
-            Err(MemoryError::Storage(_))
-        ));
+        let vectors = store
+            .load_vectors(3, &BTreeSet::from([src("d.md", "k")]))
+            .expect("load");
+        for page in [1, 2, 5, 6] {
+            let (scanned, seen) = store
+                .scan_top_k(&vectors, &[0.5, 0.5, 0.5], 10, page)
+                .expect("scan");
+            assert_eq!(seen, 5, "page of {page}");
+            let mut hashes: Vec<&str> = scanned.iter().map(|(_, _, h)| h.as_str()).collect();
+            hashes.sort_unstable();
+            hashes.dedup();
+            assert_eq!(scanned.len(), 5, "page of {page}");
+            assert_eq!(hashes.len(), 5, "page of {page}: a row repeated");
+        }
     }
 
     #[tokio::test]
@@ -1919,7 +1971,10 @@ mod tests {
             let conn = store.connection_for_test();
             let mut c = conn.lock().expect("lock");
             let tx = c.transaction().expect("tx");
-            for i in 0..=MAX_DOC_CHUNKS {
+            // Two full pages and one more row. (The Red of this test used MAX_DOC_CHUNKS + 1 rows,
+            // the old cap; each row costs a decryption with its error correction, milliseconds,
+            // so that size is minutes: the page size is what the scan's correctness turns on.)
+            for i in 0..=2 * DOC_SCAN_PAGE_ROWS {
                 // "!" sorts before any hex digit, so the target is also last in key order.
                 tx.execute(
                     "INSERT INTO code_review_docs \
@@ -2136,7 +2191,9 @@ mod tests {
             .await
             .expect("dim 3");
         let allowed = BTreeSet::from([src("d.md", "k")]);
-        let r = store.load_vectors(2, &allowed);
+        // The scan, not the load, reads the rows (paged): the error surfaces there.
+        let vectors = store.load_vectors(2, &allowed).expect("no row read yet");
+        let r = store.search_loaded(&vectors, &[1.0, 0.0], 5);
         assert!(matches!(r, Err(MemoryError::Storage(_))), "{r:?}");
         assert!(store.search(&[1.0, 0.0], 5, &allowed).is_err());
     }

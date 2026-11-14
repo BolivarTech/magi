@@ -205,8 +205,9 @@ pub struct StoreRag<'a> {
     pub masked_sources: Vec<(String, &'static str)>,
     /// Milliseconds the documentation preparation took, returned by `index_ms`.
     pub index_ms: u64,
-    /// The decrypted vectors of `doc_sources`, loaded by the first batch that searches and
-    /// scored by every later one: a review decrypts each allowed vector once.
+    /// The validated handle on `doc_sources`, made by the first batch that searches and scanned
+    /// by every later one in pages (no vector is held decrypted: the peak is one page plus the
+    /// best rows, so a large documentation set never grows the review's memory).
     pub doc_vectors: Mutex<Option<Arc<DocVectors>>>,
     /// The last file's units on each side, so consecutive hunks of one file (planning and each
     /// batch walk them in order) extract it once.
@@ -518,8 +519,8 @@ impl StoreRag<'_> {
     }
 
     /// The [`DOC_SEARCH_K`] chunks of the revision's sources closest to `query`, scored against
-    /// [`Self::doc_vectors`]: the first call loads and decrypts them (the connection lock is held
-    /// only for the raw read), every later call of the review reuses them. The cache lock is
+    /// [`Self::doc_vectors`]: the first call validates the sources, every call scans their rows
+    /// in pages (the connection lock is held only for each page's raw read). The cache lock is
     /// released before any store call.
     ///
     /// Declared limit (MS3 §6 loop12): the store work is synchronous SQLite behind a mutex, so
@@ -2023,9 +2024,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_multi_batch_review_decrypts_the_allowed_vectors_once() {
-        // [MS3 final review I3] The allowed vectors are decrypted once per review, never once per
-        // batch, and every batch is served the same documentation.
+    async fn a_multi_batch_review_scans_the_allowed_vectors_per_batch_and_serves_the_same() {
+        // [MS3 final review I3; superseded by the loop16 R1 controller ruling] The decrypted
+        // vectors are no longer cached for the whole review (that held every allowed vector at
+        // once): each batch scans them in pages, so each decrypts each allowed row once, and
+        // every batch is served the same documentation.
         let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
         f.docs
             .reindex(
@@ -2059,8 +2062,8 @@ mod tests {
         }
         assert_eq!(
             f.docs.vector_decrypts() - before,
-            2,
-            "each allowed row once"
+            2 * 3,
+            "each allowed row once per batch"
         );
         assert_eq!(served[0].len(), 2, "{served:?}");
         assert!(served.iter().all(|d| *d == served[0]), "{served:?}");
