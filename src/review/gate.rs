@@ -2853,6 +2853,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_masked_state_that_ends_as_a_threshold_lean_still_names_masked_code() {
+        // [MAGI S6 MS3 loop17, R6b2 Melchior] Every model under its threshold ends the walk as a
+        // `lean`, built with no cause: the guard the state raised (a mask marker) was lost there.
+        let mut c = MockDecisionClient::new();
+        c.expect_decide()
+            .returning(|_| answer("clef:cloud", "false_positive", 0.05));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        let masked = format!(
+            "let k = \"{}github-token>\";\n",
+            crate::review::secrets::REDACTED_OPEN
+        );
+        let v = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some(masked.as_str()),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (v.state, v.cause, v.causes),
+            (
+                GateState::LowConfidence,
+                Some("masked code"),
+                vec!["masked code"]
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn a_quoted_marker_is_never_filtered() {
         // MAGI FIX (MS3 §6 loop14): the declared false trigger of the masked-code guard: clean
         // code, but the finding's own title quotes the mask marker.
