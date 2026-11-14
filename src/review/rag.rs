@@ -131,6 +131,10 @@ pub struct IndexDeclarations {
     pub withheld: usize,
     /// Whether indexing stopped at its cap.
     pub truncated: bool,
+    /// Whether the indexing deadline passed while sources were still being indexed: the
+    /// review runs without documentation, but the groups already written are kept, so a later
+    /// review resumes (a cold index, not a down one).
+    pub still_indexing: bool,
     /// Whether the cut was at the chunk bound (`MAX_DOC_CHUNKS`).
     pub chunk_cap: bool,
     /// Whether the cut was at the byte bound (`MAX_DOC_INDEX_BYTES`).

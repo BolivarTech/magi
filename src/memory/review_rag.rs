@@ -2728,6 +2728,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_indexing_cut_by_its_deadline_is_declared_still_building_not_unavailable() {
+        // [MAGI S6 MS3 loop17, R2 Caspar] A cold index that did not finish inside the bound read
+        // "index unavailable", like a down embedder; progress is kept, and the operator was not
+        // told that a later review resumes.
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        let docs = [(
+            src("README.md", "k"),
+            vec![chunk("README.md", "Usage", "how a works")],
+        )];
+        let mut slow = DocPrep::default();
+        assert!(
+            !index_batch(
+                &f.docs,
+                &docs,
+                &HangingEmbedder,
+                Duration::from_millis(50),
+                &mut slow
+            )
+            .await
+        );
+        assert!(slow.doc_index.still_indexing, "the deadline cut it");
+        let mut down = DocPrep::default();
+        assert!(
+            !index_batch(
+                &f.docs,
+                &docs,
+                &FailingEmbedder,
+                Duration::from_secs(REINDEX_TIMEOUT_SECS),
+                &mut down
+            )
+            .await
+        );
+        assert!(
+            !down.doc_index.still_indexing,
+            "a failure is not a cold index"
+        );
+
+        let mut rag = f.rag(true);
+        rag.docs_unavailable = true;
+        rag.doc_index.still_indexing = true;
+        let a = rag
+            .context_for(&batch_on("a.rs", "fn a() {}"))
+            .await
+            .expect("context");
+        let docs: Vec<&str> = a
+            .trimmed
+            .iter()
+            .filter(|(k, _)| *k == ContextKind::Documentation)
+            .map(|(_, l)| l.as_str())
+            .collect();
+        assert_eq!(
+            docs,
+            vec![
+                "index still being built: the indexing deadline passed; what was indexed is kept \
+                 and a later review resumes it"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn store_refusal_is_declared() {
         // [MAGI S6 MS3 loop9, R2 Caspar] RV22: a source the store's own check refused was only
         // logged; it is declared withheld and leaves the revision's sources.
