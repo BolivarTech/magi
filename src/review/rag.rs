@@ -671,7 +671,8 @@ pub fn definitions_for(
 /// The units that name any of `names` (the changed units), one item per `(file, unit)`, never
 /// the definition nor a unit of the same name (a homonym, a recursive call); at most
 /// [`MAX_CALLERS_PER_NAME`] per name, the first by `(file, line)` among the first
-/// [`MAX_CALLER_SCAN_PER_NAME`] occurrences. Each file is read and split once; one without an
+/// [`MAX_CALLER_SCAN_PER_NAME`] occurrences, and at most [`MAX_CALLERS_TOTAL`] for the batch
+/// (the scan stops at the first caller past it). Each file is read and split once; one without an
 /// extractor, or gone, gives none; a unit already given is not repeated.
 ///
 /// O(occurrences of `names` + S log S per name, S = the scan bound, + bytes of the files read).
@@ -686,8 +687,9 @@ pub fn definitions_for(
 ///
 /// # Returns
 ///
-/// The `Caller` items (labelled with the caller unit's name), and the names whose callers the
-/// cap cut, in `names` order, for the caller to declare; an unreadable file gives none.
+/// The `Caller` items (labelled with the caller unit's name), and the [`RetrievalCuts`]: the
+/// names whose callers the per-name cap or scan bound cut, in `names` order, and whether the
+/// batch total was reached; an unreadable file gives none.
 pub fn callers_for(
     names: &[&str],
     index: &LexicalIndex,
@@ -699,7 +701,8 @@ pub fn callers_for(
     let mut capped = Vec::new();
     let mut seen: HashSet<(String, u32, u32)> = HashSet::new();
     let mut files: HashMap<String, Option<FileUnits>> = HashMap::new();
-    for name in names {
+    let mut total = false;
+    'names: for name in names {
         let mut places: Vec<(&str, u32)> = index.occurrences(name).collect();
         // MAGI FIX (MS3 §6 loop11): only the first MAX_CALLER_SCAN_PER_NAME are inspected, in
         // O(occurrences) (a selection, not a full sort); a cut scan is declared.
@@ -752,6 +755,12 @@ pub fn callers_for(
                 over = true;
                 break;
             }
+            // MAGI FIX (MS3 §6 loop17, R2 Caspar): the batch total, met with a caller still to
+            // add, ends the scan; said once.
+            if items.len() >= MAX_CALLERS_TOTAL {
+                total = true;
+                break 'names;
+            }
             seen.insert(key);
             kept += 1;
             items.push(unit_item(ContextKind::Caller, unit));
@@ -764,7 +773,7 @@ pub fn callers_for(
         items,
         RetrievalCuts {
             per_name: capped,
-            total: false,
+            total,
         },
     )
 }
