@@ -1024,7 +1024,8 @@ fn listed(text: &str) -> String {
 /// stops at the first free spelling, so it reaches at most `taken.len() + 2`; `taken` is held in
 /// memory, so that is far below `usize::MAX` and the loop ends before a saturating add could
 /// repeat a value. The counter is still `checked_add`: running out is a typed
-/// [`KeySuffixesExhausted`] from [`distinct_key_from`], which this function maps to a fixed key.
+/// `KeySuffixesExhausted` from `distinct_key_from` (both crate-private), which this function maps
+/// to a fixed key.
 ///
 /// # Arguments
 /// * `taken` - The object the key goes into.
