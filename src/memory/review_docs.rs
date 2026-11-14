@@ -942,10 +942,10 @@ impl ReviewDocStore {
             .collect();
         let mut rows = self.load_chunks(&wanted)?;
         let mut hits = Vec::with_capacity(scored.len());
-        let mut vanished = gone_rows;
+        let mut hits_missed = 0usize;
         for (score, key, hash) in scored {
             let Some((path, section, text)) = rows.remove(&(key.clone(), hash.clone())) else {
-                vanished += 1;
+                hits_missed += 1;
                 continue;
             };
             let path = self.unseal(&path)?.to_string();
@@ -966,8 +966,8 @@ impl ReviewDocStore {
         }
         let loss = DocLoss {
             sources_gone: vectors.vanished_sources(),
-            rows_gone: 0,
-            hits_missed: vanished,
+            rows_gone: gone_rows,
+            hits_missed,
         };
         Ok((hits, loss))
     }
