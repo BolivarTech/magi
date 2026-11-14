@@ -2548,6 +2548,14 @@ mod tests {
     }
 
     #[test]
+    fn the_divergence_warning_names_both_causes() {
+        // [MAGI S6 MS3 loop17, R6a1] the count cannot tell drift from a secret that spans a line
+        // break (a worktree review reads the diff and the sides at different moments).
+        assert!(DIVERGENCE_WARNING.contains("changed after the diff was read"));
+        assert!(DIVERGENCE_WARNING.contains("spans a line break"));
+    }
+
+    #[test]
     fn a_benign_binary_listed_twice_is_never_declared_a_secret() {
         // [MAGI S6 MS3 loop17, R6a2 Caspar] a binary side holding a pattern's opening (`://`
         // is in nearly every real binary) is held raw, fail closed; the refusal of its second
