@@ -6,6 +6,7 @@
 import io
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -549,6 +550,38 @@ class RelayBeforeSetupTests(unittest.TestCase):
                 executor._prepare_review_workspace(definition)
         self.assertEqual([], spent)
         self.assertIn("off the relay", executor._unrunnable_cause)
+
+    def test_the_dry_run_reports_environment_limits_but_never_hides_a_harness_defect(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1): every HarnessError became a "could not stage" problem,
+        # so a harness defect was reported as the environment's refusal instead of exit 3.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "magi.toml"
+            config.write_text('base_url = "http://a/v1"\n', encoding="utf-8")
+            with mock.patch.object(runs, "_staging_problems", side_effect=HarnessError("defect")):
+                with self.assertRaises(HarnessError):
+                    runs.relay_staging_problems(config)
+            with mock.patch.object(runs, "_staging_problems",
+                                   side_effect=runs.RelayUnavailable("two endpoints")):
+                self.assertEqual(1, len(runs.relay_staging_problems(config)))
+
+    def test_the_dry_run_url_has_the_shape_of_the_relays(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1): the dry run is only a dry run of the live staging if the
+        # address it aims at is written the way the relay's own is.
+        shape = re.compile(r"http://127\.0\.0\.1:[0-9]+/v1")
+        self.assertRegex(runs._STAGING_DRY_RUN_URL, shape)
+        with runs.recording_relay("http://127.0.0.1:1/v1") as (url, _):
+            self.assertRegex(url, shape)
+
+    def test_the_embedder_rewrite_refuses_a_change_beyond_its_endpoint(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1): a header line inside a multi-line string took the added
+        # endpoint line into the string; the result was valid TOML and a different value.
+        text = 'note = """\n[embedding]\nmodel = "m"\n"""\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "magi.toml"
+            path.write_text(text, encoding="utf-8")
+            with self.assertRaises(HarnessError):
+                runs.point_embedding_at(path, "http://127.0.0.1:1/v1")
+            self.assertEqual(text, path.read_text(encoding="utf-8"), "left as it was")
 
     def test_a_plain_configuration_stages_and_an_unreadable_one_is_a_problem(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

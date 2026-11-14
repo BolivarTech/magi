@@ -324,7 +324,7 @@ class Runner:
                 ], True
         # MAGI FIX (MS3 §6 loop13): a run the environment could not stage says nothing.
         # MAGI FIX (MS3 §6 loop14, R7a1): every such run is named, not only the first.
-        unstaged = [(run_id, getattr(result, "not_runnable", ""))
+        unstaged = [(run_id, result.not_runnable)
                     for run_id, result in self._runs_for(entry).items() if result is not None]
         unstaged = [(run_id, cause) for run_id, cause in unstaged if cause]
         if unstaged:
