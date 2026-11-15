@@ -37,11 +37,14 @@ pub(super) fn fallback_diff(diff: &str, new: Option<&[u8]>, old: Option<&[u8]>) 
     // MAGI FIX (MS3 §6 loop17, R6a1): the one egress predicate, over the raw text and over what
     // each side would have shown with the markers off: a ` `, `+` or `-` before a line is not
     // whitespace, so a name and its value on neighbouring added (or deleted) lines were no pair.
-    let [shown_new, shown_old] = side_projections(&masked);
-    [&masked, &shown_new, &shown_old]
-        .iter()
-        .all(|text| !leaks_secret(text))
-        .then_some(masked)
+    (!diff_leaks(&masked)).then_some(masked)
+}
+
+/// Whether a diff text fails the one egress predicate ([`leaks_secret`]): over the raw text, and
+/// over each hunk's lines as its new side and its old side would show them, markers removed
+/// ([`hunk_projections`]). A diff for which this is `false` may be served as it is. O(diff).
+pub(super) fn diff_leaks(diff: &str) -> bool {
+    leaks_secret(diff) || hunk_projections(diff).iter().any(|text| leaks_secret(text))
 }
 
 /// How many lines of `diff` carry a `<redacted: …>` placeholder: the lines of a masked file's
@@ -53,21 +56,31 @@ pub(super) fn redacted_line_count(diff: &str) -> usize {
         .count()
 }
 
-/// The lines of `diff`'s hunks as the new side would show them (context and added) and as the old
-/// side would (context and deleted), marker removed, in order. O(diff).
-fn side_projections(diff: &str) -> [String; 2] {
+/// Each hunk of `diff`, as the new side would show its lines (context and added) and as the old
+/// side would (context and deleted), marker removed, in order: two texts per non-empty hunk. A
+/// projection ends at every `@@` and at every section header, since the lines on either side of
+/// a hunk boundary are not neighbours in the file (a name ending one hunk and a value opening the
+/// next are no pair). O(diff).
+// MAGI FIX (MS3 §6 loop18, R6a1): one projection ran on across hunks and refused a clean file.
+fn hunk_projections(diff: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let (mut new, mut old) = (String::new(), String::new());
+    let mut flush = |new: &mut String, old: &mut String| {
+        for text in [new, old] {
+            if !text.is_empty() {
+                out.push(std::mem::take(text));
+            }
+        }
+    };
     let mut in_hunk = false;
     for line in diff.split_inclusive('\n') {
-        if line.starts_with(HUNK_START) {
-            in_hunk = true;
-        } else if line.starts_with(SECTION_START) {
-            in_hunk = false;
+        let opens = line.starts_with(HUNK_START);
+        if opens || line.starts_with(SECTION_START) {
+            flush(&mut new, &mut old);
+            in_hunk = opens;
+            continue;
         }
-        let Some((marker, text)) = line
-            .split_at_checked(1)
-            .filter(|_| in_hunk && !line.starts_with(HUNK_START))
-        else {
+        let Some((marker, text)) = line.split_at_checked(1).filter(|_| in_hunk) else {
             continue;
         };
         if matches!(marker, " " | "+") {
@@ -77,7 +90,8 @@ fn side_projections(diff: &str) -> [String; 2] {
             old.push_str(text);
         }
     }
-    [new, old]
+    flush(&mut new, &mut old);
+    out
 }
 
 /// `diff` masked by line, when [`rebuilt_diff`] cannot rebuild it. Private on purpose: its output
