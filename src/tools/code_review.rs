@@ -647,7 +647,7 @@ fn egress_safe(r: Rendered) -> Rendered {
 /// reorder or hide text ([`is_hidden_format_char`]: a bidi override, a zero-width space), so an
 /// escape sequence a model echoes from the reviewed code arrives as inert text (`ESC [2J`
 /// becomes `[2J`). The JSON forms escape control characters themselves and drop the same format
-/// characters in [`masked_json`]. O(len of `text`).
+/// characters in the JSON backstop (`map_json_text` with [`egress_text`]). O(len of `text`).
 ///
 /// # Arguments
 /// * `text` - The text about to reach the screen.
@@ -706,20 +706,6 @@ pub(crate) fn surface_text(e: &dyn std::fmt::Display) -> String {
     egress_text(&crate::agent::Agent::sanitize_text(&e.to_string()))
 }
 
-/// `value` with every string and key passed through [`mask_secrets`], after [`terminal_safe`]
-/// drops every C0 and C1 control but `\n`/`\t` and every format character that reorders or hides
-/// text, as the text form does: serde escapes C0 controls but writes C1 (U+009B) as is, and a
-/// control inside a key would hide it from the detector (`json_drops_c1_controls`). O(size).
-// MAGI FIX (MS3 §6 loop4): a bidi override reached the JSON envelope; only the text dropped it.
-fn masked_json(value: Value) -> Value {
-    map_json_text(
-        value,
-        // MAGI FIX (MS3 §6 loop11): C1 controls (serde writes them raw) went out too.
-        &|text| mask_secrets(&terminal_safe(text)),
-        true,
-    )
-}
-
 /// `value` with every string redacted. O(size of `value`).
 fn redacted_json(value: Value) -> Value {
     map_json_text(
@@ -774,9 +760,9 @@ pub(crate) fn envelope_fields(r: &Rendered) -> (String, Value, Value) {
     (
         // MAGI FIX (MS3 §6 loop14): the canonical order, strip first (a hidden character inside a
         // credential would otherwise hide it from the redaction), then redact, then mask.
-        mask_secrets(redact_foreign_text(&terminal_safe(&r.text)).as_str()),
-        redacted_json(masked_json(r.consult.clone())),
-        redacted_json(masked_json(r.json.clone())),
+        egress_text(&r.text),
+        map_json_text(r.consult.clone(), &egress_text, true),
+        map_json_text(r.json.clone(), &egress_text, true),
     )
 }
 
@@ -1371,7 +1357,7 @@ impl Tool for CodeReviewTool {
         Ok(bounded_result(
             // MAGI FIX (MS3 §6 loop11): stripped, then masked, as `egress_safe` orders it.
             egress_text(&report).as_str(),
-            masked_json(redacted_json(rendered.json)),
+            map_json_text(rendered.json, &egress_text, true),
             self.output_cap,
         ))
     }
@@ -2884,7 +2870,11 @@ mod tests {
         // MAGI FIX (MS3 §6 loop11): serde escapes C0 but writes C1 (U+009B CSI, U+009D OSC)
         // as is; one in a key or inside a secret reached stdout or hid the secret.
         let key = concat!("sk-ant-api03-", "AAAAAAAAAA\u{9b}AAAAAAAAAA"); // allow-secret-scan
-        let v = masked_json(serde_json::json!({ "a\u{9d}b": format!("x\u{9b}2Jy {key}") }));
+        let v = map_json_text(
+            serde_json::json!({ "a\u{9d}b": format!("x\u{9b}2Jy {key}") }),
+            &egress_text,
+            true,
+        );
         let shown = v.to_string();
         assert!(
             !shown.contains('\u{9b}') && !shown.contains('\u{9d}'),
@@ -4563,7 +4553,7 @@ mod tests {
         // and the map kept only the last field.
         let a = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
         let b = concat!("sk-ant-", "api03-", "BBBBBBBBBBBBBBBBBBBB"); // allow-secret-scan
-        let masked = masked_json(json!({ a: 1, b: 2 }));
+        let masked = map_json_text(json!({ a: 1, b: 2 }), &egress_text, true);
         let fields = masked.as_object().expect("an object");
         assert_eq!(fields.len(), 2, "{masked}");
         let mut values: Vec<i64> = fields.values().filter_map(Value::as_i64).collect();
