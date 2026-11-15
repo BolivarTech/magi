@@ -1637,6 +1637,8 @@ pub(crate) fn withheld_corpus() -> Vec<String> {
         format!("{b}RSA PRIVATE KEY\u{200b}{d}\nMIIBOg\n"),
         format!("{b}RSA PRIVATE KEY\t{d}\nMIIBOg\n"),
         format!("{b}RSA {k}\nMIIBOg\n").to_ascii_lowercase(),
+        format!("{d}  BEGIN RSA {k}\nMIIBOg\n"),
+        format!("{d}\tBEGIN RSA {k}\nMIIBOg\n"),
         token("\u{200b}"),
         token("\t"),
         token("\u{202e}"),
