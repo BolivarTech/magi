@@ -2251,7 +2251,6 @@ fn record_history(
         return Err(NOT_A_FULL_SHA.to_string());
     }
     let budget = reclassification_budget(git, sha, budget);
-    let budget = reclassification_budget(git, sha, budget);
     let entries = entries_from_review(findings, sha);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
