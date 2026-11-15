@@ -532,6 +532,27 @@ mod tests {
     }
 
     #[test]
+    fn a_pair_split_across_two_hunks_is_not_a_secret() {
+        // [MAGI S6 MS3 loop18, R6a1 Melchior] the side projections ran on across `@@`: a name
+        // that ends one hunk and a value that opens the next read as one pair, and a clean file
+        // was left out as `secret`. Each hunk is projected on its own.
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let side = format!("aws_secret_key =\nfn a() {{}}\nfn b() {{}}\n\"{value}\"\n");
+        assert!(!leaks_secret(&side), "premise: the side is clean");
+        let diff = format!("@@ -1,1 +1,1 @@\n+aws_secret_key =\n@@ -4,1 +4,1 @@\n+\"{value}\"\n");
+        assert!(!leaks_secret(&diff), "premise: the raw diff is clean");
+        let out = fallback_diff(&diff, Some(side.as_bytes()), Some(side.as_bytes()));
+        assert_eq!(out.as_deref(), Some(diff.as_str()));
+        // The pair inside one hunk is still refused.
+        let one = format!("@@ -1,2 +1,2 @@\n+aws_secret_key =\n+\"{value}\"\n");
+        let joined = format!("aws_secret_key =\n\"{value}\"\n");
+        assert_eq!(
+            fallback_diff(&one, Some(joined.as_bytes()), Some(side.as_bytes())),
+            None
+        );
+    }
+
+    #[test]
     fn crlf_side_lines_match_a_crlf_diff_without_a_divergence() {
         // [MAGI S6 MS3 loop15, R6a1] a side line keeps its `\r` as git shows it, so a CRLF file's
         // diff lines (which carry the same `\r`) match their side lines: no divergence is
