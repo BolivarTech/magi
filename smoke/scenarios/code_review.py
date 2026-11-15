@@ -316,7 +316,7 @@ def verdict(texts, index, run_id, held, detail):
         Finding: ``PASS`` when *held*, otherwise ``FAIL`` carrying *detail*.
     """
     return finding(texts, index, Outcome.PASS if held else Outcome.FAIL,
-                    run_id, "" if held else detail)
+                   run_id, "" if held else detail)
 
 
 def all_cannot_test(texts, run_id, detail):
@@ -397,7 +397,7 @@ def refusal(texts, run_id, run, stderr_ok, stderr_detail):
         return
     code = run.output.exit_code
     yield verdict(texts, 0, run_id, code == EXIT_MISUSE,
-                   "exited %d, expected %d" % (code, EXIT_MISUSE))
+                  "exited %d, expected %d" % (code, EXIT_MISUSE))
     yield verdict(texts, 1, run_id, stderr_ok(_stderr_text(run)), stderr_detail)
 
 
@@ -671,19 +671,19 @@ def _locations_finding(section, run_id):
         return finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id, failure)
     if not all(isinstance(f, dict) for f in findings):
         return finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id,
-                        "code_review.findings holds an entry that is not an object")
+                       "code_review.findings holds an entry that is not an object")
     # MAGI FIX (S6 loop 10): a line with no file was dropped from every check,
     # so a report of only such findings read as CANNOT_TEST (F1a-c1).
     fileless = [f.get("line") for f in findings
                 if f.get("file") is None and f.get("line") is not None]
     if fileless:
         return finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id,
-                        "findings carry a line but no file: %s" % fileless)
+                       "findings carry a line but no file: %s" % fileless)
     located = [f for f in findings if f.get("file") is not None]
     if not located:
         return finding(S47_ASSERTIONS, 4, Outcome.CANNOT_TEST, run_id,
-                        "the trio reported no located finding, so there is "
-                        "no location to check")
+                       "the trio reported no located finding, so there is "
+                       "no location to check")
     counts = runs.review_gen_line_counts()
     # MAGI FIX (S6 loop 10): S49 and S51 read a backslash as "/", S47 did
     # not, so a Windows rendering of a generated file false-FAILed (F1a-b1).
@@ -691,11 +691,11 @@ def _locations_finding(section, run_id):
                if slashed(f.get("file")) not in S47_FILES]
     if outside:
         return finding(S47_ASSERTIONS, 4, Outcome.FAIL, run_id,
-                        "findings point outside the reviewed files: %s" % outside)
+                       "findings point outside the reviewed files: %s" % outside)
     beyond = [(f["file"], f.get("line")) for f in located
               if not _line_inside(f.get("line"), counts[slashed(f["file"])])]
     return verdict(S47_ASSERTIONS, 4, run_id, not beyond,
-                    "findings point outside the lines of their file: %s" % beyond)
+                   "findings point outside the lines of their file: %s" % beyond)
 
 
 def slashed(path):
@@ -881,7 +881,7 @@ def a_large_review_yields_one_report(run):
     """
     if run is None:
         yield from all_cannot_test(S47_ASSERTIONS, "R12",
-                                    "run R12 produced no capture to inspect")
+                                   "run R12 produced no capture to inspect")
         return
     code = run.output.exit_code
     try:
@@ -890,7 +890,7 @@ def a_large_review_yields_one_report(run):
         yield verdict(S47_ASSERTIONS, 0, "R12", code == EXIT_OK, "exited %d" % code)
         for index in range(1, len(S47_ASSERTIONS)):
             yield finding(S47_ASSERTIONS, index, Outcome.FAIL, "R12",
-                           "stdout is not a JSON document: %s" % exc)
+                          "stdout is not a JSON document: %s" % exc)
         return
     # MAGI FIX (S6 loop 15): F1a2-m2/c1 read document.get as able to meet a
     # JSON array or scalar. It cannot: ProductOutput.json raises
@@ -916,11 +916,11 @@ def a_large_review_yields_one_report(run):
     # included, and a repeated key was dropped by the parser (F1a-c3).
     if lost:
         yield finding(S47_ASSERTIONS, 3, Outcome.CANNOT_TEST, "R12",
-                       "no consensus: " + lost_detail)
+                      "no consensus: " + lost_detail)
     else:
         yield verdict(S47_ASSERTIONS, 3, "R12",
-                       _consensus_ok(consult, run.output.stdout),
-                       "consult.consensus is not one consensus report object")
+                      _consensus_ok(consult, run.output.stdout),
+                      "consult.consensus is not one consensus report object")
     yield _locations_finding(section, "R12")
 
 
@@ -940,10 +940,10 @@ def a_hostile_path_is_refused(run):
         Finding: One per entry of :data:`S48_ASSERTIONS`, in that order.
     """
     yield from refusal(S48_ASSERTIONS, "R13", run,
-                        lambda text: OUTSIDE_WORKSPACE_TEXT in text
-                        and runs.REVIEW_OUTSIDE_COMPONENT in text,
-                        "stderr does not name %s as outside the workspace"
-                        % runs.REVIEW_OUTSIDE_COMPONENT)
+                       lambda text: OUTSIDE_WORKSPACE_TEXT in text
+                       and runs.REVIEW_OUTSIDE_COMPONENT in text,
+                       "stderr does not name %s as outside the workspace"
+                       % runs.REVIEW_OUTSIDE_COMPONENT)
 
 
 @scenario("S49", assertions=S49_ASSERTIONS, run="R14",
@@ -960,10 +960,10 @@ def only_skipped_files_are_nothing_to_review(run):
     # MAGI FIX (S6 loop 6): the phrase alone passed a refusal that left out
     # both files with the wrong causes, or none at all (F1a-c4).
     yield from refusal(S49_ASSERTIONS, "R14", run,
-                        lambda text: NOTHING_TO_REVIEW_TEXT in text
-                        and _skipped_as_expected(text),
-                        "stderr does not say there is nothing to review with "
-                        "%s left out" % ", ".join(
+                       lambda text: NOTHING_TO_REVIEW_TEXT in text
+                       and _skipped_as_expected(text),
+                       "stderr does not say there is nothing to review with "
+                       "%s left out" % ", ".join(
                             "%s (%s)" % entry for entry in S49_EXPECTED_OMISSIONS))
     if run is not None and not run.timed_out:
         yield _secret_finding(run)
@@ -997,11 +997,11 @@ def _secret_finding(run):
               if any(n in body for n in needles for body in bodies)]
     if leaked:
         return finding(S49_ASSERTIONS, 2, Outcome.FAIL, "R14",
-                        "the toy secret appears in %s" % ", ".join(leaked))
+                       "the toy secret appears in %s" % ", ".join(leaked))
     if run.review_log_unreadable:
         return finding(S49_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R14",
-                        "the run log could not be read whole: %s"
-                        % ", ".join(run.review_log_unreadable))
+                       "the run log could not be read whole: %s"
+                       % ", ".join(run.review_log_unreadable))
     return finding(S49_ASSERTIONS, 2, Outcome.PASS, "R14")
 
 
@@ -1033,13 +1033,13 @@ def an_insufficient_timeout_is_refused_before_spending(run):
         return
     code = run.output.exit_code
     yield verdict(S50_ASSERTIONS, 0, "R15", code == EXIT_MISUSE,
-                   "exited %d, expected %d" % (code, EXIT_MISUSE))
+                  "exited %d, expected %d" % (code, EXIT_MISUSE))
     match = BUDGET_PATTERN.search(_stderr_text(run))
     yield verdict(S50_ASSERTIONS, 1, "R15", _budget_fields_ok(match),
-                   "stderr does not carry a budget refusal whose batches, "
-                   "wall clock, need, %d s floor, ceiling and minimum agree "
-                   "with the %d s asked for"
-                   % (FLOOR_SECS, runs.REVIEW_TOO_SHORT_TIMEOUT_S))
+                  "stderr does not carry a budget refusal whose batches, "
+                  "wall clock, need, %d s floor, ceiling and minimum agree "
+                  "with the %d s asked for"
+                  % (FLOOR_SECS, runs.REVIEW_TOO_SHORT_TIMEOUT_S))
     yield _run_log_finding(run, match)
 
 
@@ -1132,7 +1132,7 @@ def _run_log_finding(run, match):
     run_id = logs.resolve_id(run.output)
     if run_id is None:
         return finding(S50_ASSERTIONS, 2, Outcome.FAIL, "R15",
-                        "the run published no run id, so its log lines cannot be told apart")
+                       "the run published no run id, so its log lines cannot be told apart")
     # MAGI FIX (S6 loop 3): the log captured at run time, not the live directory (F4).
     captured = run.review_log
     # MAGI FIX (S6 loop 7): the needle comes from logs.run_needle, which the
@@ -1152,19 +1152,19 @@ def _run_log_finding(run, match):
 
     if captured is None:
         return finding(S50_ASSERTIONS, 2, Outcome.FAIL, "R15",
-                        "the review workspace has no %s directory, so the refusal "
-                        "was never logged" % "/".join(logs.LOG_DIR_PARTS))
+                       "the review workspace has no %s directory, so the refusal "
+                       "was never logged" % "/".join(logs.LOG_DIR_PARTS))
     found = any(matcher(data) for data in captured)
     # MAGI FIX (S6 loop 12): a log file the executor could not open is the
     # environment refusing, as in logs.scan, never a product FAIL (F1a-c2).
     if not found and run.review_log_unreadable:
         return finding(S50_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R15",
-                        "no readable line of the run log carries the refusal, "
-                        "and these files could not be read: %s"
-                        % ", ".join(run.review_log_unreadable))
+                       "no readable line of the run log carries the refusal, "
+                       "and these files could not be read: %s"
+                       % ", ".join(run.review_log_unreadable))
     return verdict(S50_ASSERTIONS, 2, "R15", found,
-                    "no line of the run log carries run=%s and the budget refusal"
-                    % run_id)
+                   "no line of the run log carries run=%s and the budget refusal"
+                   % run_id)
 
 
 def _is_protected(path):
@@ -1332,11 +1332,11 @@ def the_workspace_root_never_reviews_magi_or_git(run):
         return
     code = run.output.exit_code
     yield verdict(S51_ASSERTIONS, 0, "R16", code == EXIT_MISUSE,
-                   "exited %d, expected %d" % (code, EXIT_MISUSE))
+                  "exited %d, expected %d" % (code, EXIT_MISUSE))
     stderr = _stderr_text(run)
     yield verdict(S51_ASSERTIONS, 1, "R16", NOTHING_TO_REVIEW_TEXT in stderr,
-                   "stderr does not say there is nothing to review, so a file "
-                   "of the root was taken for review")
+                  "stderr does not say there is nothing to review, so a file "
+                  "of the root was taken for review")
     yield _exclusion_finding(run, stderr)
 
 
@@ -1376,7 +1376,7 @@ def _exclusion_finding(run, stderr):
         return finding(S51_ASSERTIONS, 2, Outcome.FAIL, "R16", failure)
     if read:
         return finding(S51_ASSERTIONS, 2, Outcome.FAIL, "R16",
-                        "protected paths were read and classified: %s" % read)
+                       "protected paths were read and classified: %s" % read)
     if not run.protected_visible:
         return finding(
             S51_ASSERTIONS, 2, Outcome.CANNOT_TEST, "R16",
@@ -1438,9 +1438,9 @@ def _exclusion_finding(run, stderr):
     # intersection alone passed a list naming one of three.
     missing = sorted(stable - named)
     return verdict(S51_ASSERTIONS, 2, "R16", found and not missing,
-                    "git lists %s, and stderr does not name %s as ignored"
-                    % (", ".join(run.protected_visible),
-                       ", ".join(missing) if found else "any of them"))
+                   "git lists %s, and stderr does not name %s as ignored"
+                   % (", ".join(run.protected_visible),
+                      ", ".join(missing) if found else "any of them"))
 
 #: The public name sibling scenarios (``review_masking``) read lists through: a refactor of the
 #: private name fails at import, never in silence (MAGI FIX, MS3 §6 loop10). ``tests/test_rust_sync.py``
