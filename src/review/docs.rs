@@ -170,6 +170,19 @@ pub const SYMLINK_MODE: &str = "120000";
 /// The three quote characters of a Python docstring opener.
 const PY_TRIPLE_QUOTES: [&str; 2] = ["\"\"\"", "'''"];
 
+/// The Markdown file extension, compared in any ASCII case.
+const MARKDOWN_EXTENSION: &str = ".md";
+
+/// Whether `path` names a Markdown file: the `.md` extension in any ASCII case (`README.MD`).
+/// The one extension test shared by [`is_doc_source`], [`yields_doc_chunks`] and [`chunk_source`].
+// MAGI FIX (S6 loop 18, R1): the chunk predicates compared `.md` exactly.
+fn is_markdown_path(path: &str) -> bool {
+    path.len() >= MARKDOWN_EXTENSION.len()
+        && path
+            .get(path.len() - MARKDOWN_EXTENSION.len()..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(MARKDOWN_EXTENSION))
+}
+
 /// Whether `path` is a Markdown documentation source by path: `README.md` or `CLAUDE.md` at the
 /// root, or a `.md` under `docs/` or `adr/`. Other files there (`.rst`, `.txt`) are not indexed,
 /// a declared limit (`docs_txt_is_not_a_doc_source`).
@@ -192,7 +205,7 @@ pub fn is_doc_source(path: &str) -> bool {
     // MAGI FIX (S6 loop 17, R1): compared in ASCII lower case, as Windows and macOS file systems
     // are (`Readme.md`); the stored path keeps its own case.
     let lower = path.to_ascii_lowercase();
-    lower.ends_with(".md")
+    is_markdown_path(&lower)
         && DOC_SOURCES.iter().any(|s| {
             let s = s.to_ascii_lowercase();
             if s.ends_with('/') {
@@ -993,7 +1006,7 @@ fn doc_comment_language(path: &str, registry: &LanguageRegistry) -> Option<DocCo
 // MAGI FIX (Loop1 r2, Minor 1): every file with an extractor was read to key the index,
 // though only Rust and Python give doc-comment chunks.
 pub fn yields_doc_chunks(path: &str, registry: &LanguageRegistry) -> bool {
-    if path.ends_with(".md") {
+    if is_markdown_path(path) {
         is_doc_source(path)
     } else {
         doc_comment_language(path, registry).is_some()
@@ -1016,7 +1029,7 @@ pub fn yields_doc_chunks(path: &str, registry: &LanguageRegistry) -> bool {
 ///
 /// The chunks, possibly none.
 pub(crate) fn chunk_source(path: &str, text: &str, registry: &LanguageRegistry) -> Vec<DocChunk> {
-    if path.ends_with(".md") {
+    if is_markdown_path(path) {
         if is_doc_source(path) {
             chunk_markdown(path, text)
         } else {
