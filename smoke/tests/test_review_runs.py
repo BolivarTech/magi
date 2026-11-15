@@ -187,6 +187,39 @@ class ReviewRunDefinitionTests(unittest.TestCase):
                     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                     opener.open(url + "/embeddings", timeout=5)
 
+    def test_the_embedder_backend_records_the_requests_it_answers(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1 Melchior): the served error's count was never kept.
+        import urllib.error
+        import urllib.request
+        log = runs.RequestLog()
+        with tempfile.TemporaryDirectory() as tmp:
+            config = pathlib.Path(tmp) / "magi.toml"
+            config.write_text('[embedding]\nbase_url = "http://emb/v1"\n', encoding="utf-8")
+            with runs.embedder_pointed_away(config, log) as url:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    opener.open(urllib.request.Request(url + "/embeddings", data=b"{}", method="POST"),
+                                timeout=5)
+                caught.exception.close()
+        self.assertEqual(1, log.total)
+
+    def test_the_executor_collects_what_the_embedder_backend_answered(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1 Melchior): R17 and R22 leave `backend_requests` None
+        # without it. A stand-in for the pointed-away block records two requests.
+        import contextlib
+
+        @contextlib.contextmanager
+        def pointed(_path, log=None):
+            log.record("POST", "/embeddings")
+            log.record("POST", "/embeddings")
+            yield "http://127.0.0.1:1/v1"
+
+        executor = runs.RunExecutor(None, None, None)
+        with mock.patch.object(runs, "embedder_pointed_away", pointed):
+            with executor._embedder_away(runs.DEFINITIONS["R17"], pathlib.Path("workspace")):
+                pass
+        self.assertEqual(2, sum(executor._reached))
+
     def test_a_dotted_or_inline_embedding_config_is_refused_with_its_cause(self) -> None:
         # [MAGI S6 MS3 loop4, R7a Caspar] The rewrite is line-based and knows the `[embedding]`
         # table only; a dotted key or an inline table would get a second table appended and the

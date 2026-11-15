@@ -966,6 +966,18 @@ class CodeReviewWithoutEmbedderTests(unittest.TestCase):
         doc = {"consult": {"consensus": {}}, "code_review": {"without_embedder": False}}
         self.assertEqual(Outcome.FAIL, _outcomes("S52", _result("R17", 0, doc))[review_context.S52_ASSERTIONS[1]])
 
+    def test_s52_judges_the_declaration_only_when_the_embedder_was_asked(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1 Melchior): a declaration with no request behind it proves
+        # nothing about degradation; an uncollected count cannot be judged, a zero count contradicts it.
+        doc = {"consult": {"consensus": {}},
+               "code_review": {"without_embedder": True,
+                               "trimmed": [{"kind": "documentation",
+                                            "label": review_context.DEGRADED_LABELS[0]}]}}
+        for count, expected in ((None, Outcome.CANNOT_TEST), (0, Outcome.FAIL), (2, Outcome.PASS)):
+            with self.subTest(count=count):
+                outcome = _outcomes("S52", _result("R17", 0, doc, backend_requests=count))
+                self.assertEqual(expected, outcome[review_context.S52_ASSERTIONS[1]])
+
     def test_s49_omissions_any_order(self) -> None:
         # MAGI FIX (MS3 §6 loop13, R7a Caspar): false positive. The comparison sorts both sides, so
         # the product's enumeration order (renamed files sort differently) cannot turn S49 red,

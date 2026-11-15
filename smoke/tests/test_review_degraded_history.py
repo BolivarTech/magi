@@ -87,6 +87,14 @@ class DegradedHistoryScenarioTests(unittest.TestCase):
     def test_a_missing_capture_or_setup_is_cannot_test(self) -> None:
         self.assertEqual([C, C, C], _judged(_with(_run(_degraded()), setup_outputs=())))
 
+    def test_the_declaration_is_judged_only_when_the_embedder_was_asked(self) -> None:
+        # MAGI FIX (MS3 §6 loop17, R7a1 Melchior): same rule as S52, so a degraded embedder that
+        # received no request cannot pass on the product's output alone.
+        for count, expected in ((None, C), (0, F), (3, P)):
+            with self.subTest(count=count):
+                run = _with(_run(_degraded()), backend_requests=count)
+                self.assertEqual([P, expected, P], _judged(run))
+
     def test_no_seeded_finding_leaves_the_history_declaration_cannot_test(self) -> None:
         # MAGI FIX (MS3 §6 loop17, R7a1 Caspar): with no located finding in the first review
         # there is no history to be unretrievable; that is the trio's answer, not a product FAIL.

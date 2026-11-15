@@ -339,7 +339,8 @@ R18_HEALTHY_REQUESTS = tuple(
 
 
 def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: bytes = b"",
-                    timed_out: bool = False, protected_visible=None, requests=None):
+                    timed_out: bool = False, protected_visible=None, requests=None,
+                    backend_requests="default"):
     """A real ``RunResult`` for *run_id* whose stdout is *document* serialised.
 
     [MAGI S6 MS3 loop7, R7b Balthasar] Moved here from the code-review scenario
@@ -356,11 +357,15 @@ def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: byte
             :data:`R16_PROTECTED` for R16 and to nothing for every other run.
         requests: What the recording relay saw, ``(path, body)`` pairs; defaults to
             :data:`R18_HEALTHY_REQUESTS` for R18 and to nothing recorded (``()``) otherwise.
+        backend_requests: How many requests the error backend answered; the default is one
+            for R17 and R22 (their embedder was asked) and ``None`` (not collected) otherwise.
 
     Returns:
         RunResult: The result.
     """
     from smoke.runs import RunResult
+    if backend_requests == "default":
+        backend_requests = 1 if run_id in ("R17", "R22") else None
     body = b"" if document is None else json.dumps(document).encode()
     if protected_visible is None:
         protected_visible = R16_PROTECTED if run_id == "R16" else ()
@@ -371,6 +376,7 @@ def scenario_result(run_id: str, exit_code: int = 0, document=None, stderr: byte
                                           command=["magi-rs"]),
                      duration_s=1.0, timed_out=timed_out, planted=(),
                      protected_visible=protected_visible, request_bodies=requests,
+                     backend_requests=backend_requests,
                      # MAGI FIX (MS3 §6 loop13): one header record per request, as the relay keeps.
                      request_headers=tuple(b"content-type: application/json\n" for _ in requests))
 
