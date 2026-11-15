@@ -2462,6 +2462,42 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_char_split_token_file_is_reviewed_masked_not_skipped() {
+        // [MAGI S6 MS3 loop18, R6a2 Melchior CRITICAL] a token split by a ZWSP or a tab was held
+        // raw by the cache and the file omitted as `split-secret`; RV22 as amended masks it.
+        let tail = "A".repeat(40);
+        for hidden in ["\u{200b}", "\t"] {
+            let text = format!("let t = \"ghp_AAAA{hidden}{tail}\";\nfn f() {{}}\n"); // allow-secret-scan
+            let inner = MapSource::new(&[("s.rs", text.as_str())], &[]);
+            let src = CachedSource::new(&inner);
+            let files = vec![ReviewFile {
+                path: "s.rs".into(),
+                diff: None,
+            }];
+            let filtered = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+                .expect("filters");
+            assert!(
+                filtered.skipped.is_empty(),
+                "{hidden:?}: {:?}",
+                filtered.skipped
+            );
+            assert_eq!(filtered.kept.len(), 1, "{hidden:?}");
+            assert_eq!(
+                filtered.masked,
+                vec![masked("s.rs", "github-token")],
+                "{hidden:?}"
+            );
+            let served = src.read("s.rs").expect("served").expect("present");
+            let served = String::from_utf8(served).expect("utf-8");
+            assert!(
+                !served.contains("ghp_AAAA") && !served.contains("AAAAAAAAAA"),
+                "{hidden:?}: {served:?}"
+            );
+            assert!(served.contains("fn f() {}"), "{served:?}");
+        }
+    }
+
+    #[test]
     fn many_hunks_stay_near_linear() {
         // [MAGI S6 MS3 loop10, R6a Balthasar] Each hunk's context scanned both whole sides.
         let n = 2_000usize;

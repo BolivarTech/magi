@@ -1170,16 +1170,26 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_holds_raw_every_text_the_one_egress_predicate_withholds() {
+    fn the_cache_never_serves_a_text_the_one_egress_predicate_withholds() {
         // [MAGI S6 MS3 loop17, R6a2/R6a1] `held_side`, the filter, the doc egress and the diff
         // re-scan once asked four different questions; the corpus is shared with them all.
+        // [MAGI S6 MS3 loop18, R6a2] a key block is held raw (its file is omitted); a split
+        // one-line token is served masked, and what is served never satisfies the predicate.
         for text in crate::review::secrets::withheld_corpus() {
             let held = held_side(Some(text.clone().into_bytes()), MAX_MASKED_SIDE_BYTES);
-            assert!(held.raw_secret, "{text:?}");
-            assert!(
-                held.mask.is_none(),
-                "a withheld side is never served masked: {text:?}"
-            );
+            // The corpus's one-line secrets are its split `ghp_` tokens; the rest are key blocks.
+            let key_block = !text.contains("ghp_");
+            assert_eq!(held.raw_secret, key_block, "{text:?}");
+            if held.raw_secret {
+                assert!(
+                    held.mask.is_none(),
+                    "a withheld side is never served masked: {text:?}"
+                );
+            } else {
+                let served = String::from_utf8(held.bytes.expect("served")).expect("utf-8");
+                assert!(held.mask.is_some(), "{text:?}");
+                assert!(!leaks_secret(&served), "{text:?}: {served:?}");
+            }
         }
     }
 
@@ -1199,22 +1209,42 @@ mod tests {
     }
 
     #[test]
-    fn hidden_chars_in_a_secret_hold_it() {
+    fn a_hidden_char_split_token_is_masked_not_omitted() {
         // [MAGI S6 MS3 loop14, R6a2 Melchior CRITICAL] A control or format character inside a
         // token ended its tail, so the contiguous pass masked nothing and the text was served
-        // with both halves readable. Each class below used to leave as it was; now the side is
-        // held raw with a secret, so the filter leaves its file out.
+        // with both halves readable; loop 14 then held such a side raw, so its file was omitted.
+        // [MAGI S6 MS3 loop18, R6a2 Melchior CRITICAL] RV22 as amended masks every one-line
+        // secret and omits only multi-line key blocks: the split token is masked in place (the
+        // hidden character with it), the rest of the file is served and keeps its lines.
         let tail = "A".repeat(40);
-        for hidden in ["\u{200b}", "\u{202e}", "\u{feff}", "\u{7}", "\u{1b}"] {
-            let text = format!("let t = \"ghp_AAAA{hidden}{tail}\";\n"); // allow-secret-scan
+        for hidden in [
+            "\u{200b}", "\u{202e}", "\u{feff}", "\u{7}", "\u{1b}", "\t", "\r",
+        ] {
+            let text = format!("let t = \"ghp_AAAA{hidden}{tail}\";\nfn f() {{}}\n"); // allow-secret-scan
             assert!(
                 crate::review::secrets::find_secret(&text).is_none(),
                 "precondition: the contiguous pass finds nothing: {hidden:?}"
             );
             let held = held_side(Some(text.into_bytes()), MAX_MASKED_SIDE_BYTES);
-            assert!(held.raw_secret, "{hidden:?}");
-            assert!(held.mask.is_none(), "held as read: {hidden:?}");
+            assert!(!held.raw_secret, "masked, not withheld: {hidden:?}");
+            assert_eq!(
+                held.mask.map(|m| m.pattern),
+                Some("github-token"),
+                "{hidden:?}"
+            );
+            let served = String::from_utf8(held.bytes.expect("served")).expect("utf-8");
+            assert!(
+                !served.contains("ghp_AAAA") && !served.contains("AAAAAAAAAA"),
+                "{hidden:?}: {served:?}"
+            );
+            assert!(!leaks_secret(&served), "{hidden:?}: {served:?}");
+            assert!(served.contains("fn f() {}"), "{hidden:?}: {served:?}");
+            assert_eq!(served.matches('\n').count(), 2, "{hidden:?}: {served:?}");
         }
+        let crlf = "fn f() {}\r\n\tlet x = 1;\r\n".as_bytes().to_vec();
+        let clean = held_side(Some(crlf.clone()), MAX_MASKED_SIDE_BYTES);
+        assert!(!clean.raw_secret && clean.mask.is_none());
+        assert_eq!(clean.bytes, Some(crlf));
     }
 
     #[test]
@@ -1244,23 +1274,6 @@ mod tests {
             assert!(held.raw_secret, "{hidden:?}");
             assert!(held.mask.is_none(), "{hidden:?}");
         }
-    }
-
-    #[test]
-    fn a_tab_split_token_is_held() {
-        // [MAGI S6 MS3 loop15, R6a2 Caspar] A tab (and a lone CR) inside a token ended its tail
-        // like a NUL does; the hidden-character pass now strips them too.
-        let tail = "A".repeat(40);
-        for blank in ["\t", "\r"] {
-            let text = format!("let t = \"ghp_AAAA{blank}{tail}\";\n"); // allow-secret-scan
-            assert!(
-                crate::review::secrets::find_secret(&text).is_none(),
-                "precondition: {blank:?}"
-            );
-            assert!(held_side(Some(text.into_bytes()), MAX_MASKED_SIDE_BYTES).raw_secret);
-        }
-        let crlf = "fn f() {}\r\n\tlet x = 1;\r\n".as_bytes().to_vec();
-        assert!(!held_side(Some(crlf), MAX_MASKED_SIDE_BYTES).raw_secret);
     }
 
     #[test]

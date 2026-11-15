@@ -2269,6 +2269,63 @@ mod tests {
     }
 
     #[test]
+    fn outward_text_sees_through_a_replacement_character() {
+        // [MAGI S6 MS3 loop18, R6a2 Melchior] the inputs of `outward_text` are lossy decodings
+        // (git stderr, I/O messages), so an invalid byte inside a token becomes U+FFFD; the views
+        // kept it, read the token as two short runs and let both halves out.
+        let tail = "A".repeat(36);
+        let invalid = [b"see ghp_AA".as_slice(), &[0xff], b"AA", tail.as_bytes()].concat(); // allow-secret-scan
+        for raw in [
+            format!("see gh\u{fffd}p_AAAA{tail} now"), // allow-secret-scan
+            format!("see ghp_AA\u{fffd}AA{tail} now"), // allow-secret-scan
+            String::from_utf8_lossy(&invalid).into_owned(),
+        ] {
+            assert!(find_secret(&raw).is_none(), "precondition: {raw:?}");
+            let out = outward_text(&raw);
+            assert!(!out.contains("AAAAAAAAAA"), "{raw:?}: {out}");
+            assert!(out.contains("redacted"), "{raw:?}: {out}");
+        }
+        // The text side asks the same question: a U+FFFD-split token is a leak.
+        assert!(leaks_secret(&format!("x gh\u{fffd}p_AAAA{tail}\n")));
+    }
+
+    #[test]
+    fn outward_text_withholds_a_joined_key_header() {
+        // [MAGI S6 MS3 loop18, R6a2 Caspar] `outward_text` asked the token spans alone, never
+        // `holds_key_block`: a header only the spaceless reader (or a strip pass) recognises left
+        // escaped, with the key body readable.
+        for text in withheld_corpus()
+            .into_iter()
+            .filter(|t| !t.contains("ghp_"))
+        {
+            let out = outward_text(&text);
+            for body in ["MIIBOg", "AAAAB3", "body"] {
+                assert!(!out.contains(body), "{text:?}: {out}");
+            }
+            assert!(out.contains("redacted"), "{text:?}: {out}");
+        }
+        let hidden = format!("{PEM_BEGIN}RSA PRIV\u{200b}ATE KEY-----\nMIIBOgIBAAJBAK\n");
+        let out = outward_text(&hidden);
+        assert!(!out.contains("MIIBOg"), "{out}");
+        assert_eq!(outward_text("fatal: bad ref"), "fatal: bad ref");
+    }
+
+    #[test]
+    fn display_path_masks_a_hidden_char_split_token() {
+        // [MAGI S6 MS3 loop18, controller] `display_path` asked `find_secret` alone: a path whose
+        // token a ZWSP, a tab or U+FFFD split was shown escaped, both halves readable.
+        let tail = "A".repeat(40);
+        for hidden in ["\u{200b}", "\t", "\u{fffd}", "\u{202e}"] {
+            let path = format!("dir/ghp_AAAA{hidden}{tail}.rs"); // allow-secret-scan
+            assert!(find_secret(&path).is_none(), "precondition: {hidden:?}");
+            let shown = display_path(&path);
+            assert!(!shown.contains("AAAAAAAAAA"), "{hidden:?}: {shown}");
+            assert!(shown.starts_with("<path redacted: "), "{hidden:?}: {shown}");
+        }
+        assert_eq!(display_path("src/a\tb.rs"), "src/a\\tb.rs");
+    }
+
+    #[test]
     fn outward_text_sees_through_a_tab_or_a_lone_cr() {
         // [MAGI S6 MS3 loop15, R6a2] the error-text path kept tabs and CRs in its stripped
         // pass, so a token split by one was read as two short runs and left both halves.
