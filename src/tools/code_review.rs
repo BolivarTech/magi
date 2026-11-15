@@ -5579,6 +5579,32 @@ mod tests {
     }
 
     #[test]
+    fn egress_safe_redacts_a_url_credential_in_the_text_and_json() {
+        // [MAGI S6 MS3 loop18, R5 Caspar/Melchior] the text and both JSON objects were masked but
+        // never URL-redacted: a token in a URL's user part (no password, so `url-credential` does
+        // not see it) left through the CLI text, the TUI and the tool. The strip runs first, so a
+        // hidden character inside `://` cannot hide the URL from the redaction.
+        let user = "tok3nUserPart9";
+        for url in [
+            format!("https://{user}@host.example/x"),
+            format!("https:/\u{200b}/{user}@host.example/x"),
+        ] {
+            let r = egress_safe(Rendered {
+                text: format!("see {url}\n"),
+                json: serde_json::json!({ "note": url.clone(), url.clone(): 1 }),
+                consult: serde_json::json!({ "consensus": { "summary": url.clone() } }),
+                failure: None,
+            });
+            assert!(!r.text.contains(user), "{url:?} text: {}", r.text);
+            assert!(r.text.contains("host.example"), "{}", r.text);
+            let json = r.json.to_string();
+            assert!(!json.contains(user), "{url:?} json: {json}");
+            let consult = r.consult.to_string();
+            assert!(!consult.contains(user), "{url:?} consult: {consult}");
+        }
+    }
+
+    #[test]
     fn a_revision_with_a_space_or_dots_never_reaches_git() {
         // MAGI FIX (MS3 §6 loop14): only a leading `-` was refused before `rev-parse`; the
         // shared ref validation (`validate_ref`) is the one gate now.
