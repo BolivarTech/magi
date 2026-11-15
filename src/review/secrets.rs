@@ -1681,6 +1681,8 @@ pub(crate) fn withheld_corpus() -> Vec<String> {
         token("\u{200b}"),
         token("\t"),
         token("\u{202e}"),
+        format!("x\u{200b}ghp_AA\u{202e}{}\n", "A".repeat(40)), // allow-secret-scan
+        format!("x\u{200b}ghp_AA\u{200b}{}\n", "A".repeat(40)), // allow-secret-scan
     ]
 }
 
@@ -2401,6 +2403,30 @@ mod tests {
             assert!(terms.iter().any(|t| *t), "{text:?}: no term fires");
         }
         assert!(!leaks_secret("fn f() {}\n"));
+    }
+
+    #[test]
+    fn a_token_glued_across_a_hidden_char_to_a_word_char_is_masked() {
+        // [MAGI S6 MS3 loop20, R6a2 Melchior] the left boundary was read on a strip view's bytes:
+        // with `x`, ZWSP, `ghp_AA`, RLO and the rest of the tail, the original has the boundary
+        // but the RLO cuts the tail, and the views heal the tail but glue the prefix to `x`, so no
+        // view masked it and every byte of the token left.
+        let run = "A".repeat(40);
+        for gap in ["\u{202e}", "\u{200b}"] {
+            let text = format!("see x\u{200b}ghp_AA{gap}{run} end\n"); // allow-secret-scan
+            assert!(leaks_secret(&text), "{text:?}");
+            assert!(hides_secret_behind_hidden_chars(&text), "{text:?}");
+            let ViewMask::Masked(m) = mask_through_views(&text, true) else {
+                panic!("{text:?} not masked");
+            };
+            assert!(!m.text.contains(&run), "{:?}", m.text);
+            assert!(m.text.starts_with("see x"), "{:?}", m.text);
+            assert!(!outward_text(&text).contains(&run), "{text:?}");
+        }
+        // Without a hidden character the prefix glued to a word is no token, as before.
+        let plain = format!("see xghp_{run}\n"); // allow-secret-scan
+        assert!(!leaks_secret(&plain), "{plain:?}");
+        assert!(matches!(mask_through_views(&plain, true), ViewMask::Clean));
     }
 
     #[test]

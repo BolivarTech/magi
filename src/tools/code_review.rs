@@ -3623,6 +3623,30 @@ mod tests {
         assert!(!out.contains('\u{1b}'), "{out:?}");
     }
     #[test]
+    fn egress_text_masks_a_token_glued_across_a_hidden_char_to_a_word_char() {
+        // [MAGI S6 MS3 loop20, R6a2 Melchior] the strip ran first and glued `ghp_` to the `x`
+        // before it, so the detector read no left boundary and the healed token left whole.
+        let run = "A".repeat(40);
+        for text in [
+            format!("refused x\u{200b}ghp_{run} here"), // allow-secret-scan
+            format!("refused x\u{200b}ghp_AA\u{202e}{run} here"), // allow-secret-scan
+            format!("refused x\u{200b}ghp_AA\u{200b}{run} here"), // allow-secret-scan
+        ] {
+            let out = egress_text(&text);
+            assert!(!out.contains(&run), "{text:?}: {out}");
+            assert!(
+                out.starts_with("refused x") && out.ends_with(" here"),
+                "{out}"
+            );
+        }
+        let plain = format!("refused xghp_{run} here"); // allow-secret-scan
+        assert_eq!(
+            egress_text(&plain),
+            plain,
+            "a prefix glued to a word is no token"
+        );
+    }
+    #[test]
     fn egress_text_withholds_a_whole_text_holding_a_key_block() {
         // [MAGI S6 MS3 loop19, R5 Caspar] `egress_text` asked `mask_secrets` alone, which knows
         // only the contiguous PEM header: a header only the spaceless reader or a strip view
