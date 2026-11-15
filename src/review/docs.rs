@@ -2277,6 +2277,18 @@ mod tests {
     }
 
     #[test]
+    fn an_upper_case_md_extension_yields_chunks() {
+        // [MAGI S6 MS3 loop18, R1] `is_doc_source` accepted `README.MD`, but the chunk
+        // predicates compared `.md` exactly, so the source was listed and gave nothing.
+        let reg = LanguageRegistry::new();
+        for p in ["README.MD", "docs/FOO.MD"] {
+            assert!(is_doc_source(p), "{p}");
+            assert!(yields_doc_chunks(p, &reg), "{p}");
+            assert!(!chunk_source(p, "# A\nx\n", &reg).is_empty(), "{p}");
+        }
+    }
+
+    #[test]
     fn docs_txt_is_not_a_doc_source() {
         // [MAGI S6 MS3 loop10, R1 Caspar] The two predicates disagreed on `docs/api.txt`.
         let reg = LanguageRegistry::new();
