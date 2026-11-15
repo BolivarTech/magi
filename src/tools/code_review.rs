@@ -2829,6 +2829,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn the_tool_backstop_redacts_a_url_credential_hidden_by_a_format_character() {
+        // [MAGI Â§6 MS3 loop19, R5] a runner that skipped `egress_safe` returns a URL whose `://`
+        // a zero-width space splits: the backstop strips before it redacts, as the text does.
+        let runner = FakeRunner {
+            json: Some(serde_json::json!({"x": "https:\u{200b}//zq9tok@host.invalid/p"})),
+            ..FakeRunner::default()
+        };
+        let t = CodeReviewTool::new(Arc::new(runner), true);
+        let v = t
+            .execute(
+                serde_json::json!({"path": "src"}),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("runs");
+        assert!(!v.to_string().contains("zq9tok"), "{v}");
+    }
+
+    #[test]
+    fn the_envelope_backstop_redacts_a_url_credential_hidden_by_a_format_character() {
+        let leak = "https:\u{200b}//zq9tok@host.invalid/p";
+        let r = Rendered {
+            text: leak.into(),
+            json: serde_json::json!({"x": leak}),
+            consult: serde_json::json!({"x": leak}),
+            failure: None,
+        };
+        let (response, consult, code_review) = envelope_fields(&r);
+        for part in [response, consult.to_string(), code_review.to_string()] {
+            assert!(!part.contains("zq9tok"), "{part}");
+        }
+    }
     /// A secret-shaped token, built so the source holds no literal key.
     fn model_secret() -> String {
         format!("sk-{}", "b".repeat(30))
