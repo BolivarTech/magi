@@ -2499,6 +2499,50 @@ mod tests {
     }
 
     #[test]
+    fn a_drifted_diff_with_a_split_secret_is_never_served_verbatim() {
+        // [MAGI S6 MS3 loop18, R6a1 Caspar/Melchior] with clean sides and no secret `find_secret`
+        // names in the diff, the diff git printed was kept as it was, never asked the one egress
+        // predicate: a worktree diff that drifted from the sides could carry a hidden-char-split
+        // token, or a name and its value on adjacent `+` lines.
+        let value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"; // allow-secret-scan
+        let tail = "A".repeat(40);
+        let split =
+            format!("@@ -1,1 +1,2 @@\n fn f() {{}}\n+let t = \"ghp_AAAA\u{200b}{tail}\";\n"); // allow-secret-scan
+        let pair = format!("@@ -1,1 +1,3 @@\n fn f() {{}}\n+aws_secret_key =\n+\"{value}\"\n");
+        let side = "fn f() {}\n";
+        for (diff, secret) in [(split, tail.as_str()), (pair, value)] {
+            assert_eq!(find_secret(&diff), None, "premise: {diff:?}");
+            let inner = MapSource::new(&[("a.rs", side)], &[("a.rs", side)]);
+            let src = CachedSource::new(&inner);
+            let files = vec![ReviewFile {
+                path: "a.rs".into(),
+                diff: Some(diff.clone()),
+            }];
+            let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false);
+            let served: Vec<String> = f
+                .map(|f| f.kept.into_iter().filter_map(|k| k.diff).collect())
+                .unwrap_or_default();
+            for out in &served {
+                assert!(!out.contains(secret), "{diff:?} served as {out:?}");
+                assert!(!super::super::diffmask::diff_leaks(out), "{out:?}");
+            }
+        }
+        // A clean file whose secret-like fragment spans two hunks is still reviewed.
+        let two = format!("aws_secret_key =\nfn a() {{}}\nfn b() {{}}\n\"{value}\"\n");
+        let diff = format!("@@ -1,1 +1,1 @@\n aws_secret_key =\n@@ -4,1 +4,1 @@\n \"{value}\"\n");
+        let inner = MapSource::new(&[("a.rs", two.as_str())], &[("a.rs", two.as_str())]);
+        let src = CachedSource::new(&inner);
+        let files = vec![ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff),
+        }];
+        let f = filter_files(files, &src, &LanguageRegistry::new(), false, &|_| false)
+            .expect("filters");
+        assert!(f.skipped.is_empty(), "{:?}", f.skipped);
+        assert_eq!(f.kept.len(), 1);
+    }
+
+    #[test]
     fn many_hunks_stay_near_linear() {
         // [MAGI S6 MS3 loop10, R6a Balthasar] Each hunk's context scanned both whole sides.
         let n = 2_000usize;
