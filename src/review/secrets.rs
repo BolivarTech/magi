@@ -31,8 +31,10 @@
 //! | Pass | Strips | Keeps | Output |
 //! |---|---|---|---|
 //! | `holds_secret_prefix` (binary or non-UTF-8 side) | control characters, format characters, U+FFFD | nothing (a verdict only) | `bool` |
-//! | `hides_secret_behind_hidden_chars` (text side) | control characters (tabs and lone CRs included), format characters | `\n`; `\r\n` folds to `\n` | `bool` |
-//! | [`outward_text`] (text that leaves) | control and format characters in the stripped copy; tabs and lone CRs in the joined copy | `\n`, `\r`, `\t` in the stripped copy; CRLF pairs in the joined copy | masked, escaped `String` |
+//! | `hides_secret_behind_hidden_chars` (text side) | control characters (tabs and lone CRs included), format characters, U+FFFD | `\n`; `\r\n` folds to `\n` | `bool` |
+//! | `mask_through_views` ([`outward_text`], [`display_path`], the cache's split-token mask) | control and format characters and U+FFFD in the stripped copy; tabs and lone CRs too in the joined copy | `\n`, `\r`, `\t` in the stripped copy; `\n` in the joined copy | the original with the union of every copy's spans masked |
+//!
+//! Every pass strips through one predicate, `splits_tokens`; what differs is only what each keeps.
 
 use std::ops::Range;
 
@@ -374,12 +376,7 @@ const NON_TOKEN_PREFIXES: &[&str] = &[
 pub(crate) fn holds_secret_prefix(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     // MAGI FIX (MS3 §6 loop14): format characters (ZWSP, directional marks) split an opening too.
-    let squeezed: String = lower
-        .chars()
-        .filter(|c| {
-            !c.is_control() && *c != char::REPLACEMENT_CHARACTER && !is_hidden_format_char(*c)
-        })
-        .collect();
+    let squeezed: String = lower.chars().filter(|c| !splits_tokens(*c)).collect();
     opens_a_secret(&lower) || opens_a_secret(&squeezed)
 }
 
@@ -989,9 +986,10 @@ pub fn find_secret(text: &str) -> Option<&'static str> {
 
 /// The path as it may leave the process.
 ///
-/// A path in which [`find_secret`] finds a pattern becomes `<path redacted: <pattern name>>`;
-/// any other path keeps its text with its control characters escaped
-/// ([`char::escape_default`]), so a file name never replays a terminal escape.
+/// A path that holds a secret to the egress predicate ([`leaks_secret`]: a pattern, a token a
+/// hidden character, a tab or U+FFFD splits, a key header) becomes
+/// `<path redacted: <pattern name>>`; any other path keeps its text with its control characters
+/// escaped ([`char::escape_default`]), so a file name never replays a terminal escape. O(n · s).
 ///
 /// # Examples
 ///
@@ -1001,11 +999,18 @@ pub fn find_secret(text: &str) -> Option<&'static str> {
 /// assert_eq!(display_path("src/a.rs"), "src/a.rs");
 /// assert_eq!(display_path("a\u{7}.rs"), "a\\u{7}.rs");
 /// ```
+// MAGI FIX (MS3 §6 loop18, controller): `find_secret` alone showed a hidden-character split token.
 pub fn display_path(path: &str) -> String {
-    if let Some(name) = find_secret(path) {
-        return format!("<path redacted: {name}>");
+    // The contiguous pattern's name first, as before: the views only add what it cannot see.
+    let name = find_secret(path).or_else(|| match mask_through_views(path, false) {
+        ViewMask::Masked(m) => Some(m.pattern),
+        ViewMask::KeyBlock => Some(KEY_BLOCK_NAME),
+        ViewMask::Clean => leaks_secret(path).then_some(UNNAMED_SECRET),
+    });
+    match name {
+        Some(name) => format!("<path redacted: {name}>"),
+        None => escape_controls(path),
     }
-    escape_controls(path)
 }
 
 /// `text` with every secret [`find_secret`] would name replaced by `<redacted: <pattern name>>`.
@@ -1387,34 +1392,102 @@ fn token_after_mask(pattern: &SecretPattern, lane: usize, rest: &str) -> Option<
     })
 }
 
-/// `text` as it may leave the process: [`mask_secrets`], then every control character escaped.
+/// `text` as it may leave the process: every secret of every view masked
+/// (`mask_through_views`), then every control character escaped.
 ///
 /// Single-line by contract: a newline or a tab becomes its two-character escape, which is what a
 /// one-line error message needs (its callers are [`super::error::ReviewError`]'s messages).
 /// Multi-line text, such as a model's reply, goes through [`mask_secrets`] alone.
 ///
+/// A text one of whose views holds a private-key block ([`holds_key_block`]) is replaced whole by
+/// `<redacted: private-key-block>`, and a masked text the egress predicate ([`leaks_secret`])
+/// still flags by `<redacted: masking failed>`: fail closed, never a byte of the secret.
+///
 /// # Arguments
 /// * `text` - A foreign text bound for one line (git stderr, a path, a ref, an I/O message).
 ///
 /// # Returns
-/// The masked, escaped text.
+/// The masked, escaped text, or one of the two fixed placeholders.
+// MAGI FIX (MS3 §6 loop18, R6a2 Caspar): a key header only the spaceless reader or a strip pass
+// recognises left escaped with its body readable; any view holding a key block now withholds the
+// whole text, and a masked text the egress predicate still flags is withheld too (fail closed).
 pub fn outward_text(text: &str) -> String {
-    // MAGI FIX (MS3 §6 loop17, R6a2): the secrets of every view of the text are masked in the
-    // text itself, as the union of their spans. Each view takes out what can split a token (a
-    // view per hidden-character policy of the table above: none, control and format characters
-    // with the line breaks and tabs kept, then tabs and lone CRs too), and a span found in a
-    // view is mapped back onto the original, so one text holding a ZWSP-split and a tab-split
-    // secret masks both, and every break outside a secret stays a break. Limit, declared: a
-    // secret split by a raw line break is not read as one here.
+    let masked = match mask_through_views(text, false) {
+        ViewMask::KeyBlock => return KEY_BLOCK_WITHHELD.to_string(),
+        ViewMask::Clean => text.to_string(),
+        ViewMask::Masked(m) => m.text,
+    };
+    if leaks_secret(&masked) {
+        return MASK_FAILED.to_string();
+    }
+    escape_controls(&masked)
+}
+
+/// The name a text or a path is withheld under when one of its views holds a multi-line
+/// private-key block ([`holds_key_block`]): no span of it can be masked with the promise that
+/// none of its body leaves (REQ-RV22, its exception).
+const KEY_BLOCK_NAME: &str = "private-key-block";
+
+/// What [`outward_text`] answers, whole, for a text one of whose views holds a key block.
+const KEY_BLOCK_WITHHELD: &str = "<redacted: private-key-block>";
+
+/// The name [`display_path`] shows for a path the egress predicate flags but no view names (no
+/// such path is known: the views read what the predicate reads). Fail closed.
+const UNNAMED_SECRET: &str = "secret";
+
+/// Whether `c` can split a token without the eye seeing it: a control character, a hidden
+/// format character ([`is_hidden_format_char`]) or U+FFFD, which a lossy decoding writes in
+/// place of an invalid byte. The one strip predicate of the views and of
+/// `hides_secret_behind_hidden_chars`; each caller keeps the line breaks (and tabs) it needs.
+fn splits_tokens(c: char) -> bool {
+    c.is_control() || is_hidden_format_char(c) || c == char::REPLACEMENT_CHARACTER
+}
+
+/// What [`mask_through_views`] gave.
+pub(crate) enum ViewMask {
+    /// No view of the text holds a secret the spans or the key-block reader find.
+    Clean,
+    /// A view holds a multi-line private-key block: the text must be withheld, never masked.
+    KeyBlock,
+    /// The text with the union of every view's secret spans masked in place.
+    Masked(LineMasked),
+}
+
+/// `text` with the secrets of each of its views masked in the text itself, as the union of their
+/// spans: the one span-preserving routine of the egress (REQ-RV22 as amended masks every one-line
+/// secret, a split one included, and withholds only multi-line key blocks).
+///
+/// Each view takes out what can split a token ([`splits_tokens`]): none; those characters with
+/// the line breaks and tabs kept; then tabs and lone CRs too (a CRLF pair keeps its `\n`). A span
+/// found in a view is mapped back onto the original byte offsets (from its first character to the
+/// end of its last, with whatever was taken out in between), overlapping spans are coalesced, and
+/// the union is replaced, so one text holding a ZWSP-split and a tab-split secret masks both and
+/// every character outside a secret stays as it was. Limit, declared: a secret split by a raw
+/// line break is not read as one here (`hides_secret_behind_hidden_chars` keeps `\n` too).
+/// O(n · s) per view, three views, plus three key-block reads.
+///
+/// # Arguments
+/// * `text` - The text about to leave the process.
+/// * `keep_lines` - Whether each line break a mask covers is written back after it, so every
+///   line keeps its number (a file's side); `false` for a one-line text.
+///
+/// # Returns
+/// [`ViewMask::KeyBlock`] when any view holds a key block; otherwise the masked text and the
+/// name of its first pattern ([`find_secret`] on the original, else the first span's), or
+/// [`ViewMask::Clean`] when no view holds a secret.
+// MAGI FIX (MS3 §6 loop18, R6a2 Melchior CRITICAL): a split one-line token held its file out;
+// the spans `outward_text` already mapped back now serve the cache too.
+pub(crate) fn mask_through_views(text: &str, keep_lines: bool) -> ViewMask {
     let views = [
         StrippedView::of(text, |_| true),
         StrippedView::of(text, |c| {
-            matches!(c, '\n' | '\r' | '\t') || !(c.is_control() || is_hidden_format_char(c))
+            matches!(c, '\n' | '\r' | '\t') || !splits_tokens(c)
         }),
-        StrippedView::of(text, |c| {
-            c == '\n' || !(c.is_control() || is_hidden_format_char(c))
-        }),
+        StrippedView::of(text, |c| c == '\n' || !splits_tokens(c)),
     ];
+    if views.iter().any(|view| holds_key_block(&view.text)) {
+        return ViewMask::KeyBlock;
+    }
     let mut spans: Vec<(Range<usize>, &'static str)> = Vec::new();
     for view in &views {
         scan_spans(&view.text, |span, name| {
@@ -1423,19 +1496,34 @@ pub fn outward_text(text: &str) -> String {
         });
     }
     spans.sort_by_key(|(range, _)| range.start);
+    let Some(first) = spans.first().map(|(_, name)| *name) else {
+        return ViewMask::Clean;
+    };
     let mut out = String::with_capacity(text.len());
     let mut done = 0;
-    for (range, name) in spans {
+    for (range, name) in &spans {
         if range.start >= done {
             out.push_str(text.get(done..range.start).unwrap_or_default());
             out.push_str(REDACTED_OPEN);
             out.push_str(name);
             out.push('>');
         }
+        if keep_lines && range.end > done {
+            // Only what this span adds to the union: an overlap's bytes were written already.
+            let covered = text
+                .get(range.start.max(done)..range.end)
+                .unwrap_or_default();
+            for b in covered.bytes().filter(|b| matches!(b, b'\r' | b'\n')) {
+                out.push(char::from(b));
+            }
+        }
         done = done.max(range.end);
     }
     out.push_str(text.get(done..).unwrap_or_default());
-    escape_controls(&out)
+    ViewMask::Masked(LineMasked {
+        text: out,
+        pattern: find_secret(text).unwrap_or(first),
+    })
 }
 
 /// A copy of a text with some characters taken out, and where each byte of the copy came from.
@@ -1475,23 +1563,26 @@ impl StrippedView {
 /// ZWSP, `AAAA…`) was read as two short runs and masked nothing, though every byte of it would
 /// leave. Tabs and lone CRs count as such characters here (CRLF pairs stay line breaks), and a
 /// key-block header the strip joins opens a block. A text the strip leaves unchanged is not
-/// scanned again; over-matching (a tab between two words joining a token) only holds a side
-/// raw, RV22's safe direction. O(n · p).
+/// scanned again; over-matching (a tab between two words joining a token) only masks more than
+/// the token, RV22's safe direction. O(n · p).
 ///
 /// # Arguments
 /// * `masked` - A text already masked (a secret the contiguous pass found is a mask by now, so
 ///   an emoji joiner beside an ordinary secret does not count).
 ///
 /// # Returns
-/// `true` when the stripped copy holds a secret, so the caller must hold the text back.
+/// `true` when the stripped copy holds a secret, so the caller must not send the text as it is:
+/// the cache masks it through every strip view (`mask_through_views`), and a caller that cannot
+/// mask holds it back.
 // MAGI FIX (MS3 §6 loop14): the content path had no such pass (R6a2 Melchior, CRITICAL).
 pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
     // MAGI FIX (MS3 §6 loop15): tabs and lone CRs are stripped too (a tab split a token like a
     // NUL), and a key-block header the strip joins opens a block. CRLF pairs stay line breaks.
     let normalized = masked.replace("\r\n", "\n");
+    // MAGI FIX (MS3 §6 loop18, R6a2 Melchior): U+FFFD too, as the views of `outward_text`.
     let stripped: String = normalized
         .chars()
-        .filter(|&c| c == '\n' || !(c.is_control() || is_hidden_format_char(c)))
+        .filter(|&c| c == '\n' || !splits_tokens(c))
         .collect();
     stripped != normalized && (find_secret(&stripped).is_some() || holds_key_block(&stripped))
 }

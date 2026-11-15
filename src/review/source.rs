@@ -16,7 +16,7 @@ use std::sync::{Mutex, PoisonError};
 use super::error::ReviewError;
 use super::secrets::{
     display_path, holds_key_block, holds_secret_prefix, leaks_secret, mask_secrets_keeping_lines,
-    mask_secrets_keeping_lines_within, BoundedMask,
+    mask_secrets_keeping_lines_within, mask_through_views, BoundedMask, LineMasked, ViewMask,
 };
 
 /// Per-file byte cap: a file over it is reported as [`ReviewError::TooLarge`], never returned.
@@ -981,7 +981,16 @@ fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
     // too (`content_verdict`), so the side held raw here is exactly the side the filter omits.
     // Over the served (masked) text it can only fire on what masking leaves: a hidden-character
     // split, a header the contiguous pass missed.
-    let raw_secret = raw_secret || served.is_some_and(leaks_secret);
+    // MAGI FIX (MS3 §6 loop18, R6a2 Melchior CRITICAL): RV22 as amended masks a split one-line
+    // token too; a text side the contiguous mask leaves leaking is masked again through every
+    // strip view (`split_token_mask`) and held raw only for a key block, or if that mask still
+    // leaks (fail closed).
+    let (masked, raw_secret) = match text {
+        Some(text) if !raw_secret && served.is_some_and(leaks_secret) => {
+            split_token_mask(text).map_or((masked, true), |m| (Some(m), false))
+        }
+        _ => (masked, raw_secret),
+    };
     match masked {
         Some(_) if raw_secret => HeldSide {
             bytes: read,
@@ -998,6 +1007,30 @@ fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
             mask: None,
             raw_secret,
         },
+    }
+}
+
+/// The mask of a text side that still leaks once the contiguous pass masked it: a token a hidden
+/// format character, a control character, a tab, a lone CR or U+FFFD splits
+/// ([`mask_through_views`], every line break kept). Unbounded, like the dense-side fallback of
+/// [`held_side`]: the review's total cap still applies. O(bytes · s).
+///
+/// # Arguments
+/// * `text` - The side as read (valid UTF-8, no NUL).
+///
+/// # Returns
+/// The masked side, or `None` (hold it raw, so the filter omits its file) when a strip view holds
+/// a multi-line private-key block (RV22's exception), when the mask still satisfies
+/// [`leaks_secret`], or when it changed the number of lines: fail closed.
+fn split_token_mask(text: &str) -> Option<LineMasked> {
+    match mask_through_views(text, true) {
+        ViewMask::Masked(m)
+            if !leaks_secret(&m.text)
+                && m.text.matches('\n').count() == text.matches('\n').count() =>
+        {
+            Some(m)
+        }
+        ViewMask::Masked(_) | ViewMask::KeyBlock | ViewMask::Clean => None,
     }
 }
 

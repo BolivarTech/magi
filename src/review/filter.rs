@@ -736,7 +736,8 @@ const DIVERGENCE_WARNING: &str = "diff lines differ from the file's masked sides
     differently on the whole side than on one diff line; the file is reviewed from its sides";
 
 /// The pattern name a file is left out under when a hidden or control character splits a secret
-/// the contiguous scan cannot name.
+/// the contiguous scan cannot name, in a side the source served unmasked: the production cache
+/// masks such a token (`split_token_mask`), so only a source that does not mask reaches this.
 const SPLIT_SECRET_PATTERN: &str = "split-secret";
 
 /// The pattern name a file is left out under when a side holds a key block no pattern names.
