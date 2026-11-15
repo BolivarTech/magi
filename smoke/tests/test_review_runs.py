@@ -575,13 +575,15 @@ class RelayBeforeSetupTests(unittest.TestCase):
     def test_the_embedder_rewrite_refuses_a_change_beyond_its_endpoint(self) -> None:
         # MAGI FIX (MS3 §6 loop17, R7a1): a header line inside a multi-line string took the added
         # endpoint line into the string; the result was valid TOML and a different value.
-        text = 'note = """\n[embedding]\nmodel = "m"\n"""\n'
-        with tempfile.TemporaryDirectory() as tmp:
-            path = pathlib.Path(tmp) / "magi.toml"
-            path.write_text(text, encoding="utf-8")
-            with self.assertRaises(HarnessError):
-                runs.point_embedding_at(path, "http://127.0.0.1:1/v1")
-            self.assertEqual(text, path.read_text(encoding="utf-8"), "left as it was")
+        # The second form also has a real table, so the endpoint is set and only the string differs.
+        for text in ('note = """\n[embedding]\nmodel = "m"\n"""\n',
+                     'note = """\n[embedding]\n"""\n[embedding]\nmodel = "m"\n'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                path = pathlib.Path(tmp) / "magi.toml"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(HarnessError):
+                    runs.point_embedding_at(path, "http://127.0.0.1:1/v1")
+                self.assertEqual(text, path.read_text(encoding="utf-8"), "left as it was")
 
     def test_a_plain_configuration_stages_and_an_unreadable_one_is_a_problem(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
