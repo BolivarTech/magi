@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """S47-S51 -- ``code-review`` against the release binary.
 
 The suite proves each stage of a review with doubles. What it cannot see is the

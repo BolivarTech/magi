@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! The clock of a review (REQ-RV06): how an explicit `--timeout` is split over the batches, the
 //! budget check before the first trio call, and the worst case the TUI shows.

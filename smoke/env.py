@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """The test environment's lifecycle.
 
 The environment is PERSISTENT on purpose (REQ-S30). The real user's case is a

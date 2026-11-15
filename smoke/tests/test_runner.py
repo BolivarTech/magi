@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """Tests for scenario invocation, id stamping and reconciliation."""
 
 import dataclasses

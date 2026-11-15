@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! Builds the production `code-review` runner from what a surface already resolved: the trio
 //! that answers each batch and the decision client of the false-positive gate.

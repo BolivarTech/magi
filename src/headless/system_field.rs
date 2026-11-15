@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! Validation and placement of the JSON envelope's `system` field (REQ-SY01, SY04..SY06).
 //!

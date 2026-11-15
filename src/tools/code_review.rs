@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! The `code-review` surface: the agent tool, the runner the three surfaces share (the
 //! `magi code-review` subcommand, the TUI `/code-review` command and the tool), and the pure

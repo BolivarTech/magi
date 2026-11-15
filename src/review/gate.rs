@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! The false-positive gate (REQ-RV10): one `decide` question per consolidated finding.
 //!

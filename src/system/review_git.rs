@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! The git runner of `code-review`: an untrusted repository's config and environment never run
 //! code, and no git output takes more memory than its cap.

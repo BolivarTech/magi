@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! The retrieved context of a `code-review` batch, from the encrypted stores and the embedder
 //! (REQ-RV07, RV08, RV19, RV21, RV22).

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """Unit tests for every harness read of a log directory the product writes.
 
 [MAGI §6 MS2 loop 29, F1a1b-melchior] the persistent environment's log was

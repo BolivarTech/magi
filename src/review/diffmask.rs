@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! The diff of a masked file, rebuilt or masked by line so that no byte of a masked secret leaves.
 //!

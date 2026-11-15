@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! Forward brace and statement search: where a construct's opening brace is, where a
 //! statement, declaration group or initializer ends, all bounded by one shared [`SearchBudget`].

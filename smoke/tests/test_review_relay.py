@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """The recording relay, the setup steps and S53/S55-S57 over the relay's record (MAGI S6 MS3 loop9, R7a)."""
 
 import dataclasses

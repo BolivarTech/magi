@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """S1 -- the output contract still holds.
 
 Protects ``tests/golden/headless_output_v1.json``. The golden file pins the

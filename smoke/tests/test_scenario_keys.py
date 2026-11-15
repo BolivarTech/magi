@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """The per-section key scenarios K1-K3: registration, totals, texts and judging helpers."""
 
 import pathlib

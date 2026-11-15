@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """The cheap profile's decision model, the preflight's view of it, and the decide scenario count."""
 
 import tomllib

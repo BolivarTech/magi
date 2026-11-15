@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-08
+// Date: 2026-11-15
 
 //! Free text helpers over one line or signature: identifiers, operator and declarator
 //! names, keyword and modifier stripping, C and Rust attribute skipping, and construct naming.

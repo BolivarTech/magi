@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-08
+# Date: 2026-11-15
 """The code-review scenarios' copies of the product's numbers and wording.
 
 The harness reads no Rust at run time, so S47-S51 carry their own copies of
