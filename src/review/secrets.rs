@@ -1466,6 +1466,16 @@ pub(crate) enum ViewMask {
 /// line break is not read as one here (`hides_secret_behind_hidden_chars` keeps `\n` too).
 /// O(n · s) per view, three views, plus three key-block reads.
 ///
+/// **Bound.** It has no byte cap of its own and allocates about three copies of `text` (the
+/// views) plus the masked result; every caller's input is bounded before it gets here. A file's
+/// side (the cache's `split_token_mask`) is read through `read_bounded` or `run_bytes_capped` at
+/// `MAX_REVIEW_FILE_BYTES` by both production sources; [`outward_text`] carries one-line error
+/// texts whose foreign parts are capped upstream (git's stderr at `MAX_GIT_STDERR_BYTES`, an
+/// embedder's error body at 256 characters, the omission list at `MAX_OMISSIONS_SHOWN` paths);
+/// [`display_path`] carries one path, which the OS, git's listing or the trio's response cap
+/// bounds. A new caller with an unbounded text must cap it first.
+// MAGI FIX (MS3 §6 loop18, R6a2): the bound was implicit in the callers.
+///
 /// # Arguments
 /// * `text` - The text about to leave the process.
 /// * `keep_lines` - Whether each line break a mask covers is written back after it, so every

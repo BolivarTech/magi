@@ -1012,8 +1012,10 @@ fn held_side(read: Option<Vec<u8>>, max_bytes: usize) -> HeldSide {
 
 /// The mask of a text side that still leaks once the contiguous pass masked it: a token a hidden
 /// format character, a control character, a tab, a lone CR or U+FFFD splits
-/// ([`mask_through_views`], every line break kept). Unbounded, like the dense-side fallback of
-/// [`held_side`]: the review's total cap still applies. O(bytes · s).
+/// ([`mask_through_views`], every line break kept). No bound of its own, like the dense-side
+/// fallback of [`held_side`]: the side was read at most `MAX_REVIEW_FILE_BYTES` by both
+/// production sources, so this holds about four copies of a capped file at once, and the
+/// review's total cap still applies. O(bytes · s).
 ///
 /// # Arguments
 /// * `text` - The side as read (valid UTF-8, no NUL).
