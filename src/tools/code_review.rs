@@ -42,7 +42,8 @@ use magi_rs::review::report::{
     distinct_key, failed_batch_lines, render_batch_reports, render_text, summary_json,
 };
 use magi_rs::review::secrets::{
-    is_hidden_format_char, mask_secrets, views_hold_key_block, KEY_BLOCK_WITHHELD,
+    is_hidden_format_char, mask_secrets, mask_secrets_in_views, views_hold_key_block,
+    KEY_BLOCK_WITHHELD,
 };
 use magi_rs::review::source::{
     is_never_reviewed, CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource,
@@ -682,8 +683,13 @@ fn terminal_safe(text: &str) -> String {
 // MAGI FIX (MS3 §6 loop13): the strip is a third stage inside it, not seven call sites' job.
 // MAGI FIX (MS3 §6 loop19, R5 Caspar): a key header only the spaceless reader or a strip view
 // knows left with its body readable; a text holding a key block is now withheld whole.
+// MAGI FIX (MS3 §6 loop20, R6a2 Melchior): the strip glued a token across a hidden character to
+// the word before it, so the secrets of every strip view are masked first, on the text as it came.
 pub(crate) fn egress_text(text: &str) -> String {
-    let scrubbed = redact_foreign_text(&terminal_safe(text));
+    let Some(masked) = mask_secrets_in_views(text) else {
+        return KEY_BLOCK_WITHHELD.to_string();
+    };
+    let scrubbed = redact_foreign_text(&terminal_safe(&masked));
     if views_hold_key_block(scrubbed.as_str()) {
         return KEY_BLOCK_WITHHELD.to_string();
     }

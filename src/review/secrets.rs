@@ -491,7 +491,7 @@ impl Matcher {
         let bytes = text.as_bytes();
         match self {
             Self::Token { prefixes, .. } => (0..prefixes.len())
-                .filter_map(|lane| self.token_span(lane, text))
+                .filter_map(|lane| self.token_span(lane, text, &no_gap))
                 .min_by_key(|r| r.start),
             Self::PemPrivateKey => text.match_indices(PEM_BEGIN).find_map(|(at, _)| {
                 let mut rest = at + PEM_BEGIN.len();
@@ -632,17 +632,32 @@ impl Matcher {
     }
 
     /// The first span of search `lane` in `text`: of a token's `lane`-th prefix alone, or
-    /// [`Matcher::first_span`] for any other pattern. O(n).
-    fn lane_span(&self, lane: usize, text: &str) -> Option<Range<usize>> {
+    /// [`Matcher::first_span`] for any other pattern. `gap` says where `text` (a strip view) had
+    /// characters taken out ([`StrippedView::gap_before`]). O(n).
+    fn lane_span(
+        &self,
+        lane: usize,
+        text: &str,
+        gap: &dyn Fn(usize) -> bool,
+    ) -> Option<Range<usize>> {
         match self {
-            Self::Token { .. } => self.token_span(lane, text),
+            Self::Token { .. } => self.token_span(lane, text, gap),
             _ => self.first_span(text),
         }
     }
 
     /// The first token of the `lane`-th prefix in `text` that has a left boundary (or needs
-    /// none: `glued`); `None` for any other pattern. O(n).
-    fn token_span(&self, lane: usize, text: &str) -> Option<Range<usize>> {
+    /// none: `glued`); `None` for any other pattern. A prefix right after a gap (`gap(at)`: a
+    /// strip view took a character out just before it) has the boundary the original had, since
+    /// every character a view takes out is a non-word one. O(n).
+    // MAGI FIX (MS3 §6 loop20, R6a2 Melchior): the boundary was read on the view's bytes, so a
+    // token the view healed but glued to a word character (`x`, ZWSP, `ghp_AA`, RLO, …) was sent.
+    fn token_span(
+        &self,
+        lane: usize,
+        text: &str,
+        gap: &dyn Fn(usize) -> bool,
+    ) -> Option<Range<usize>> {
         let Self::Token {
             prefixes, glued, ..
         } = self
@@ -660,7 +675,8 @@ impl Matcher {
                     .checked_sub(1)
                     .and_then(|before| bytes.get(before))
                     .is_none_or(|b| !is_word(*b))
-                || after_diff_marker(bytes, at);
+                || after_diff_marker(bytes, at)
+                || gap(at);
             bounded.then(|| self.token_at(lane, bytes, at)).flatten()
         })
     }
@@ -685,6 +701,11 @@ impl Matcher {
         (opens && !excluded && tail_at_least(bytes, end, *tail, *min))
             .then(|| at..tail_end(bytes, end, *tail))
     }
+}
+
+/// The `gap` of a text no character was taken out of: nowhere.
+fn no_gap(_: usize) -> bool {
+    false
 }
 
 /// The indices at which `prefix` occurs in `bytes`, ignoring ASCII case as [`word_at`] does, so
@@ -1147,7 +1168,18 @@ fn mask_spans(text: &str, keep_lines: bool, max_bytes: usize) -> Option<String> 
 /// * `visit` - Called with each span and its pattern's name; `false` ends the scan.
 // MAGI FIX (MS3 §6 loop17): the loop lived inside `mask_spans`; `outward_text` needs the spans
 // of several copies of a text to mask their union.
-fn scan_spans(text: &str, mut visit: impl FnMut(Range<usize>, &'static str) -> bool) {
+fn scan_spans(text: &str, visit: impl FnMut(Range<usize>, &'static str) -> bool) {
+    scan_spans_with(text, &no_gap, visit);
+}
+
+/// [`scan_spans`] over a strip view: `gap(at)` says a character was taken out right before byte
+/// `at` of `text`, so a token prefix there has a left boundary ([`Matcher::token_span`]).
+// MAGI FIX (MS3 §6 loop20, R6a2 Melchior): the views read the boundary on their own bytes.
+fn scan_spans_with(
+    text: &str,
+    gap: &dyn Fn(usize) -> bool,
+    mut visit: impl FnMut(Range<usize>, &'static str) -> bool,
+) {
     let at = |offset: usize, r: Range<usize>| offset + r.start..offset + r.end;
     let lanes: Vec<(&SecretPattern, usize)> = SECRET_PATTERNS
         .iter()
@@ -1155,7 +1187,7 @@ fn scan_spans(text: &str, mut visit: impl FnMut(Range<usize>, &'static str) -> b
         .collect();
     let mut next: Vec<Option<Range<usize>>> = lanes
         .iter()
-        .map(|(p, lane)| p.matcher.lane_span(*lane, text))
+        .map(|(p, lane)| p.matcher.lane_span(*lane, text, gap))
         .collect();
     while let Some((span, name)) = next
         .iter()
@@ -1169,9 +1201,13 @@ fn scan_spans(text: &str, mut visit: impl FnMut(Range<usize>, &'static str) -> b
         }
         let done = end;
         let rest = text.get(done..).unwrap_or_default();
+        let rest_gap = |i: usize| gap(done + i);
         for (slot, (p, lane)) in next.iter_mut().zip(&lanes) {
             if slot.as_ref().is_some_and(|s| s.start < done) {
-                *slot = p.matcher.lane_span(*lane, rest).map(|r| at(done, r));
+                *slot = p
+                    .matcher
+                    .lane_span(*lane, rest, &rest_gap)
+                    .map(|r| at(done, r));
             } else if let Some(r) = token_after_mask(p, *lane, rest) {
                 *slot = Some(at(done, r));
             }
@@ -1426,6 +1462,33 @@ pub fn outward_text(text: &str) -> String {
     escape_controls(&masked)
 }
 
+/// `text` with the one-line secrets of every strip view masked in place
+/// (`mask_through_views`, line breaks kept), for a scrubber that strips characters afterwards:
+/// stripping first glues a token across a hidden character to whatever stood before it. O(n · s).
+///
+/// # Arguments
+/// * `text` - A text about to leave the process, before any character is stripped from it.
+///
+/// # Returns
+/// The masked text (`text` itself when no view holds a secret), or `None` when a view holds a
+/// multi-line private-key block: the caller withholds the text whole ([`KEY_BLOCK_WITHHELD`]).
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::mask_secrets_in_views;
+///
+/// assert_eq!(mask_secrets_in_views("fn f() {}").as_deref(), Some("fn f() {}"));
+/// ```
+// MAGI FIX (MS3 §6 loop20, R6a2 Melchior): `egress_text` stripped, then masked the healed text.
+pub fn mask_secrets_in_views(text: &str) -> Option<String> {
+    match mask_through_views(text, true) {
+        ViewMask::KeyBlock => None,
+        ViewMask::Clean => Some(text.to_string()),
+        ViewMask::Masked(m) => Some(m.text),
+    }
+}
+
 /// The name a text or a path is withheld under when one of its views holds a multi-line
 /// private-key block ([`holds_key_block`]): no span of it can be masked with the promise that
 /// none of its body leaves (REQ-RV22, its exception).
@@ -1540,7 +1603,7 @@ pub(crate) fn mask_through_views(text: &str, keep_lines: bool) -> ViewMask {
     }
     let mut spans: Vec<(Range<usize>, &'static str)> = Vec::new();
     for view in &views {
-        scan_spans(&view.text, |span, name| {
+        scan_spans_with(&view.text, &|at| view.gap_before(at), |span, name| {
             spans.extend(view.in_original(&span).map(|range| (range, name)));
             true
         });
@@ -1598,6 +1661,21 @@ impl StrippedView {
         view
     }
 
+    /// Whether a character was taken out right before byte `at` of the copy: the original has
+    /// more bytes between the character before `at` and the one at `at` than that character's
+    /// own. `false` at the start of the copy (the start is a boundary anyway). O(1).
+    fn gap_before(&self, at: usize) -> bool {
+        let prev = self.text.get(..at).and_then(|t| t.chars().next_back());
+        match (
+            prev,
+            at.checked_sub(1).and_then(|p| self.origin.get(p)),
+            self.origin.get(at),
+        ) {
+            (Some(c), Some(&before), Some(&here)) => here > before + c.len_utf8(),
+            _ => false,
+        }
+    }
+
     /// The range of the original that `span` of the copy covers: from its first character to the
     /// end of its last, with whatever was taken out in between. `None` for an empty or invalid span.
     fn in_original(&self, span: &Range<usize>) -> Option<Range<usize>> {
@@ -1630,11 +1708,18 @@ pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
     // NUL), and a key-block header the strip joins opens a block. CRLF pairs stay line breaks.
     let normalized = masked.replace("\r\n", "\n");
     // MAGI FIX (MS3 §6 loop18, R6a2 Melchior): U+FFFD too, as the views of `outward_text`.
-    let stripped: String = normalized
-        .chars()
-        .filter(|&c| c == '\n' || !splits_tokens(c))
-        .collect();
-    stripped != normalized && (find_secret(&stripped).is_some() || holds_key_block(&stripped))
+    if !normalized.chars().any(|c| c != '\n' && splits_tokens(c)) {
+        return false;
+    }
+    // MAGI FIX (MS3 §6 loop20, R6a2 Melchior): a view, so a prefix the strip glues to a word
+    // character keeps the left boundary the original had (`gap_before`).
+    let view = StrippedView::of(&normalized, |c| c == '\n' || !splits_tokens(c));
+    let mut found = false;
+    scan_spans_with(&view.text, &|at| view.gap_before(at), |_, _| {
+        found = true;
+        false
+    });
+    found || holds_key_block(&view.text)
 }
 
 /// Whether `text`, already masked, still holds a secret to the eye of the detector, a private-key
