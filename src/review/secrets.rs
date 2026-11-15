@@ -1069,7 +1069,9 @@ const MASK_FAILED: &str = "<redacted: masking failed>";
 /// `text`: what [`mask_secrets`] masked in a text it produced. O(n · p).
 ///
 /// It reads the text, not a record of the masking, so it serves declarations only (a quoted
-/// mask is declared too): both err toward declaring, never toward a byte leaving.
+/// mask is declared too): both err toward declaring, never toward a byte leaving. The two fixed
+/// placeholders (`<redacted: masking failed>`, [`KEY_BLOCK_WITHHELD`]) name no pattern and are
+/// not recognized here; a text withheld whole is declared through its own path.
 ///
 /// # Arguments
 /// * `text` - A text that may have been masked.
@@ -1643,7 +1645,7 @@ pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
 /// embedding, history) ask it, and a test over a shared corpus pins that none answers weaker. O(n · p).
 ///
 /// # Arguments
-/// * `text` - A text already masked by [`mask_secrets`].
+/// * `text` - Any text about to leave the process, raw or already masked by [`mask_secrets`].
 ///
 /// # Returns
 /// `true` when the text must be withheld.
