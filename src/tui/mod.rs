@@ -2532,6 +2532,7 @@ impl App {
     #[cfg(test)]
     pub(crate) async fn run_approved_code_review(&mut self, review: ApprovedCodeReview) {
         let drain = self.run_review_only(review).await;
+        self.announce_code_review_follow_up(&drain);
         self.drain_code_review_follow_up(drain).await;
     }
 
@@ -2572,6 +2573,14 @@ impl App {
         CodeReviewDrain { runner, cancel }
     }
 
+    /// Pushes the "saving…" notice when the review has post-report work, without waiting. The
+    /// caller draws a frame after it and then awaits [`Self::drain_code_review_follow_up`].
+    pub(crate) fn announce_code_review_follow_up(&mut self, drain: &CodeReviewDrain) {
+        if drain.runner.has_after_report() {
+            apply_response(self, AgentResponse::Info(CODE_REVIEW_SAVING.to_string()));
+        }
+    }
+
     /// Waits for the post-report work of a delivered review: the history and the index
     /// clean-up, announced first and bounded by `finish_after_delivered_report`'s explicit
     /// deadline ([`crate::tools::code_review::REVIEW_DEADLINE_MARGIN_SECS`]). Its warning goes
@@ -2579,11 +2588,10 @@ impl App {
     // MAGI FIX (MS3 §6 loop11): after a failed review too: the shared runner may hold an
     // earlier review's history (`failed_review_still_drains`).
     // MAGI FIX (S6 loop 17, R5b): split from the run, so the caller redraws the report first.
+    // MAGI FIX (S6 loop 18, R5b): the notice is announced apart (synchronously), so the caller
+    // draws a frame with it before this wait starts.
     pub(crate) async fn drain_code_review_follow_up(&mut self, drain: CodeReviewDrain) {
         let CodeReviewDrain { runner, cancel } = drain;
-        if runner.has_after_report() {
-            apply_response(self, AgentResponse::Info(CODE_REVIEW_SAVING.to_string()));
-        }
         if let Some(warning) =
             crate::tools::code_review::finish_after_delivered_report(runner.as_ref(), &cancel).await
         {
@@ -4461,6 +4469,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Re
                                 terminal.draw(|f| ui(f, &mut app))?;
                                 let drain = app.run_review_only(review).await;
                                 // The report is on screen before the bounded post-report wait.
+                                terminal.draw(|f| ui(f, &mut app))?;
+                                app.announce_code_review_follow_up(&drain);
                                 terminal.draw(|f| ui(f, &mut app))?;
                                 app.drain_code_review_follow_up(drain).await;
                                 continue;
@@ -9768,6 +9778,7 @@ end"
         let before = app.messages.join("\n");
         assert!(before.contains("REPORT-BODY"), "{before}");
         assert!(!before.contains("HISTORY-WARNING"), "{before}");
+        app.announce_code_review_follow_up(&drain);
         app.drain_code_review_follow_up(drain).await;
         let after = app.messages.join("\n");
         assert!(after.contains(CODE_REVIEW_SAVING), "{after}");
