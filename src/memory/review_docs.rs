@@ -1522,6 +1522,20 @@ mod tests {
     }
 
     #[test]
+    fn hmac_pads_are_zeroized() {
+        // [MAGI §6 MS3 loop19, R1] a stack residue cannot be tested deterministically, so the
+        // guard reads the source: the pads (key XOR constant, invertible to the data key) and the
+        // hashed long key are `Zeroizing`, and no pad is passed by value to the hasher.
+        let src = include_str!("review_docs.rs").replace('\r', "");
+        let start = src.find("fn hmac_sha256(").expect("the function");
+        let body = &src[start..];
+        let body = &body[..body.find("/// Lowercase hex").expect("its end")];
+        assert!(body.matches("Zeroizing").count() >= 3, "{body}");
+        assert!(!body.contains("chain_update(inner_pad)"), "{body}");
+        assert!(!body.contains("chain_update(outer_pad)"), "{body}");
+    }
+
+    #[test]
     fn hmac_sha256_matches_rfc_4231_test_case_2() {
         // RFC 4231, case 2: key "Jefe", data "what do ya want for nothing?".
         let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
