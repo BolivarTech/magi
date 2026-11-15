@@ -2451,6 +2451,23 @@ def _restore(config_path, original: bytes) -> None:
 #: The table whose endpoint :func:`point_embedding_at` rewrites.
 _EMBEDDING_TABLE = "[embedding]"
 
+#: The same table as a parsed key.
+_EMBEDDING_KEY = "embedding"
+
+
+def _without_embedder_endpoint(document: dict) -> dict:
+    """A parsed configuration without ``[embedding].base_url`` (and without an emptied table).
+
+    Args:
+        document: The parsed ``magi.toml``; it is not modified.
+
+    Returns:
+        dict: A copy to compare two configurations everywhere but the embedder's endpoint.
+    """
+    rest = {key: value for key, value in document.items() if key != _EMBEDDING_KEY}
+    table = {key: value for key, value in document.get(_EMBEDDING_KEY, {}).items() if key != "base_url"}
+    return dict(rest, **{_EMBEDDING_KEY: table}) if table else rest
+
 
 def review_context_files() -> tuple[tuple[str, bytes], ...]:
     """The file R17 reviews.
@@ -2540,10 +2557,15 @@ def point_embedding_at(config_path, url: str) -> None:
     # MAGI FIX (MS3 §6 loop11): the line-based rewrite is parsed back before it is written; one
     # that is not TOML (a header inside a multi-line string, say) is a harness error, file intact.
     try:
-        tomllib.loads(rewritten)
+        before, after = tomllib.loads(text), tomllib.loads(rewritten)
     except tomllib.TOMLDecodeError as exc:
         raise HarnessError("pointing %s's embedder away gave a file that is not TOML (%s); it is "
                            "left as it was" % (config_path, exc)) from exc
+    # MAGI FIX (MS3 §6 loop17, R7a1): nothing but the embedder's endpoint may differ, read as TOML.
+    if (after.get(_EMBEDDING_KEY, {}).get("base_url") != url
+            or _without_embedder_endpoint(before) != _without_embedder_endpoint(after)):
+        raise HarnessError("pointing %s's embedder away changed more than its endpoint; it is "
+                           "left as it was" % config_path)
     _replace_bytes(config_path, rewritten.encode("utf-8"), "point %s's embedder away" % config_path)
 
 
@@ -3740,7 +3762,9 @@ def relay_staging_problems(config_path) -> list:
             copy = pathlib.Path(scratch) / "magi.toml"
             copy.write_bytes(original)
             return _staging_problems(original_text, copy, _STAGING_DRY_RUN_URL)
-    except (OSError, UnicodeError, HarnessError) as exc:
+    # MAGI FIX (MS3 §6 loop17, R7a1): only what the environment can cause is a problem to report;
+    # a plain HarnessError is a harness defect and propagates (exit 3, never a refusal).
+    except (OSError, UnicodeError, RelayUnavailable) as exc:
         return ["could not stage %s: %s" % (config_path, exc)]
 
 
