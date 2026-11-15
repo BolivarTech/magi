@@ -57,7 +57,7 @@ pub const EMBED_BATCH_ITEMS: usize = 64;
 /// Bytes of text per `embed` request, the second bound next to [`EMBED_BATCH_ITEMS`]: a request
 /// closes at whichever trips first. 64 items of [`MAX_DOC_CHUNK_BYTES`] would be 512 KiB, and a
 /// backend this project has measured refuses bodies over 64 KiB; 48 KiB leaves room for the JSON
-/// around the texts. A single chunk never exceeds it (`MAX_DOC_CHUNK_BYTES` is 8 KiB).
+/// around the texts. A single chunk's raw text never exceeds it (`MAX_DOC_CHUNK_BYTES` is 8 KiB); its JSON-escaped body can.
 pub const EMBED_BATCH_BYTES: usize = 48 * 1024;
 
 // A chunk that does not fit a request alone would be unsendable.

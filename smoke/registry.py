@@ -113,7 +113,7 @@ DECLARED_SCENARIO_COUNT = 58
 #:
 #: 174 on 2026-11-13: S58 adds 3 assertions (a review with seeded history and an
 #: unreachable embedder exits 0 throughout, declares ``without_embedder`` and a degraded
-#: cause for its history layer, and still delivers its findings list), RV07/RV-S8, MAGI
+#: cause for its history layer, and still delivers its findings list), RV07/RV-S38, MAGI
 #: §6 MS3 loop 15, v0.25.0. The scenario count goes 57 -> 58.
 DECLARED_ASSERTION_COUNT = 174
 

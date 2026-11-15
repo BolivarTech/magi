@@ -1522,7 +1522,8 @@ fn write_context(prompt: &mut String, items: &[ContextItem]) {
         prompt.push('\n');
         // MAGI FIX (T3.7): a containing unit is numbered like the code under review.
         let text = item.rendered();
-        // MAGI FIX (MS3 §6 loop9): masked after the escaping, `<<` + a mask wrote `<<<`.
+        // MAGI FIX (MS3 §6 loop9): masked before the escaping; masking after it wrote `<<<`
+        // out of `<<` plus a mask.
         // MAGI FIX (MS3 §6 loop11): the newline is decided on what is pushed, after the mask.
         let body = escape_fence(&mask_secrets(&text));
         prompt.push_str(&body);

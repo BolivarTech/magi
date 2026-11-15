@@ -102,7 +102,7 @@ not count lines yourself.\n";
 /// The limit in tokens; 0 when the legend alone exceeds the batch limit.
 ///
 /// Declared (MS3 §6 loop12): a zero limit surfaces as `TooLargeForBatch` naming the first item,
-/// not the window. It needs a measured window under about 25 tokens to a batch, far below any
+/// not the window. It needs a measured window under about 90 tokens to a batch, far below any
 /// model's; the review still fails closed and honest about its size, which is what the error
 /// reports (`a_limit_of_zero_refuses_every_item`).
 // MAGI FIX (T3.7): the RAG budget used the raw limit and could overshoot it by the legend.
