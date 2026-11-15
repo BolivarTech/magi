@@ -9774,6 +9774,43 @@ end"
         assert!(after.contains("HISTORY-WARNING"), "{after}");
     }
 
+    #[tokio::test]
+    async fn the_saving_notice_is_in_the_transcript_before_the_wait_starts() {
+        // [MAGI S6 MS3 loop18, R5b] The notice was pushed inside the awaited drain, so no frame
+        // could show it during the wait. It is announced synchronously first, the event loop
+        // draws, and only then is the bounded wait awaited.
+        let mut app = App::new_for_test();
+        app.begin_code_review_confirmation(
+            TuiCodeReviewCommand::default(),
+            Arc::new(WarningRunner { fail: false }),
+            shown_plan(),
+        );
+        let review = app.approve_code_review().expect("pending");
+        let drain = app.run_review_only(review).await;
+        app.announce_code_review_follow_up(&drain);
+        let announced = app.messages.join("\n");
+        assert!(announced.contains(CODE_REVIEW_SAVING), "{announced}");
+        assert!(!announced.contains("HISTORY-WARNING"), "{announced}");
+        app.drain_code_review_follow_up(drain).await;
+        let all = app.messages.join("\n");
+        assert_eq!(all.matches(CODE_REVIEW_SAVING).count(), 1, "{all}");
+    }
+
+    #[test]
+    fn the_event_loop_draws_between_the_announcement_and_the_wait() {
+        // [MAGI S6 MS3 loop18, R5b] Source guardian: the frame that shows the notice sits
+        // between the two calls.
+        let src = include_str!("mod.rs").replace('\r', "");
+        let announce = src
+            .find(concat!("app.announce_code_review", "_follow_up(&drain);"))
+            .expect("the loop announces");
+        let wait = src
+            .find(concat!("app.drain_code_review", "_follow_up(drain).await;"))
+            .expect("the loop waits");
+        let between = &src[announce..wait];
+        assert!(between.contains("terminal.draw("), "{between}");
+    }
+
     #[test]
     fn plan_refusal_is_masked() {
         // [MAGI S6 MS3 loop8, R5 Melchior] The plan arm redacted URL credentials only; a token in
