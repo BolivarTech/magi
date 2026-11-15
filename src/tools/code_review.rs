@@ -41,7 +41,9 @@ use magi_rs::review::pipeline::{
 use magi_rs::review::report::{
     distinct_key, failed_batch_lines, render_batch_reports, render_text, summary_json,
 };
-use magi_rs::review::secrets::{is_hidden_format_char, mask_secrets};
+use magi_rs::review::secrets::{
+    is_hidden_format_char, mask_secrets, views_hold_key_block, KEY_BLOCK_WITHHELD,
+};
 use magi_rs::review::source::{
     is_never_reviewed, CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource,
 };
@@ -667,17 +669,25 @@ fn terminal_safe(text: &str) -> String {
 /// its runner build themselves (argument errors, review errors, runner build errors), so an
 /// echoed argument or a builder's message can never leave with a key in it. Stderr and the run
 /// log also pass the process auditor; the tool's errors go back to the agent's model and do not,
-/// which is why the detector runs here. O(len of `text`).
+/// which is why the detector runs here. A text one of whose strip views holds a multi-line
+/// private-key block ([`views_hold_key_block`], the predicate `outward_text` asks) is withheld
+/// whole as [`KEY_BLOCK_WITHHELD`], never masked (REQ-RV22, its exception). O(len of `text`).
 ///
 /// # Arguments
 /// * `text` - The error text.
 ///
 /// # Returns
-/// The text with its credentials and secrets masked.
+/// The text with its credentials and secrets masked, or [`KEY_BLOCK_WITHHELD`].
 // MAGI FIX (S6 loop 7, D-b1): one helper with both stages for every error path.
 // MAGI FIX (MS3 §6 loop13): the strip is a third stage inside it, not seven call sites' job.
+// MAGI FIX (MS3 §6 loop19, R5 Caspar): a key header only the spaceless reader or a strip view
+// knows left with its body readable; a text holding a key block is now withheld whole.
 pub(crate) fn egress_text(text: &str) -> String {
-    mask_secrets(redact_foreign_text(&terminal_safe(text)).as_str())
+    let scrubbed = redact_foreign_text(&terminal_safe(text));
+    if views_hold_key_block(scrubbed.as_str()) {
+        return KEY_BLOCK_WITHHELD.to_string();
+    }
+    mask_secrets(scrubbed.as_str())
 }
 
 /// A foreign error as an operator surface (stderr, the run log, the TUI transcript) may show it:

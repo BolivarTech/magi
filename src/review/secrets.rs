@@ -1429,8 +1429,51 @@ pub fn outward_text(text: &str) -> String {
 /// none of its body leaves (REQ-RV22, its exception).
 const KEY_BLOCK_NAME: &str = "private-key-block";
 
-/// What [`outward_text`] answers, whole, for a text one of whose views holds a key block.
-const KEY_BLOCK_WITHHELD: &str = "<redacted: private-key-block>";
+/// What [`outward_text`] (and every egress scrubber of a multi-line text) answers, whole, for a
+/// text one of whose views holds a key block ([`views_hold_key_block`]).
+pub const KEY_BLOCK_WITHHELD: &str = "<redacted: private-key-block>";
+
+/// Whether any strip view of `text` (none; control, format and U+FFFD characters out with line
+/// breaks and tabs kept; then tabs and lone CRs out too) holds a multi-line private-key block
+/// ([`holds_key_block`]). **The one key-block predicate of the egress**: [`outward_text`] (through
+/// `mask_through_views`) and every scrubber that sends a text out whole ask it, so a text such a
+/// block is in is withheld, never masked (REQ-RV22, its exception). O(n · p) per view.
+///
+/// # Arguments
+/// * `text` - A text about to leave the process.
+///
+/// # Returns
+/// `true` when the text must be withheld whole ([`KEY_BLOCK_WITHHELD`]).
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::views_hold_key_block;
+///
+/// assert!(!views_hold_key_block("let u = \"postgres://svc:pw@db\";"));
+/// ```
+// MAGI FIX (MS3 §6 loop19, R5 Caspar): `egress_text` asked `mask_secrets` alone and let a header
+// only the spaceless reader or a strip view knows leave with its body readable.
+pub fn views_hold_key_block(text: &str) -> bool {
+    any_view_holds_key_block(&strip_views(text))
+}
+
+/// The three strip views of `text` that [`mask_through_views`] scans and
+/// [`views_hold_key_block`] reads. O(n) each.
+fn strip_views(text: &str) -> [StrippedView; 3] {
+    [
+        StrippedView::of(text, |_| true),
+        StrippedView::of(text, |c| {
+            matches!(c, '\n' | '\r' | '\t') || !splits_tokens(c)
+        }),
+        StrippedView::of(text, |c| c == '\n' || !splits_tokens(c)),
+    ]
+}
+
+/// Whether one of `views` holds a key block ([`holds_key_block`]). O(n · p) per view.
+fn any_view_holds_key_block(views: &[StrippedView]) -> bool {
+    views.iter().any(|view| holds_key_block(&view.text))
+}
 
 /// The name [`display_path`] shows for a path the egress predicate flags but no view names (no
 /// such path is known: the views read what the predicate reads). Fail closed.
@@ -1489,14 +1532,8 @@ pub(crate) enum ViewMask {
 // MAGI FIX (MS3 §6 loop18, R6a2 Melchior CRITICAL): a split one-line token held its file out;
 // the spans `outward_text` already mapped back now serve the cache too.
 pub(crate) fn mask_through_views(text: &str, keep_lines: bool) -> ViewMask {
-    let views = [
-        StrippedView::of(text, |_| true),
-        StrippedView::of(text, |c| {
-            matches!(c, '\n' | '\r' | '\t') || !splits_tokens(c)
-        }),
-        StrippedView::of(text, |c| c == '\n' || !splits_tokens(c)),
-    ];
-    if views.iter().any(|view| holds_key_block(&view.text)) {
+    let views = strip_views(text);
+    if any_view_holds_key_block(&views) {
         return ViewMask::KeyBlock;
     }
     let mut spans: Vec<(Range<usize>, &'static str)> = Vec::new();
