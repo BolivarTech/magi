@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use super::diffmask::{fallback_diff, rebuilt_diff, redacted_line_count, HUNK_START};
+use super::diffmask::{diff_leaks, fallback_diff, rebuilt_diff, redacted_line_count, HUNK_START};
 use super::error::ReviewError;
 use super::input::{
     in_work_tree, is_binary_marker_line, is_binary_section, renamed_from, split_nul, ReviewFile,
@@ -588,7 +588,14 @@ fn kept_verdict(
     // the diff (`pattern`) makes the diff rebuild, but declares the file masked only when the
     // by-line fallback redacted something.
     let side_mask = new_mask.or(old_mask).map(|m| m.pattern);
-    let pattern = side_mask.or_else(|| diff.as_deref().and_then(find_secret));
+    // MAGI FIX (MS3 §6 loop18, R6a1): a diff kept as git printed it is an egress text too, so it
+    // is asked the one egress predicate over its text and each hunk's side projections
+    // (`diff_leaks`); a secret only that sees (a hidden-char split, a pair on adjacent `+` lines
+    // of a diff that drifted from the sides) takes the rebuild ladder like a named one.
+    let pattern = side_mask.or_else(|| {
+        let diff = diff.as_deref()?;
+        find_secret(diff).or_else(|| diff_leaks(diff).then_some(SPLIT_SECRET_PATTERN))
+    });
     let Some(pattern) = pattern else {
         return Verdict::Keep(Kept {
             diff,
@@ -600,7 +607,7 @@ fn kept_verdict(
     let mut declared = side_mask;
     let diff = match diff {
         Some(d) => match rebuilt_diff(&d, read.new, read.old) {
-            Some((r, diverged)) if !leaks_secret(&r) => {
+            Some((r, diverged)) if !diff_leaks(&r) => {
                 if diverged > 0 {
                     let shown = display_path(read.path);
                     // MAGI FIX (MS3 §6 loop17, R6a1): the count has two causes the code cannot
@@ -738,6 +745,8 @@ const DIVERGENCE_WARNING: &str = "diff lines differ from the file's masked sides
 /// The pattern name a file is left out under when a hidden or control character splits a secret
 /// the contiguous scan cannot name, in a side the source served unmasked: the production cache
 /// masks such a token (`split_token_mask`), so only a source that does not mask reaches this.
+/// It also names what only the diff shows to the egress predicate (`diff_leaks`) while no
+/// pattern names it, the rebuild ladder's trigger in [`kept_verdict`].
 const SPLIT_SECRET_PATTERN: &str = "split-secret";
 
 /// The pattern name a file is left out under when a side holds a key block no pattern names.
