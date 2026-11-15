@@ -615,23 +615,26 @@ fn consult_object(c: &Consolidated, structured: bool) -> Value {
     redacted_json(Value::Object(out))
 }
 
-/// `r` as it may leave the process: every secret the RV22 detector names masked in the text, the
-/// failure and every string (and key) of both JSON objects.
+/// `r` as it may leave the process: the text, the failure and every string (and key) of both
+/// JSON objects through [`egress_text`], in its canonical order: terminal control and hidden
+/// format characters stripped ([`terminal_safe`], first, so one inside a key or a `://` cannot
+/// hide it), URL credentials redacted, then every secret the RV22 detector names masked.
 ///
 /// # Arguments
 /// * `r` - A rendered review.
 ///
 /// # Returns
-/// The same review with its secrets masked, and its text and failure without terminal control
-/// characters ([`terminal_safe`], applied first so a control character inside a key cannot hide
-/// it from the detector).
+/// The same review with its credentials and secrets masked and its control characters removed.
 // MAGI FIX (S6 loop 3): `redact_foreign_text` only scrubs URL credentials; the product's own
 // detector runs here, the one point every surface (CLI text, JSON and `-o`, TUI, tool) reads.
+// MAGI FIX (MS3 §6 loop18, R5): the text and the JSON were masked but not URL-redacted, so a
+// token in a URL's user part (no password, which `url-credential` needs) left by every surface.
 fn egress_safe(r: Rendered) -> Rendered {
+    let egress_json = |v: Value| map_json_text(v, &egress_text, true);
     Rendered {
-        text: mask_secrets(&terminal_safe(&r.text)),
-        json: masked_json(r.json),
-        consult: masked_json(r.consult),
+        text: egress_text(&r.text),
+        json: egress_json(r.json),
+        consult: egress_json(r.consult),
         // MAGI FIX (MS3 §6 loop14): the one error scrubber, so a URL credential is redacted too.
         failure: r.failure.map(|f| egress_text(&f)),
     }
