@@ -2196,6 +2196,34 @@ mod tests {
     }
 
     #[test]
+    fn a_key_header_with_a_run_of_spaces_before_begin_is_a_block() {
+        // MAGI FIX (MS3 §6 loop19, R6a2 Caspar): only one space was read before `BEGIN`, so two
+        // (or a tab) between the armor dashes and `BEGIN` opened no block and the body left as
+        // plain text.
+        let (d, s) = (ARMOR_DASHES, SSH2_ARMOR_DASHES);
+        for text in [
+            format!("{d}  BEGIN RSA {PEM_PRIVATE_KEY}\nMIIBOgIBAAJBAK\n"),
+            format!("{d}\tBEGIN RSA {PEM_PRIVATE_KEY}\nMIIBOgIBAAJBAK\n"),
+            format!("{d} \t BEGIN RSA {PEM_PRIVATE_KEY}\nMIIBOgIBAAJBAK\n"),
+            format!("{s}   BEGIN SSH2 PRIVATE KEY {s}\nAAAAB3NzaC1yc2E\n"),
+        ] {
+            assert!(holds_key_block(&text), "{text:?}");
+            assert!(
+                matches!(mask_through_views(&text, true), ViewMask::KeyBlock),
+                "{text:?}"
+            );
+            let out = outward_text(&text);
+            assert_eq!(out, KEY_BLOCK_WITHHELD, "{text:?}");
+            assert!(!out.contains("MIIBOg") && !out.contains("AAAAB3"), "{out}");
+        }
+        let spelled = concat!(
+            "concat!(\"-----\", \"BEGIN ",
+            "\", \"RSA PRIVATE KEY-----\")"
+        );
+        assert!(!holds_key_block(spelled), "a header spelled from constants");
+    }
+
+    #[test]
     fn binary_side_knows_every_text_opening() {
         // MAGI FIX (MS3 §6 loop16): the text path calls a spaceless four-dash SSH2 header a
         // block; the binary path must refuse the same opening, plain or NUL-split.
