@@ -957,8 +957,8 @@ fn guarded_dir(workspace: &Path, p: &Path) -> bool {
 /// [`ReviewError::OutsideWorkspace`], [`ReviewError::InvalidRef`], [`ReviewError::RefNotFound`],
 /// a git error of the pin, or [`ReviewError::Io`] when the workspace cannot be guarded.
 pub(crate) fn check_review_input(workspace: &Path, input: &ReviewInput) -> Result<(), ReviewError> {
-    let guard =
-        PathGuard::new(workspace.to_path_buf()).map_err(|e| ReviewError::Io(e.to_string()))?;
+    let guard = PathGuard::new(workspace.to_path_buf())
+        .map_err(|e| ReviewError::Io(egress_text(&e.to_string())))?;
     let root = guard.workspace_root().to_path_buf();
     match input {
         ReviewInput::File(p) | ReviewInput::Directory(p) => {
@@ -1991,8 +1991,8 @@ impl CodeReviewRunner for ProductionReviewRunner {
             embedder: None,
             ..self.parts.clone()
         };
-        let runner =
-            ProductionReviewRunner::new(parts).map_err(|e| ReviewError::Io(e.to_string()))?;
+        let runner = ProductionReviewRunner::new(parts)
+            .map_err(|e| ReviewError::Io(egress_text(&e.to_string())))?;
         Ok(Some(Arc::new(runner)))
     }
 

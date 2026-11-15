@@ -602,7 +602,18 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
         if attr_depth > 0 || t.starts_with("#[") || t.starts_with("#![") {
             // MAGI FIX (MS3 §6 loop12): an item written after its attribute on one line is named.
             if attr_depth == 0 {
-                if let Some(rest) = after_attribute(t).filter(|r| !r.is_empty()) {
+                // MAGI FIX (MS3 §6 loop20, R1): stacked attributes `#[a] #[b] fn x()` are all skipped.
+                let mut rest = after_attribute(t).filter(|r| !r.is_empty());
+                while let Some(r) = rest.filter(|r| r.starts_with("#[")) {
+                    match after_attribute(r) {
+                        Some(next) => rest = Some(next).filter(|n| !n.is_empty()),
+                        None => {
+                            rest = None;
+                            break;
+                        }
+                    }
+                }
+                if let Some(rest) = rest {
                     return rust_item_name(rest);
                 }
             }
@@ -760,7 +771,11 @@ fn rust_doc_chunks(path: &str, lines: &[&str]) -> Vec<DocChunk> {
         } else if let Some(kind) = block_doc_kind(t) {
             let (body, j, after) = collect_block_doc(lines, i);
             let name = if kind == DocKind::Outer {
-                let tail: Vec<&str> = std::iter::once(after)
+                // MAGI FIX (MS3 §6 loop20, R1): an empty `after` is no line, so the block form
+                // looks as far as the line form does.
+                let tail: Vec<&str> = Some(after)
+                    .filter(|a| !a.is_empty())
+                    .into_iter()
                     .chain(lines.iter().skip(j).copied())
                     .take(MAX_ITEM_LOOKAHEAD_LINES)
                     .collect();
@@ -969,13 +984,16 @@ enum DocCommentLanguage {
 /// file without an extractor in `registry` or of another language. O(len of the path).
 fn doc_comment_language(path: &str, registry: &LanguageRegistry) -> Option<DocCommentLanguage> {
     registry.get(path)?;
-    match std::path::Path::new(path)
+    // MAGI FIX (MS3 §6 loop20, R1): the registry matches the extension in any ASCII case.
+    let ext = std::path::Path::new(path)
         .extension()
-        .and_then(std::ffi::OsStr::to_str)
-    {
-        Some("rs") => Some(DocCommentLanguage::Rust),
-        Some("py") => Some(DocCommentLanguage::Python),
-        _ => None,
+        .and_then(std::ffi::OsStr::to_str)?;
+    if ext.eq_ignore_ascii_case("rs") {
+        Some(DocCommentLanguage::Rust)
+    } else if ext.eq_ignore_ascii_case("py") {
+        Some(DocCommentLanguage::Python)
+    } else {
+        None
     }
 }
 
