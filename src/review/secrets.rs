@@ -1070,7 +1070,8 @@ pub fn display_path(path: &str) -> String {
 /// That bound is loose: each search only moves forward, so the amortized cost is O(n · s),
 /// linear in the text (near 0.15 s per MiB of dense secrets in release, MS3 §6 loop3). The output can be longer than the text (a mask is longer than a
 /// short URL password); [`mask_secrets_keeping_lines_within`] bounds it, and the review's cache
-/// uses that bound, so a file dense in secrets is left out instead of growing.
+/// uses that bound and masks a side past it unbounded (`held_side`), so only the total cap can
+/// refuse it.
 // MAGI FIX (S6 loop 13, A2-b6): the bound omitted the k factor of a search rerun after each mask.
 ///
 /// Maintenance: the cached spans are correct only while every boundary a search over the whole
@@ -1571,12 +1572,13 @@ pub(crate) enum ViewMask {
 /// found in a view is mapped back onto the original byte offsets (from its first character to the
 /// end of its last, with whatever was taken out in between), overlapping spans are coalesced, and
 /// the union is replaced, so one text holding a ZWSP-split and a tab-split secret masks both and
-/// every character outside a secret stays as it was. Limit, declared: a secret split by a raw
+/// every character outside a secret stays as it was. A prefix a view glues to a word character
+/// keeps the left boundary the original had (`StrippedView::gap_before`). Limit, declared: a secret split by a raw
 /// line break is not read as one here (`hides_secret_behind_hidden_chars` keeps `\n` too).
 /// O(n · s) per view, three views, plus three key-block reads.
 ///
-/// **Bound.** It has no byte cap of its own and allocates about three copies of `text` (the
-/// views) plus the masked result; every caller's input is bounded before it gets here. A file's
+/// **Bound.** It has no byte cap of its own and allocates three views of n text bytes plus 8n
+/// origin bytes each (about 27n) plus the masked result; every caller's input is bounded before it gets here. A file's
 /// side (the cache's `split_token_mask`) is read through `read_bounded` or `run_bytes_capped` at
 /// `MAX_REVIEW_FILE_BYTES` by both production sources; [`outward_text`] carries one-line error
 /// texts whose foreign parts are capped upstream (git's stderr at `MAX_GIT_STDERR_BYTES`, an

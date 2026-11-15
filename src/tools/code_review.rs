@@ -1596,7 +1596,7 @@ impl ProductionReviewRunner {
     /// ignored paths twice): local git calls, bounded and counted in `prep_ms`, kept apart so the
     /// documentation side never shares state with the reviewed side. Its candidates come from the
     /// tree's resolution (`.gitignore` and the never-reviewed rules applied), a revision's from
-    /// its tree with neither: the two modes may list different sources for the same content
+    /// its tree with the never-reviewed rules only (no `.gitignore`): the two modes may list different sources for the same content
     /// (declared).
     ///
     /// [`CodeReviewRunner::run`] checks the budget ([`precheck_budget`]) before calling this, so
@@ -2132,7 +2132,9 @@ fn post_report_stopped(deadline: Option<std::time::Instant>, cancel: &Cancellati
     past(deadline) || cancel.is_cancelled()
 }
 
-/// [`follow_up_work_until`] that also ends at the run's `cancel`.
+/// [`follow_up_work_until`] that also ends at the run's `cancel`: cancellation zeroes the
+/// reclassification and skips the clean-up; the delivered review's history is still recorded
+/// (two bounded git calls).
 fn follow_up_steps(
     memory: &ReviewMemory,
     git: &dyn GitCommand,
