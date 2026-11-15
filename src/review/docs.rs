@@ -1883,6 +1883,47 @@ mod tests {
     }
 
     #[test]
+    fn doc_comments_of_an_upper_case_extension_are_chunked() {
+        // [MAGI S6 MS3 loop20, R1 Caspar] the registry matches `.RS` in lower case, but the
+        // language match was exact, so the file had an extractor and never yielded a chunk.
+        let reg = LanguageRegistry::new();
+        for (path, src) in [
+            ("src/FOO.RS", "/// Doc of f.\nfn f() {}\n"),
+            (
+                "src/BAR.PY",
+                "def g():\n    \"\"\"Doc of g.\"\"\"\n    pass\n",
+            ),
+        ] {
+            assert!(yields_doc_chunks(path, &reg), "{path}");
+            assert!(!chunk_source(path, src, &reg).is_empty(), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_block_doc_names_an_item_sixteen_lines_below_like_a_line_doc() {
+        // [MAGI S6 MS3 loop20, R1 Melchior] the block form chained a leading `after` and looked
+        // at one line fewer than the line form.
+        let reg = LanguageRegistry::new();
+        let name = |blanks: usize| {
+            let src = format!("/** D. */\n{}fn f() {{}}\n", "\n".repeat(blanks));
+            chunk_doc_comments("src/m.rs", &src, &reg)
+                .first()
+                .map(|c| c.section.clone())
+        };
+        assert_eq!(name(MAX_ITEM_LOOKAHEAD_LINES - 1), Some("f".to_string()));
+        assert_eq!(name(MAX_ITEM_LOOKAHEAD_LINES), Some(String::new()));
+    }
+
+    #[test]
+    fn stacked_attributes_on_the_item_line_keep_its_name() {
+        // [MAGI S6 MS3 loop20, R1 Melchior] `#[a] #[b] fn x()` read `#[b]` as the keyword.
+        let reg = LanguageRegistry::new();
+        let src = "/// D.\n#[a] #[b] fn x() {}\n";
+        let chunks = chunk_doc_comments("src/m.rs", src, &reg);
+        assert_eq!(chunks.first().map(|c| c.section.as_str()), Some("x"));
+    }
+
+    #[test]
     fn indexing_is_bounded_and_the_truncation_is_reported() {
         // [CP2 MS3 loop 6] Reverse order, so keeping the first by path needs the sort, not only the cut.
         // [RV21 D+B, 2026-10-20] One chunk per source here; whole sources are kept.

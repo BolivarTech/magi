@@ -3655,6 +3655,28 @@ mod tests {
         );
     }
     #[test]
+    fn runner_build_errors_pass_through_egress_text() {
+        // [MAGI S6 MS3 loop20, R5 Melchior/Caspar] `egress_text` is documented as the one scrubber
+        // of every error string this tool builds; `stateless` and `check_review_input` wrapped
+        // theirs raw. A source guard (the needle is split so it does not match itself), plus a
+        // behavioral check that the guarded workspace error carries no token.
+        let source = include_str!("code_review.rs").replace('\r', "");
+        let raw = concat!("ReviewError::Io(e.", "to_string())");
+        assert!(!source.contains(raw), "an error string skips egress_text");
+        let missing = std::env::temp_dir().join(concat!(
+            "no-such-",
+            "ghp_",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        )); // allow-secret-scan
+        let err = check_review_input(&missing, &ReviewInput::File("a.rs".into()))
+            .expect_err("a missing workspace is refused");
+        assert!(
+            !err.to_string()
+                .contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            "{err}"
+        );
+    }
+    #[test]
     fn egress_text_withholds_a_whole_text_holding_a_key_block() {
         // [MAGI S6 MS3 loop19, R5 Caspar] `egress_text` asked `mask_secrets` alone, which knows
         // only the contiguous PEM header: a header only the spaceless reader or a strip view
