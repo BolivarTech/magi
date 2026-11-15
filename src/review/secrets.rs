@@ -1243,8 +1243,8 @@ const HEADER_JOINERS: [char; 6] = [' ', '\t', '"', '\'', ',', '+'];
 /// Whether `line`, with its spaces and literal joiners ([`HEADER_JOINERS`]) removed, holds a
 /// private-key header: four or more dashes,
 /// `BEGIN`, upper-case letters or digits ending in `PRIVATEKEY` or `PRIVATEKEYBLOCK`, then four
-/// dashes; one optional space is read before `BEGIN` and before the closing dashes (the
-/// canonical SSH2 armor, `---- BEGIN SSH2 PRIVATE KEY ----`). So a PEM, OpenPGP or SSH2 header
+/// dashes; any run of spaces and tabs is read before `BEGIN`, and the joiners before the closing
+/// dashes (the canonical SSH2 armor, `---- BEGIN SSH2 PRIVATE KEY ----`, and `-----  BEGIN`). So a PEM, OpenPGP or SSH2 header
 /// split at a token boundary (`…RSA PRIVATE` +
 /// `KEY-----`, in a separator-free concatenation) still opens a block
 /// (`spaceless_header_is_a_block`); upper-case words (the caller reads a lower-cased text through an
@@ -1257,11 +1257,12 @@ fn spaceless_key_header(line: &str) -> bool {
     // constants (`concat!("-----", "BEGIN ", ..)`) is no block.
     line.match_indices("BEGIN").any(|(at, begin)| {
         // MAGI FIX (MS3 §6 loop14): the canonical SSH2 armor has a space on each side of the
-        // words (`---- BEGIN SSH2 PRIVATE KEY ----`): one optional space is read there.
+        // words (`---- BEGIN SSH2 PRIVATE KEY ----`): the spaces are read there.
+        // MAGI FIX (MS3 §6 loop19, R6a2 Caspar): any run of spaces and tabs, not one space, so
+        // `-----  BEGIN` opens a block; quotes and commas stay unskipped there (`concat!`).
         let before = line.get(..at).unwrap_or_default();
         let opened = before
-            .strip_suffix(' ')
-            .unwrap_or(before)
+            .trim_end_matches([' ', '\t'])
             .ends_with(SSH2_ARMOR_DASHES);
         if !opened {
             return false;
