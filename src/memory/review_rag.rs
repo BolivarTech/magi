@@ -1476,6 +1476,9 @@ pub async fn prepare_docs(
         return degraded(prep, &cause, started);
     }
     let mut chunked = Vec::new();
+    // MAGI FIX (S6 loop 18, R2a): candidates only; `declare_masked` keeps those still in
+    // `doc_sources`, so a source the bound cut or the store refused is never declared masked.
+    let mut masked: Vec<(DocSource, String, &'static str)> = Vec::new();
     for (source, bytes) in pairs.into_iter().filter(|(s, _)| missing.contains(s)) {
         if Instant::now() >= deadline {
             // MAGI FIX (MS3 §6 loop8): both causes named the constant, not the bound passed.
@@ -1532,8 +1535,7 @@ pub async fn prepare_docs(
                 .iter()
                 .find_map(|c| masked_pattern(&c.text).or_else(|| masked_pattern(&c.section)))
             {
-                prep.masked_sources
-                    .push((display_path(&source.path), pattern));
+                masked.push((source.clone(), display_path(&source.path), pattern));
             }
             chunked.push((source, kept));
         } else {
@@ -1546,12 +1548,24 @@ pub async fn prepare_docs(
         let left = deadline.saturating_duration_since(Instant::now());
         prep.doc_index.still_indexing |= left.is_zero();
         if left.is_zero() || !index_batch(docs, &batch, embedder, left, &mut prep).await {
+            declare_masked(&mut prep, masked);
             let cause = "a batch of documentation sources was not indexed";
             return degraded(prep, cause, started);
         }
     }
+    declare_masked(&mut prep, masked);
     prep.index_ms = millis(started.elapsed());
     prep
+}
+
+/// Declares as masked the candidates whose source is still in `prep.doc_sources`: one the chunk
+/// bound cut or the store refused was never stored or served, so it is not "masked" (RV13).
+fn declare_masked(prep: &mut DocPrep, candidates: Vec<(DocSource, String, &'static str)>) {
+    prep.masked_sources = candidates
+        .into_iter()
+        .filter(|(source, _, _)| prep.doc_sources.contains(source))
+        .map(|(_, path, pattern)| (path, pattern))
+        .collect();
 }
 
 /// [`bounded`] over `chunked`, recording a cut in `prep` (declared truncated); a cut source leaves
