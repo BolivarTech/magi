@@ -239,25 +239,27 @@ const TAG_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-docs/lookup-tag-key/v1";
 /// # Returns
 /// The 32-byte tag. O(key + data).
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let hashed;
+    // MAGI FIX (MS3 §6 loop19, R1): the key may be the data key; the pads (key XOR a constant,
+    // so invertible) and the hashed long key are wiped on drop and never copied by value.
+    let mut hashed = Zeroizing::new([0u8; 32]);
     let key = if key.len() > HMAC_BLOCK_BYTES {
-        hashed = Sha256::digest(key);
+        hashed.copy_from_slice(Sha256::digest(key).as_slice());
         hashed.as_slice()
     } else {
         key
     };
-    let mut inner_pad = [0x36u8; HMAC_BLOCK_BYTES];
-    let mut outer_pad = [0x5cu8; HMAC_BLOCK_BYTES];
+    let mut inner_pad = Zeroizing::new([0x36u8; HMAC_BLOCK_BYTES]);
+    let mut outer_pad = Zeroizing::new([0x5cu8; HMAC_BLOCK_BYTES]);
     for ((i, o), k) in inner_pad.iter_mut().zip(outer_pad.iter_mut()).zip(key) {
         *i ^= k;
         *o ^= k;
     }
     let inner = Sha256::new()
-        .chain_update(inner_pad)
+        .chain_update(&inner_pad[..])
         .chain_update(data)
         .finalize();
     let outer = Sha256::new()
-        .chain_update(outer_pad)
+        .chain_update(&outer_pad[..])
         .chain_update(inner)
         .finalize();
     let mut mac = [0u8; 32];
