@@ -4440,6 +4440,27 @@ mod tests {
         assert!(record_history(&memory, &Prints(full), "main", &[], budget).is_ok());
     }
 
+    #[test]
+    fn record_history_asks_ancestry_once() {
+        // [MAGI S6 MS3 loop18, R5] The ancestry query was issued twice; a transient failure of
+        // the second one zeroed a budget the first had preserved.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counting(AtomicUsize);
+        impl GitCommand for Counting {
+            fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                if args.first() == Some(&"merge-base") {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(b"abc1234def5678901234567890123456789abcde\n".to_vec())
+            }
+        }
+        let (_db, _mem, memory) = review_memory();
+        let git = Counting(AtomicUsize::new(0));
+        let r = record_history(&memory, &git, "main", &[], Duration::from_secs(1));
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(git.0.load(Ordering::SeqCst), 1, "one ancestor query");
+    }
+
     #[tokio::test]
     async fn a_zero_or_sub_second_total_is_a_typed_refusal_never_truncated_to_nothing() {
         // [MAGI S6 MS3 loop7, R5 Caspar] `as_secs` truncated half a second to zero; the total is
