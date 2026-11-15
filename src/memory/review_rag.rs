@@ -4063,6 +4063,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_masked_source_cut_by_the_bound_is_not_declared_masked() {
+        // [MAGI S6 MS3 loop18, R2a] `masked_sources` was filled before `bounded_into`, so a
+        // source the chunk bound cut (never stored, never served) was still declared masked.
+        let secret = "export KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n"; // allow-secret-scan
+        let small = format!("# Setup\n{secret}");
+        let mut big = format!("# Setup\n{secret}");
+        for i in 0..=magi_rs::review::docs::MAX_DOC_CHUNKS {
+            big.push_str(&format!("# s{i}\nx\n"));
+        }
+        let f = RagFixture::new(&[
+            ("README.md", &small),
+            ("CLAUDE.md", &big),
+            ("a.rs", "fn a() {}\n"),
+        ])
+        .await;
+        let paths = ["README.md".to_string(), "CLAUDE.md".to_string()];
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &paths,
+            &|_: &str| true,
+            &f.registry,
+            &f.embedder,
+            BOUND,
+        )
+        .await;
+        assert!(prep.doc_index.truncated, "the bound cut a source");
+        assert_eq!(
+            prep.masked_sources,
+            vec![("README.md".to_string(), "anthropic-key")]
+        );
+    }
+
+    #[tokio::test]
     async fn a_source_masked_by_an_earlier_review_is_served_with_its_mask() {
         // [MAGI S6 MS3 loop6, R2 Caspar] A second review finds the source indexed, so its
         // `masked_sources` is empty; what it serves still carries the mask, which is what the
