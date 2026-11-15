@@ -2384,7 +2384,7 @@ _REVIEW_CONTEXT_FILE = (b"/// Adds two numbers.\n"
 
 
 @contextlib.contextmanager
-def embedder_pointed_away(config_path):
+def embedder_pointed_away(config_path, log=None):
     """Point the ``[embedding]`` of the ``magi.toml`` at *config_path* at a served error.
 
     For the block's duration, an :func:`error_backend` on loopback answers every
@@ -2396,6 +2396,8 @@ def embedder_pointed_away(config_path):
         config_path: The review workspace's configuration, rewritten for the
             block and restored byte for byte when it ends, however it ends; a
             failed restore is retried once, then raised naming ``--reset-env``.
+        log: A :class:`RequestLog` the backend records every request in
+            (:func:`error_backend`), or ``None``.
 
     Yields:
         str: The URL ``[embedding]`` now reaches.
@@ -2411,7 +2413,7 @@ def embedder_pointed_away(config_path):
     except OSError as exc:
         raise HarnessError("could not read %s to point its embedder away: %s"
                            % (config_path, exc)) from exc
-    with error_backend() as url:
+    with error_backend(log) as url:
         try:
             point_embedding_at(config_path, url)
             yield url
@@ -4564,8 +4566,13 @@ class RunExecutor:
         if workspace is None:
             raise HarnessError("run %s points its embedder away but has no review "
                                "workspace" % definition.run_id)
-        with embedder_pointed_away(workspace.joinpath(*CONFIG_PATH_PARTS)):
-            yield
+        # MAGI FIX (MS3 §6 loop17, R7a1): the count joins `_reached`, so the result carries it.
+        log = RequestLog()
+        try:
+            with embedder_pointed_away(workspace.joinpath(*CONFIG_PATH_PARTS), log):
+                yield
+        finally:
+            self._reached.append(log.total)
 
     @contextlib.contextmanager
     def _counted_endpoints(self, definition: RunDefinition, workspace, contacted):

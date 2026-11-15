@@ -154,14 +154,40 @@ def a_review_without_an_embedder_runs_and_says_so(run):
     summary = report.get(CODE_REVIEW_KEY)
     summary = summary if isinstance(summary, dict) else {}
     value = summary.get(WITHOUT_EMBEDDER_KEY)
-    yield _verdict(1, value is True,
-                   "code_review.without_embedder is %r, not true" % (value,))
+    asked = _embedder_asked(run)
+    if asked is not None:
+        yield _finding(1, *asked)
+    else:
+        yield _verdict(1, value is True,
+                       "code_review.without_embedder is %r, not true" % (value,))
     # MAGI FIX (S6 MS3 loop3): the boolean alone was read; RV07 declares the cause in `trimmed`.
     degraded = _degraded_labels(summary.get(TRIMMED_KEY))
     if degraded is None:
         yield _finding(2, Outcome.FAIL, "code_review.trimmed is missing or not a list of entries")
     else:
         yield _verdict(2, bool(degraded), "code_review.trimmed names no degraded cause")
+
+
+def _embedder_asked(run):
+    """Whether the degraded embedder received a request, as the outcome to report if it did not.
+
+    MAGI FIX (MS3 §6 loop17, R7a1): a declaration of a down embedder with no request behind
+    it proves nothing about degradation; the count is the harness's own observation.
+
+    Args:
+        run: R17's or R22's ``RunResult``.
+
+    Returns:
+        tuple | None: ``None`` when the embedder answered at least one request; otherwise
+        ``(outcome, detail)``: ``CANNOT_TEST`` when the count was not collected, ``FAIL``
+        when it is zero (the product declared a degradation it never met).
+    """
+    count = getattr(run, "backend_requests", None)
+    if count is None:
+        return Outcome.CANNOT_TEST, "the harness did not count the embedder's requests"
+    if count < 1:
+        return Outcome.FAIL, "the degraded embedder received no request"
+    return None
 
 
 #: The verbatim assertion texts of S55.
@@ -484,10 +510,13 @@ def a_review_with_history_and_a_down_embedder_declares_it(run):
     history_degraded = (isinstance(trimmed, list)
                         and any(isinstance(t, dict) and t.get("kind") == _HISTORY_KIND
                                 and t.get(TRIMMED_LABEL_KEY) in DEGRADED_LABELS for t in trimmed))
+    asked = _embedder_asked(run)
     if not _seeded_findings(run):
         # MAGI FIX (MS3 §6 loop17, R7a1 Caspar): no seeded history, no history to be unretrievable.
         yield Finding(assertion=texts[1], outcome=Outcome.CANNOT_TEST, run_id="R22",
                       detail=_NO_SEEDED_HISTORY)
+    elif asked is not None:
+        yield code_review.finding(texts, 1, asked[0], "R22", asked[1])
     else:
         yield code_review.verdict(texts, 1, "R22",
                                   summary.get(WITHOUT_EMBEDDER_KEY) is True and history_degraded,
