@@ -3590,6 +3590,35 @@ mod tests {
         assert!(!out.contains('\u{1b}'), "{out:?}");
     }
     #[test]
+    fn egress_text_withholds_a_whole_text_holding_a_key_block() {
+        // [MAGI S6 MS3 loop19, R5 Caspar] `egress_text` asked `mask_secrets` alone, which knows
+        // only the contiguous PEM header: a header only the spaceless reader or a strip view
+        // recognises left with its body readable, where `outward_text` withholds it. A key block
+        // is never masked (REQ-RV22, its exception): the whole text is withheld.
+        let withheld = "<redacted: private-key-block>";
+        let (d, k) = ("-----", concat!("PRIVATE ", "KEY-----"));
+        let end = concat!("-----", "END RSA ", "PRIVATE KEY-----");
+        for text in [
+            format!("let h = \"{d}BEGIN \" \"RSA {k}\";\nMIIBOgIBAAJBAK\n"),
+            format!("{d}  BEGIN RSA {k}\nMIIBOgIBAAJBAK\n"),
+            format!("{d}BEGIN RSA PRIVATE\u{200b} KEY{d}\nMIIBOgIBAAJBAK\n"),
+            format!("note {d}BEGIN RSA {k}\nMIIBOgIBAAJBAK\n{end}\ntail"),
+        ] {
+            let out = egress_text(&text);
+            assert_eq!(out, withheld, "{text:?}");
+            assert!(!out.contains("MIIBOg"), "{out}");
+        }
+        let key = concat!("sk-ant-api03-", "BBBBBBBBBBBBBBBBBBBB"); // allow-secret-scan
+        let out = egress_text(&format!("refused {key} here"));
+        assert_ne!(out, withheld, "a one-line secret is masked, not withheld");
+        assert!(
+            out.starts_with("refused ") && out.ends_with(" here"),
+            "{out}"
+        );
+        assert!(!out.contains("BBBBBBBBBB"), "{out}");
+    }
+
+    #[test]
     fn post_report_notes_hold_anywhere() {
         // MAGI FIX (MS3 §6 loop11): the notes promised a "next review", which a one-shot
         // process (`magi query`, the subcommand) never runs; each must be true on every surface.
