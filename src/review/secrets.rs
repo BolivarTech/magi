@@ -2393,11 +2393,13 @@ mod tests {
             for body in ["MIIBOg", "AAAAB3", "body"] {
                 assert!(!out.contains(body), "{text:?}: {out}");
             }
-            assert!(out.contains("redacted"), "{text:?}: {out}");
+            // The key-block withholding itself, not the fail-closed backstop after it.
+            assert_eq!(out, KEY_BLOCK_WITHHELD, "{text:?}");
         }
         let hidden = format!("{PEM_BEGIN}RSA PRIV\u{200b}ATE KEY-----\nMIIBOgIBAAJBAK\n");
         let out = outward_text(&hidden);
         assert!(!out.contains("MIIBOg"), "{out}");
+        assert_eq!(out, KEY_BLOCK_WITHHELD);
         assert_eq!(outward_text("fatal: bad ref"), "fatal: bad ref");
     }
 
