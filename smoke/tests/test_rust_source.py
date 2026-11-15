@@ -360,6 +360,7 @@ class SecretOpeningsTests(unittest.TestCase):
         source = self._TOKENS + 'const NON_TOKEN_PREFIXES: &[&str] = &["-----begin "];\n'
         self.assertEqual(["ghp_", "sk-", "-----begin "], self._openings(source))
 
+
 class GuardRoutingTests(unittest.TestCase):
     """The sync guards themselves read through the helpers."""
 

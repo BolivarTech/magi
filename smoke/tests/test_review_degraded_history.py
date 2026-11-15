@@ -4,9 +4,9 @@
 """S58 and R22: a review with seeded history and an unreachable embedder (RV07, RV-S8)."""
 
 import dataclasses
+import json
 import pathlib
 import tempfile
-import types
 import unittest
 import unittest.mock
 
@@ -26,7 +26,6 @@ _FINDING = {"file": runs.REVIEW_HISTORY_FILE, "line": 3, "title": "overflow"}
 
 def _out(code: int = 0, document=None) -> ProductOutput:
     """A product output whose stdout is *document* serialised."""
-    import json
     body = b"" if document is None else json.dumps(document).encode()
     return ProductOutput(stdout=body, stderr=b"", exit_code=code, command=["magi-rs"])
 

@@ -281,8 +281,8 @@ class ReviewRunDefinitionTests(unittest.TestCase):
             temporary, applied = chmod.call_args.args
             self.assertEqual(0o600, applied)
             self.assertEqual(config.parent, pathlib.Path(temporary).parent)
-            self.assertTrue(pathlib.Path(temporary).name.startswith("magi.toml.")
-                            and temporary.name.endswith(".tmp"), temporary)
+            name = pathlib.Path(temporary).name
+            self.assertTrue(name.startswith("magi.toml.") and name.endswith(".tmp"), temporary)
 
     def test_a_config_without_an_embedding_table_gains_one(self) -> None:
         url = "http://127.0.0.1:1/v1"
