@@ -5,8 +5,9 @@
 //! The diff of a masked file, rebuilt or masked by line so that no byte of a masked secret leaves.
 //!
 //! **Egress invariant.** Every diff text this module returns is built from the (masked) sides of
-//! the file or masked line by line, and its caller scans it with `find_secret` before it is
-//! served; a line that no masked side shows verbatim never travels. The two paths, [`rebuilt_diff`]
+//! the file or masked line by line, and it is asked the one egress predicate ([`diff_leaks`]:
+//! `leaks_secret` over the text and each hunk's side projections) before it is served, as is a
+//! diff kept as git printed it; a line that no masked side shows verbatim never travels. The two paths, [`rebuilt_diff`]
 //! (lines taken from the sides at the numbers the hunk headers give) and [`fallback_diff`] (the
 //! raw diff masked by line), are checked against each other by `no_byte_of_a_secret_leaves`.
 
