@@ -217,7 +217,8 @@ pub struct ReviewDocStore {
     dek: Mutex<MaskedDek>,
     /// `doc_index_id(model, dim)` of the vectors this store serves.
     index_id: String,
-    /// Stored vectors decrypted so far: the seam that shows a review decrypts each once.
+    /// Stored vectors decrypted so far: each allowed row is decrypted once per batch (the scan
+    /// repeats per batch, declared in `scan_top_k`).
     vector_decrypts: AtomicUsize,
 }
 
