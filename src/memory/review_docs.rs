@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, TransactionBehavior};
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
@@ -238,8 +238,11 @@ const TAG_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-docs/lookup-tag-key/v1";
 /// * `data` - the message.
 ///
 /// # Returns
-/// The 32-byte tag. O(key + data).
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+/// The 32-byte tag, wiped on drop (with the data key as `key` it is the tag subkey). O(key + data).
+///
+/// Declared limit: the internal state of `sha2`'s hasher is not wiped (best effort, like
+/// `MaskedDek`); the pads, the hashed key and both digests are.
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
     // MAGI FIX (MS3 §6 loop19, R1): the key may be the data key; the pads (key XOR a constant,
     // so invertible) and the hashed long key are wiped on drop and never copied by value.
     let mut hashed = Zeroizing::new([0u8; 32]);
@@ -255,16 +258,18 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
         *i ^= k;
         *o ^= k;
     }
-    let inner = Sha256::new()
+    let mut inner = Sha256::new()
         .chain_update(&inner_pad[..])
         .chain_update(data)
         .finalize();
-    let outer = Sha256::new()
+    let mut outer = Sha256::new()
         .chain_update(&outer_pad[..])
         .chain_update(inner)
         .finalize();
-    let mut mac = [0u8; 32];
+    let mut mac = Zeroizing::new([0u8; 32]);
     mac.copy_from_slice(outer.as_slice());
+    inner.as_mut_slice().zeroize();
+    outer.as_mut_slice().zeroize();
     mac
 }
 
@@ -404,13 +409,13 @@ impl ReviewDocStore {
     ) -> Result<Vec<String>, MemoryError> {
         let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
         Ok(dek.with_dek(|k| {
-            let subkey = Zeroizing::new(hmac_sha256(k, TAG_SUBKEY_LABEL));
+            let subkey = hmac_sha256(k, TAG_SUBKEY_LABEL);
             values
                 .into_iter()
                 .map(|v| {
                     let mut msg = domain.label().to_vec();
                     msg.extend_from_slice(v.as_bytes());
-                    to_hex(&hmac_sha256(subkey.as_slice(), &msg))
+                    to_hex(hmac_sha256(subkey.as_slice(), &msg).as_slice())
                 })
                 .collect()
         }))
