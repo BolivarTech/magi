@@ -2739,6 +2739,131 @@ mod tests {
         assert!(dims(&store).is_empty());
     }
 
+    /// A second store on the same database and identity: another review running at the same
+    /// time (another process in production, WAL).
+    fn concurrent_review(store: &ReviewDocStore) -> ReviewDocStore {
+        let dek = store
+            .dek
+            .lock()
+            .expect("dek")
+            .duplicate()
+            .expect("duplicate");
+        ReviewDocStore::new(Arc::clone(&store.conn), dek, store.index_id.clone()).expect("store")
+    }
+
+    /// Sets the `touched_at` of every source row (unix seconds).
+    fn set_touched_at(store: &ReviewDocStore, at: i64) {
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .execute("UPDATE code_review_doc_sources SET touched_at = ?1", [at])
+            .expect("backdate");
+    }
+
+    /// The `touched_at` of every source row.
+    fn touched_ats(store: &ReviewDocStore) -> Vec<i64> {
+        store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .prepare("SELECT touched_at FROM code_review_doc_sources")
+            .expect("prep")
+            .query_map([], |r| r.get(0))
+            .expect("q")
+            .collect::<Result<_, _>>()
+            .expect("rows")
+    }
+
+    #[tokio::test]
+    async fn a_concurrent_clean_up_spares_a_source_touched_within_the_grace() {
+        // [MAGI S6 MS3 loop23, R1 Caspar] Review B indexes a revision no local ref reaches (a
+        // detached commit); review A's clean-up, running at the same time, deleted B's rows
+        // between B's indexing and its search. Within the grace they stay; past it they go.
+        let (b, _dir) = store_for_test();
+        let doomed = [(src("d.md", "k"), vec![chunk("d.md", "A", "x")])];
+        b.reindex(&doomed, &FakeEmbedder::new(3))
+            .await
+            .expect("index");
+        let a = concurrent_review(&b);
+        assert_eq!(a.gc(&BTreeSet::new(), false).expect("gc"), 0, "fresh: kept");
+        assert_eq!(dims(&b).len(), 1, "B's chunk is still there");
+        set_touched_at(&b, 0);
+        assert_eq!(
+            a.gc(&BTreeSet::new(), false).expect("gc"),
+            1,
+            "stale: deleted"
+        );
+        assert!(dims(&b).is_empty());
+    }
+
+    #[tokio::test]
+    async fn reindexing_stored_sources_refreshes_their_touch() {
+        // [MAGI S6 MS3 loop23, R1 Caspar] Reuse counts as a touch: a source already stored and
+        // skipped by a later indexing is as fresh as a written one.
+        let (store, _dir) = store_for_test();
+        let e = FakeEmbedder::new(3);
+        let sources = [(src("d.md", "k"), vec![chunk("d.md", "A", "x")])];
+        store.reindex(&sources, &e).await.expect("index");
+        set_touched_at(&store, 0);
+        let s = store.reindex(&sources, &e).await.expect("again");
+        assert_eq!(s.sources, 0, "skipped, already stored");
+        assert!(touched_ats(&store).iter().all(|&t| t > 0), "touched again");
+    }
+
+    #[tokio::test]
+    async fn asking_what_is_missing_refreshes_the_stored_sources_touch() {
+        // [MAGI S6 MS3 loop23, R1 Caspar] A review asks `missing` first and indexes only what is
+        // missing, so the sources it reuses are touched there.
+        let (store, _dir) = store_for_test();
+        let s = src("d.md", "k");
+        store
+            .reindex(
+                &[(s.clone(), vec![chunk("d.md", "A", "x")])],
+                &FakeEmbedder::new(3),
+            )
+            .await
+            .expect("index");
+        set_touched_at(&store, 0);
+        assert!(store.missing(&[s]).expect("missing").is_empty());
+        assert!(touched_ats(&store).iter().all(|&t| t > 0), "touched again");
+    }
+
+    #[tokio::test]
+    async fn a_source_another_review_also_touched_is_spared_by_its_first_indexer() {
+        // [MAGI S6 MS3 loop23, R1 Caspar] A review deletes its own unreachable sources at once,
+        // but not one a concurrent review also uses: B reuses A's detached-commit source.
+        let (a, _dir) = store_for_test();
+        let s = src("d.md", "k");
+        a.reindex(
+            &[(s.clone(), vec![chunk("d.md", "A", "x")])],
+            &FakeEmbedder::new(3),
+        )
+        .await
+        .expect("index");
+        let b = concurrent_review(&a);
+        assert!(b.missing(&[s]).expect("missing").is_empty(), "B reuses it");
+        assert_eq!(
+            a.gc(&BTreeSet::new(), false).expect("gc"),
+            0,
+            "shared: kept"
+        );
+        assert_eq!(dims(&a).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_working_tree_review_drops_an_older_version_another_review_touched() {
+        // [MAGI S6 MS3 loop23] A listed working tree is authoritative: a version no longer in it
+        // goes at once, whoever touched it (declared on `gc`).
+        let (old, _dir) = store_for_test();
+        let wt = src("README.md", &magi_rs::review::docs::worktree_key(b"v1"));
+        old.reindex(&[(wt, vec![])], &FakeEmbedder::new(3))
+            .await
+            .expect("index");
+        let now = concurrent_review(&old);
+        assert_eq!(now.gc(&BTreeSet::new(), false).expect("gc"), 1);
+    }
+
     #[tokio::test]
     async fn after_a_revision_review_the_clean_up_keeps_working_tree_sources() {
         // A revision review never listed the working tree, so it cannot judge those sources.
