@@ -37,12 +37,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, TransactionBehavior};
-use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::memory::embedding::EmbeddingProvider;
 use crate::memory::error::MemoryError;
 use crate::memory::index::cosine;
+use crate::memory::lookup_tag::lookup_tags;
 use cryptovault::CryptoVault;
 use magi_rs::review::docs::{
     chunk_hash, doc_index_id, DocChunk, DocSource, MAX_DOC_CHUNK_BYTES, WORKTREE_KEY_PREFIX,
@@ -231,61 +231,10 @@ pub struct ReviewDocStore {
     touch_token: String,
 }
 
-/// The HMAC block size of SHA-256 (RFC 2104).
-const HMAC_BLOCK_BYTES: usize = 64;
-
 /// The label the lookup-tag subkey is derived under (one subkey per purpose, never the data key
 /// itself). Versioned: changing it orphans every stored tag, so it moves with
 /// `DOC_INDEX_VERSION`.
 const TAG_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-docs/lookup-tag-key/v1";
-
-/// HMAC-SHA-256 (RFC 2104) of `data` under `key`: implemented over the `sha2` crate the project
-/// already depends on, to avoid a new dependency for twenty lines; pinned by the RFC 4231 vector.
-///
-/// # Arguments
-/// * `key` - the MAC key (any length).
-/// * `data` - the message.
-///
-/// # Returns
-/// The 32-byte tag, wiped on drop (with the data key as `key` it is the tag subkey). O(key + data).
-///
-/// Declared limit: the internal state of `sha2`'s hasher is not wiped (best effort, like
-/// `MaskedDek`); the pads, the hashed key and both digests are.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
-    // MAGI FIX (MS3 §6 loop19, R1): the key may be the data key; the pads (key XOR a constant,
-    // so invertible) and the hashed long key are wiped on drop and never copied by value.
-    let mut hashed = Zeroizing::new([0u8; 32]);
-    let key = if key.len() > HMAC_BLOCK_BYTES {
-        hashed.copy_from_slice(Sha256::digest(key).as_slice());
-        hashed.as_slice()
-    } else {
-        key
-    };
-    let mut inner_pad = Zeroizing::new([0x36u8; HMAC_BLOCK_BYTES]);
-    let mut outer_pad = Zeroizing::new([0x5cu8; HMAC_BLOCK_BYTES]);
-    for ((i, o), k) in inner_pad.iter_mut().zip(outer_pad.iter_mut()).zip(key) {
-        *i ^= k;
-        *o ^= k;
-    }
-    let mut inner = Sha256::new()
-        .chain_update(&inner_pad[..])
-        .chain_update(data)
-        .finalize();
-    let mut outer = Sha256::new()
-        .chain_update(&outer_pad[..])
-        .chain_update(inner)
-        .finalize();
-    let mut mac = Zeroizing::new([0u8; 32]);
-    mac.copy_from_slice(outer.as_slice());
-    inner.as_mut_slice().zeroize();
-    outer.as_mut_slice().zeroize();
-    mac
-}
-
-/// Lowercase hex of `bytes`.
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 /// The domains a lookup tag is computed in, so a path and a key with the same text never share a
 /// tag.
@@ -435,17 +384,12 @@ impl ReviewDocStore {
         values: impl IntoIterator<Item = &'v str>,
     ) -> Result<Vec<String>, MemoryError> {
         let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
-        Ok(dek.with_dek(|k| {
-            let subkey = hmac_sha256(k, TAG_SUBKEY_LABEL);
-            values
-                .into_iter()
-                .map(|v| {
-                    let mut msg = domain.label().to_vec();
-                    msg.extend_from_slice(v.as_bytes());
-                    to_hex(hmac_sha256(subkey.as_slice(), &msg).as_slice())
-                })
-                .collect()
-        }))
+        Ok(lookup_tags(
+            &mut dek,
+            TAG_SUBKEY_LABEL,
+            domain.label(),
+            values,
+        ))
     }
 
     /// The tags of `sources`, in order.
@@ -1570,48 +1514,6 @@ mod tests {
             .expect("store"),
             tmp,
         )
-    }
-
-    #[test]
-    fn hmac_pads_are_zeroized() {
-        // [MAGI §6 MS3 loop19, R1] a stack residue cannot be tested deterministically, so the
-        // guard reads the source: the pads (key XOR constant, invertible to the data key) and the
-        // hashed long key are `Zeroizing`, and no pad is passed by value to the hasher.
-        let src = include_str!("review_docs.rs").replace('\r', "");
-        let start = src.find("fn hmac_sha256(").expect("the function");
-        let body = &src[start..];
-        let body = &body[..body.find("/// Lowercase hex").expect("its end")];
-        assert!(body.matches("Zeroizing").count() >= 3, "{body}");
-        assert!(!body.contains("chain_update(inner_pad)"), "{body}");
-        assert!(!body.contains("chain_update(outer_pad)"), "{body}");
-    }
-
-    #[test]
-    fn hmac_result_and_digests_are_zeroized() {
-        // [MAGI §6 MS3 loop22, R1] with the data key as key the MAC is the tag subkey, and the
-        // inner/outer digests are derived from it: the MAC is returned `Zeroizing` and both
-        // digests are wiped before return.
-        let src = include_str!("review_docs.rs").replace('\r', "");
-        let start = src.find("fn hmac_sha256(").expect("the function");
-        let body = &src[start..];
-        let body = &body[..body.find("/// Lowercase hex").expect("its end")];
-        assert!(
-            body.contains("-> Zeroizing<[u8; 32]>"),
-            "the MAC is returned as Zeroizing: {body}"
-        );
-        assert!(body.contains("inner.as_mut_slice().zeroize()"), "{body}");
-        assert!(body.contains("outer.as_mut_slice().zeroize()"), "{body}");
-    }
-
-    #[test]
-    fn hmac_sha256_matches_rfc_4231_test_case_2() {
-        // RFC 4231, case 2: key "Jefe", data "what do ya want for nothing?".
-        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
-        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex,
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
     }
 
     /// Every stored column of both documentation tables as lossy text, one string per table.

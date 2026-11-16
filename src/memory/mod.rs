@@ -21,6 +21,7 @@ pub mod embedding;
 pub mod error;
 pub mod index;
 pub mod judge;
+pub mod lookup_tag;
 pub mod profile;
 pub mod retrieval;
 pub mod review_docs;
