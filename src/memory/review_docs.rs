@@ -1211,36 +1211,27 @@ impl ReviewDocStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
         // MAGI FIX (S6 MS3 loop23, R1): touches read in the deletes' IMMEDIATE transaction.
-        let stored: Vec<(SourceTag, bool)> = {
+        let stored: Vec<SourceTag> = {
             let mut stmt = tx
                 .prepare(&format!(
-                    "SELECT path, key, worktree, \
-                     touched_by <> ?1 AND touched_at >= unixepoch() - {GC_GRACE_SECS} \
-                     FROM code_review_doc_sources"
+                    "SELECT path, key, worktree FROM code_review_doc_sources WHERE worktree <> 0 \
+                     OR touched_by = ?1 OR touched_at < unixepoch() - {GC_GRACE_SECS}"
                 ))
                 .map_err(db_err)?;
             let rows = stmt
                 .query_map([&self.touch_token], |r| {
-                    Ok((
-                        SourceTag {
-                            path: r.get(0)?,
-                            key: r.get(1)?,
-                            worktree: r.get::<_, i64>(2)? != 0,
-                        },
-                        r.get::<_, i64>(3)? != 0,
-                    ))
+                    Ok(SourceTag {
+                        path: r.get(0)?,
+                        key: r.get(1)?,
+                        worktree: r.get::<_, i64>(2)? != 0,
+                    })
                 })
                 .map_err(db_err)?;
             rows.collect::<Result<_, _>>().map_err(db_err)?
         };
         let doomed: Vec<&SourceTag> = stored
             .iter()
-            .filter(|(s, in_grace)| {
-                !live.contains(s)
-                    && !(keep_worktree_keys && s.worktree)
-                    && (s.worktree || !in_grace)
-            })
-            .map(|(s, _)| s)
+            .filter(|s| !live.contains(*s) && !(keep_worktree_keys && s.worktree))
             .collect();
         // MAGI FIX (MS3 §6 loop5): one pair of deletes per batch of doomed sources, not per
         // source.
