@@ -205,7 +205,8 @@ impl DocVectors {
 /// is the model id plus its dimension, not a digest of the weights, so a model re-published
 /// under the same id with the same dimension keeps its old vectors until the database is purged
 /// (`DELETE FROM`, README); (2) two processes indexing the same chunk at once may both embed it,
-/// the second write replacing the first with an equal vector (writes are keyed by content);
+/// the second write is ignored (`INSERT OR IGNORE`), the first, equal vector is kept (writes
+/// are keyed by content);
 /// (3) a reusable blob that no longer decrypts fails that indexing (`encode_rows`), so the
 /// review runs without documentation and says so; the blob is not quarantined, and the failure
 /// repeats for every review that would reuse it until the source is replaced or the index is
