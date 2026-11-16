@@ -1788,6 +1788,23 @@ mod tests {
     }
 
     #[test]
+    fn an_item_on_the_closing_line_of_a_multi_line_attribute_is_named() {
+        // MAGI FIX (MS3 §6 loop21, R1 Caspar): the rest of a line was read only when it opened
+        // the attribute, so `)] fn foo() {}` closing a multi-line one was skipped whole and the
+        // chunk took the next item's name (or none).
+        let lines = [
+            "/// Doc.",
+            "#[cfg(",
+            "    feature = \"x\"",
+            ")] fn foo() {}",
+            "fn bar() {}",
+        ];
+        let c = rust_doc_chunks("a.rs", &lines);
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].section, "foo");
+    }
+
+    #[test]
     fn a_multi_line_attribute_before_the_item_is_skipped_whole() {
         // [MAGI S6 MS3 loop3, R1 Melchior] The attribute's continuation lines were read as the
         // item line, leaving the chunk without a section.
