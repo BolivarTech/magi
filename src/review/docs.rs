@@ -601,9 +601,11 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
         }
         if attr_depth > 0 || t.starts_with("#[") || t.starts_with("#![") {
             // MAGI FIX (MS3 §6 loop12): an item written after its attribute on one line is named.
-            if attr_depth == 0 {
+            // MAGI FIX (MS3 §6 loop21, R1): the line that closes a multi-line attribute may carry
+            // the item too (`)] fn foo() {}`); it is read from the open depth.
+            {
                 // MAGI FIX (MS3 §6 loop20, R1): stacked attributes `#[a] #[b] fn x()` are all skipped.
-                let mut rest = after_attribute(t).filter(|r| !r.is_empty());
+                let mut rest = after_attribute_at(attr_depth, t).filter(|r| !r.is_empty());
                 while let Some(r) = rest.filter(|r| r.starts_with("#[")) {
                     match after_attribute(r) {
                         Some(next) => rest = Some(next).filter(|n| !n.is_empty()),
@@ -643,7 +645,13 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
 /// inside a `"…"` string is text), the remainder trimmed. `None` when the attribute stays open
 /// past the line. O(len of `line`).
 fn after_attribute(line: &str) -> Option<&str> {
-    let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+    after_attribute_at(0, line)
+}
+
+/// [`after_attribute`] for a line read with `depth` brackets already open (a continuation line of
+/// a multi-line attribute): what follows the `]` that closes them, `None` while they stay open.
+fn after_attribute_at(depth: usize, line: &str) -> Option<&str> {
+    let (mut depth, mut quoted, mut escaped) = (depth, false, false);
     for (i, c) in line.char_indices() {
         if quoted {
             match (escaped, c) {
