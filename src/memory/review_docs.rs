@@ -72,14 +72,9 @@ const REUSE_LOOKUP_SQL: &str = "SELECT embedding_blob FROM code_review_docs \
 /// the 999-parameter limit of older SQLite builds.
 const ALLOWED_PAIRS_PER_QUERY: usize = 400;
 
-/// Seconds a source written or reused by an indexing stays safe from another review's clean-up
-/// ([`ReviewDocStore::gc`]), even when no local ref reaches it (S6 MS3 loop 23, R1 Caspar).
-///
-/// Why: review B may index a detached commit, or a branch created after review A listed the
-/// refs, while A's clean-up runs on the same database; without a grace A deleted B's rows
-/// between B's indexing and its last search. It must exceed a review's preparation, from its
-/// indexing to its last documentation search. One hour is a generous starting point, not a
-/// measurement; a larger value only defers a purge (the safe direction).
+/// Seconds another review's [`ReviewDocStore::gc`] spares a source an indexing wrote or reused,
+/// reachable or not: it must exceed a review's span from indexing to its last search, or a
+/// concurrent clean-up deletes what that review still searches. A starting point, not measured.
 pub(crate) const GC_GRACE_SECS: i64 = 3600;
 
 /// The `VALUES` list of `pairs` two-parameter rows, `(?, ?), (?, ?), ...`: the one builder of
@@ -128,7 +123,7 @@ struct Plan<'a> {
     new_sources: Vec<&'a (DocSource, Vec<DocChunk>)>,
     /// The tag of each of `new_sources`, by position.
     new_tags: Vec<SourceTag>,
-    /// The tag of every source of the group, written or already stored: all are touched.
+    /// The tag of every source of the group, all touched.
     touched: Vec<SourceTag>,
     /// The lookup tag of every chunk of `new_sources`, by its plaintext chunk hash.
     chunk_tags: BTreeMap<String, String>,
@@ -233,8 +228,7 @@ pub struct ReviewDocStore {
     /// Stored vectors decrypted so far: each allowed row is decrypted once per batch (the scan
     /// repeats per batch, declared in `scan_top_k`).
     vector_decrypts: AtomicUsize,
-    /// A random token of this store (one per review): the `touched_by` of the sources it touched
-    /// last, which its own clean-up may delete at once ([`Self::gc`]).
+    /// This store's (one review's) random `touched_by` ([`Self::gc`]).
     touch_token: String,
 }
 
@@ -374,11 +368,8 @@ impl ReviewDocStore {
         })
     }
 
-    /// Marks `tags` as written or reused now (`touched_at`) by this store (`touched_by`), in
-    /// batches of [`ALLOWED_PAIRS_PER_QUERY`]. The last toucher owns a source: its own
-    /// [`Self::gc`] may delete it at once, any other waits for [`GC_GRACE_SECS`]. The time is
-    /// SQLite's `unixepoch()`, the same clock `gc` reads. A tag with no row (deleted by another
-    /// clean-up) is a no-op. O(tags). The caller holds the connection lock (sync calls only).
+    /// Stamps `tags` as touched now (`unixepoch()`, `gc`'s clock) by this store, batched; a
+    /// missing row is a no-op. O(tags). Called under the connection lock, no await.
     fn touch(&self, c: &Connection, tags: &[&SourceTag]) -> Result<(), MemoryError> {
         for batch in tags.chunks(ALLOWED_PAIRS_PER_QUERY) {
             let values = pair_values(batch.len());
@@ -545,12 +536,9 @@ impl ReviewDocStore {
     /// every source of `wanted` is missing: the stored vectors are not comparable, and the
     /// change must be noticed even when nothing is new.
     ///
-    /// Side effect: every source of `wanted` already indexed is touched (its reuse by this
-    /// review counts like a write), so a concurrent review's [`Self::gc`] spares it within
-    /// [`GC_GRACE_SECS`].
+    /// Side effect: touches the indexed ones (a reuse, so [`Self::gc`] grace applies).
     ///
-    /// Complexity: O(stored sources + wanted log stored); the stored sources are read once, and
-    /// the touch is batched under the parameter limit.
+    /// Complexity: O(stored sources + wanted log stored); the stored sources are read once.
     ///
     /// # Errors
     /// [`MemoryError::Storage`] if a query fails.
@@ -562,9 +550,7 @@ impl ReviewDocStore {
                 return Ok(wanted.to_vec());
             }
             let indexed = self.indexed_sources(&c)?;
-            // MAGI FIX (S6 MS3 loop23, R1 Caspar): a review reuses what is already indexed
-            // without reindexing it, so the reuse is touched here, or a concurrent clean-up
-            // could delete it before this review's search.
+            // MAGI FIX (S6 MS3 loop23, R1): a reuse never reaches `reindex`, so it is touched here.
             let reused: Vec<&SourceTag> = tags.iter().filter(|t| indexed.contains(*t)).collect();
             self.touch(&c, &reused)?;
             indexed
@@ -843,25 +829,17 @@ impl ReviewDocStore {
             }
             let mut insert_source = tx
                 .prepare_cached(
-                    "INSERT OR IGNORE INTO code_review_doc_sources \
-                     (path, key, worktree, index_id, touched_at, touched_by) \
-                     VALUES (?1, ?2, ?3, ?4, unixepoch(), ?5)",
+                    "INSERT OR IGNORE INTO code_review_doc_sources (path, key, worktree, index_id, \
+                     touched_at, touched_by) VALUES (?1, ?2, ?3, ?4, 0, '')",
                 )
                 .map_err(db_err)?;
             for s in &plan.new_tags {
                 insert_source
-                    .execute(params![
-                        s.path,
-                        s.key,
-                        i64::from(s.worktree),
-                        self.index_id,
-                        self.touch_token
-                    ])
+                    .execute(params![s.path, s.key, i64::from(s.worktree), self.index_id])
                     .map_err(db_err)?;
             }
         }
-        // MAGI FIX (S6 MS3 loop23, R1 Caspar): the group's stored sources it skipped are reused,
-        // which counts as a touch too; one batched update in this transaction.
+        // MAGI FIX (S6 MS3 loop23, R1): written and skipped (reused) sources, one touch.
         let touched: Vec<&SourceTag> = plan.touched.iter().collect();
         self.touch(&tx, &touched)?;
         tx.commit().map_err(db_err)?;
@@ -1207,20 +1185,13 @@ impl ReviewDocStore {
     /// passes `true` and leaves those sources. Never `DROP TABLE` (the next open would read an
     /// older database). Every identity's rows count: `live` names sources by `(path, key)`.
     ///
-    /// **Grace (S6 MS3 loop 23):** a source outside `live` whose key is not a working-tree key
-    /// stays while another review touched it last (wrote or reused it, `touched_by` not this
-    /// store) within [`GC_GRACE_SECS`]: a concurrent review may be between its indexing and its
-    /// search of a revision no local ref reaches. A source this store touched last goes at once
-    /// (its own review is over). A working-tree source outside a listed working tree goes at
-    /// once whoever touched it: the listing is the tree's current state, so only a version the
-    /// tree no longer holds is deleted.
-    ///
-    /// Declared limitations (never a leak or a wrong chunk, only less documentation or a later
-    /// purge): a source another review touched less than the grace ago stays until a later
-    /// clean-up (a deferred purge); two reviews that reuse the same unreachable source share one
-    /// owner, the last to touch it, whose clean-up can still delete it before the other's search;
-    /// and a concurrent review that read a working-tree file before it changed may lose that old
-    /// version's rows. A source deleted under a review is reported as vanished ([`DocLoss`]).
+    /// Grace (S6 MS3 loop 23): a non-working-tree source another review touched last within
+    /// [`GC_GRACE_SECS`] stays (it may still be searched); one this store touched last goes, and
+    /// so does a working-tree one, whoever touched it (a listed tree is authoritative).
+    /// Declared, safe direction (never a leak or wrong chunk): such a source waits for a later
+    /// clean-up; two reviews reusing one unreachable source share its last toucher, whose
+    /// clean-up can still delete it under the other; so can a working-tree version a concurrent
+    /// review read before the file changed. Losses are reported as vanished ([`DocLoss`]).
     ///
     /// Complexity: O(stored sources), one pair of deletes per [`ALLOWED_PAIRS_PER_QUERY`] doomed
     /// sources; each delete by `(path, key)` scans `code_review_docs` (keyed `(key, chunk_hash)`),
@@ -1239,8 +1210,7 @@ impl ReviewDocStore {
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
-        // MAGI FIX (S6 MS3 loop23, R1 Caspar): the touch is read in the same IMMEDIATE
-        // transaction as the deletes, so no concurrent touch lands between the two.
+        // MAGI FIX (S6 MS3 loop23, R1): touches read in the deletes' IMMEDIATE transaction.
         let stored: Vec<(SourceTag, bool)> = {
             let mut stmt = tx
                 .prepare(&format!(

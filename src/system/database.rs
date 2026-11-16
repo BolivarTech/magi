@@ -804,9 +804,7 @@ pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
 // `code_review_docs.{key,chunk_hash,path}` and `code_review_doc_sources.{path,key}` hold HMAC-SHA-256
 // lookup tags, never the path, the content key or the chunk hash (RV19, S6 loop 17); the path
 // itself is `path_blob`, sealed. `worktree` is the boolean class of the key (the clean-up needs it).
-// `touched_at` (unix seconds) and `touched_by` (a random per-review token) record the last review
-// that wrote or reused a source, so a concurrent review's clean-up spares it within a grace
-// (`ReviewDocStore::gc`, S6 MS3 loop 23).
+// `touched_at`/`touched_by`: when and by which review a source was last used (`ReviewDocStore::gc`).
 const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             chunk_hash TEXT NOT NULL,
