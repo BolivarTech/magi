@@ -812,6 +812,62 @@ mod tests {
         }
     }
 
+    /// Every stored column of every history row, as raw bytes.
+    fn raw_history_bytes(store: &ReviewHistoryStore) -> Vec<Vec<u8>> {
+        let c = store.connection_for_test().lock().expect("lock");
+        let mut stmt = c
+            .prepare("SELECT * FROM code_review_history")
+            .expect("select");
+        let n = stmt.column_count();
+        let mut out = Vec::new();
+        let mut rows = stmt.query([]).expect("rows");
+        while let Some(r) = rows.next().expect("row") {
+            for i in 0..n {
+                out.push(match r.get_ref(i).expect("column") {
+                    rusqlite::types::ValueRef::Null => Vec::new(),
+                    rusqlite::types::ValueRef::Integer(v) => v.to_string().into_bytes(),
+                    rusqlite::types::ValueRef::Real(v) => v.to_string().into_bytes(),
+                    rusqlite::types::ValueRef::Text(t) | rusqlite::types::ValueRef::Blob(t) => {
+                        t.to_vec()
+                    }
+                });
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_file_and_commit_of_an_entry_are_never_stored_in_the_clear() {
+        // [MAGI S6 MS3 loop24, R3 Melchior] the history kept `file`, `line` and `reviewed_commit`
+        // in clear columns while the doc index sealed its paths: a stolen database revealed the
+        // reviewed repository's paths and commits without the passphrase.
+        let (store, _tmp) = store_for_test();
+        let e = HistoryEntry {
+            file: "src/PATH-PLAINTEXT-MARKER.rs".into(),
+            ..stored("i1", Some(4242), "c0ffee0COMMITMARKER")
+        };
+        store.record(std::slice::from_ref(&e)).expect("record");
+        let columns = raw_history_bytes(&store);
+        assert!(!columns.is_empty());
+        for marker in [&b"PATH-PLAINTEXT-MARKER"[..], &b"COMMITMARKER"[..]] {
+            assert!(
+                !columns
+                    .iter()
+                    .any(|c| c.windows(marker.len()).any(|w| w == marker)),
+                "history metadata stored in the clear"
+            );
+        }
+        assert_eq!(
+            store.all().expect("all"),
+            vec![e],
+            "it still reads back whole"
+        );
+        let (got, _) = store
+            .validated_on_files(&["src/PATH-PLAINTEXT-MARKER.rs".to_string()])
+            .expect("read");
+        assert!(got.is_empty(), "pending is not validated");
+    }
+
     #[test]
     fn update_status_changes_only_that_entry() {
         let (store, _tmp) = store_for_test();
