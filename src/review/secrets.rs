@@ -377,7 +377,25 @@ pub(crate) fn holds_secret_prefix(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     // MAGI FIX (MS3 §6 loop14): format characters (ZWSP, directional marks) split an opening too.
     let squeezed: String = lower.chars().filter(|c| !splits_tokens(*c)).collect();
-    opens_a_secret(&lower) || opens_a_secret(&squeezed)
+    opens_a_secret(&lower) || opens_a_secret(&squeezed) || opens_a_gapped_armor(&squeezed)
+}
+
+/// Whether `lower`, a text already lowercased, holds `begin` after four or more armor dashes
+/// with any run of spaces and tabs between them: the gap [`trim_armor_gap`] reads on the text
+/// path, which the fixed [`NON_TOKEN_PREFIXES`] cannot list. O(n).
+// MAGI FIX (MS3 §6 loop21, R6a2 Caspar): `-----  BEGIN` opened no block on a binary side.
+fn opens_a_gapped_armor(lower: &str) -> bool {
+    lower.match_indices("begin").any(|(at, _)| {
+        let before = lower.get(..at).unwrap_or_default();
+        trim_armor_gap(before).ends_with(SSH2_ARMOR_DASHES)
+    })
+}
+
+/// `text` without the run of spaces and tabs at its end: the gap an armor header may hold
+/// between its dashes and `BEGIN`. The one normalization both the text path
+/// ([`spaceless_key_header`]) and the binary path ([`opens_a_gapped_armor`]) read.
+fn trim_armor_gap(text: &str) -> &str {
+    text.trim_end_matches([' ', '\t'])
 }
 
 /// Every opening of [`holds_secret_prefix`], lowercase, built once: the tokens' prefixes and
@@ -1300,9 +1318,7 @@ fn spaceless_key_header(line: &str) -> bool {
         // MAGI FIX (MS3 §6 loop19, R6a2 Caspar): any run of spaces and tabs, not one space, so
         // `-----  BEGIN` opens a block; quotes and commas stay unskipped there (`concat!`).
         let before = line.get(..at).unwrap_or_default();
-        let opened = before
-            .trim_end_matches([' ', '\t'])
-            .ends_with(SSH2_ARMOR_DASHES);
+        let opened = trim_armor_gap(before).ends_with(SSH2_ARMOR_DASHES);
         if !opened {
             return false;
         }
