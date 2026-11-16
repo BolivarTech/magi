@@ -804,6 +804,9 @@ pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
 // `code_review_docs.{key,chunk_hash,path}` and `code_review_doc_sources.{path,key}` hold HMAC-SHA-256
 // lookup tags, never the path, the content key or the chunk hash (RV19, S6 loop 17); the path
 // itself is `path_blob`, sealed. `worktree` is the boolean class of the key (the clean-up needs it).
+// `touched_at` (unix seconds) and `touched_by` (a random per-review token) record the last review
+// that wrote or reused a source, so a concurrent review's clean-up spares it within a grace
+// (`ReviewDocStore::gc`, S6 MS3 loop 23).
 const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             chunk_hash TEXT NOT NULL,
@@ -823,6 +826,8 @@ const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             worktree INTEGER NOT NULL,
             index_id TEXT NOT NULL,
+            touched_at INTEGER NOT NULL,
+            touched_by TEXT NOT NULL,
             PRIMARY KEY (path, key)
         );
         CREATE TABLE IF NOT EXISTS code_review_history (
@@ -2738,7 +2743,8 @@ mod tests {
             )
             .expect("insert docs");
             conn.execute(
-                "INSERT INTO code_review_doc_sources (path,key,worktree,index_id) VALUES ('p','k',0,'test')",
+                "INSERT INTO code_review_doc_sources (path,key,worktree,index_id,touched_at,touched_by) \
+                 VALUES ('p','k',0,'test',0,'t')",
                 [],
             )
             .expect("insert sources");
