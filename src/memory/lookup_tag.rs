@@ -2,19 +2,11 @@
 // Version: 0.25.0
 // Date: 2026-11-15
 
-//! Keyed lookup tags for the encrypted code-review tables (RV19).
-//!
-//! A column that SQL must match or index, but that would identify the reviewed repository if
-//! stored in the clear (a path, a content key), holds `HMAC-SHA-256(subkey, domain || value)`
-//! in hex instead, where `subkey = HMAC-SHA-256(data key, purpose label)`. Equal inputs meet in
-//! SQL; without the passphrase the tags reveal nothing but equality. Each table passes its own
-//! purpose label, so the doc index and the history never share a subkey.
-//!
-//! # Examples
+//! Keyed lookup tags (RV19): a column SQL must match but that would name the repository holds
+//! `HMAC-SHA-256(subkey, domain || value)` instead; each table derives its own subkey.
 //!
 //! ```ignore
-//! let tags = lookup_tags(&mut dek, b"magi-rs/example/lookup-tag-key/v1", b"path\0", ["src/a.rs"]);
-//! assert_eq!(tags.len(), 1);
+//! let tags = lookup_tags(&mut dek, b"magi-rs/x/lookup-tag-key/v1", b"path\0", ["src/a.rs"]);
 //! ```
 
 use sha2::{Digest, Sha256};
@@ -25,19 +17,10 @@ use magi_rs::vault::MaskedDek;
 /// The HMAC block size of SHA-256 (RFC 2104).
 const HMAC_BLOCK_BYTES: usize = 64;
 
-/// HMAC-SHA-256 (RFC 2104) of `data` under `key`: implemented over the `sha2` crate the project
-/// already depends on, to avoid a new dependency for twenty lines; pinned by the RFC 4231 vector.
-///
-/// # Arguments
-/// * `key` - the MAC key (any length).
-/// * `data` - the message.
-///
-/// # Returns
-/// The 32-byte tag, wiped on drop (with the data key as `key` it is the tag subkey). O(key + data).
-///
-/// Declared limit: the internal state of `sha2`'s hasher is not wiped (best effort, like
-/// `MaskedDek`); the pads, the hashed key and both digests are.
-pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
+/// HMAC-SHA-256 (RFC 2104) of `data` under `key` (any length), over `sha2` (no new dependency;
+/// RFC 4231 vector). Returns the tag, wiped on drop. O(key + data). Declared: `sha2`'s internal
+/// state is not wiped (best effort); the pads, hashed key and both digests are.
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
     // MAGI FIX (MS3 §6 loop19, R1): the key may be the data key; the pads (key XOR a constant,
     // so invertible) and the hashed long key are wiped on drop and never copied by value.
     let mut hashed = Zeroizing::new([0u8; 32]);
@@ -69,27 +52,14 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
 }
 
 /// Lowercase hex of `bytes`.
-pub(crate) fn to_hex(bytes: &[u8]) -> String {
+fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The lookup tags of `values`: `HMAC-SHA-256(subkey, domain || value)`, hex, where
-/// `subkey = HMAC-SHA-256(data key, subkey_label)`.
-///
-/// The data key is reached only through `with_dek` (never copied out), the subkey lives for this
-/// call and is zeroed, and one call serves a whole list so the mask is rotated once.
-/// Deterministic, so equal inputs meet in SQL. Never call while holding the connection lock
-/// (R-V08). O(total bytes).
-///
-/// # Arguments
-/// * `dek` - the masked data key.
-/// * `subkey_label` - the purpose label the subkey is derived under (one per table; versioned,
-///   since changing it orphans every stored tag).
-/// * `domain` - the domain prefix, so two columns with the same text never share a tag.
-/// * `values` - the values to tag.
-///
-/// # Returns
-/// One 64-character hex tag per value, in order.
+/// One hex tag per value, in order: `HMAC(subkey, domain || value)`, `subkey = HMAC(dek,
+/// subkey_label)` (one versioned label per table; `domain` separates columns). The key is reached
+/// only through `with_dek`, the subkey is zeroed, the mask rotates once per call. Deterministic.
+/// Never call under the connection lock (R-V08). O(total bytes).
 pub(crate) fn lookup_tags<'v>(
     dek: &mut MaskedDek,
     subkey_label: &[u8],

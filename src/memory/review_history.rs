@@ -4,18 +4,12 @@
 
 //! Encrypted store of remembered review findings (RV07(4), RV08, RV19).
 //!
-//! At rest, like [`crate::memory::review_docs::ReviewDocStore`], nothing names the reviewed
-//! repository without the passphrase: the path, line, title and detail of a finding are sealed
-//! with the data key in `finding_blob`, the reviewed commit in its own small `commit_blob` (so
-//! the ancestry filter decrypts only commits), and the `file` column holds the HMAC-SHA-256 tag of
-//! the path under this table's own subkey ([`crate::memory::lookup_tag`]), which the `by_file`
-//! index and the context read match on. The status and the two timestamps stay in the clear for
-//! ordering; they name nothing.
-//!
-//! Declared residual (MS3 §6 loop24): the `id` is magi-core's unkeyed `generate_finding_id`
-//! (SHA-256 of `path:line:category`, the category fixed), so someone holding the file can confirm
-//! a guessed path and line by hashing it. Keying it needs the data key where the id is built
-//! (`entries_from_review`, called by the tool), outside this store.
+//! At rest nothing names the repository without the passphrase: path, line and text are sealed
+//! in `finding_blob`, the commit in a small `commit_blob` (the ancestry filter decrypts only it),
+//! and `file` is the path's HMAC tag under this table's subkey ([`crate::memory::lookup_tag`]).
+//! Status and timestamps stay clear for ordering. Declared residual: `id` is magi-core's unkeyed
+//! `generate_finding_id(path, line, fixed category)`, so a guessed path and line can be confirmed;
+//! keying it needs the data key in `entries_from_review`, outside this store.
 //!
 //! # Lock discipline
 //!
@@ -74,8 +68,7 @@ pub const MAX_HISTORY_SCAN: usize = 8 * MAX_HISTORY_PER_BATCH;
 /// cap, a starting point: a backlog beyond it only says "at least this many".
 pub const MAX_COUNTED_HISTORY: usize = 10_000;
 
-/// The label the history's path-tag subkey is derived under: its own, never the doc index's.
-/// Versioned: changing it orphans every stored tag.
+/// The history's own path-tag subkey label (versioned: changing it orphans every tag).
 const TAG_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-history/lookup-tag-key/v1";
 
 /// The domain prefix of a path tag.
@@ -513,9 +506,8 @@ impl ReviewHistoryStore {
     /// accepts (the context read passes its `HEAD` ancestry check), applied to the raw rows
     /// **before** the bound, so entries of another branch never fill it
     /// (`off_line_never_starves`). Each file batch reads at most [`MAX_HISTORY_SCAN`] raw rows and
-    /// decrypts only their `commit_blob` (MS3 §6 loop24: the commit is sealed, so the filter costs
-    /// O(scan) small decryptions per batch, off the lock; the finding blob only for the kept
-    /// bound); when one reaches it, rows past it are unread, so the cut is declared
+    /// decrypts their `commit_blob`, O(scan) small decryptions off the lock (MS3 §6 loop24); when
+    /// one reaches it, rows past it are unread, so the cut is declared
     /// even if every row read was off the line: a conservative cut (declared, MAGI FIX MS3 §6
     /// loop13, R3 Caspar), since what lies past the scan is unknown and a false "nothing more"
     /// would hide history. O(scan) `on_line` calls (the caller memoizes them per commit).
@@ -555,8 +547,6 @@ impl ReviewHistoryStore {
                 rusqlite::params_from_iter(args),
             )?;
             saturated |= rows.len() >= MAX_HISTORY_SCAN;
-            // Only the small commit blob is decrypted here, off the lock; a row whose commit does
-            // not decrypt is skipped like any corrupt row.
             for row in rows {
                 match self.unseal_commit(&row) {
                     Ok(commit) if on_line(&commit) => raw.push((row, commit)),
