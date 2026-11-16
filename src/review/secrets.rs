@@ -2327,6 +2327,32 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_side_with_a_run_of_spaces_before_begin_holds_a_secret() {
+        // MAGI FIX (MS3 §6 loop21, R6a2 Caspar): the text path read any run of spaces and tabs
+        // between the armor dashes and `BEGIN`; the binary openings did not, so such a side was
+        // served raw once the cache was sealed.
+        use crate::review::error::ReviewError;
+        use crate::review::source::{CachedSource, ContentSource};
+        use crate::review::test_support::MapSource;
+        let (d, s) = (ARMOR_DASHES, SSH2_ARMOR_DASHES);
+        for gap in ["  ", "\t", " \t ", ""] {
+            let end = format!("{d}END RSA {PEM_PRIVATE_KEY}");
+            let rsa = format!("\0{d}{gap}BEGIN RSA {PEM_PRIVATE_KEY}\nMIIBOg\n{end}\n");
+            let ssh2 = format!("\0{s}{gap}BEGIN SSH2 PRIVATE KEY {s}\nAAAAB3\n");
+            for bytes in [rsa, ssh2] {
+                assert!(holds_secret_prefix(&bytes), "{bytes:?}");
+                let inner = MapSource::new(&[("b.bin", bytes.as_str())], &[]);
+                let cache = CachedSource::new(&inner);
+                cache.seal();
+                assert!(
+                    matches!(cache.read("b.bin"), Err(ReviewError::EgressSecret { .. })),
+                    "{bytes:?} was served raw after the seal"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_key_header_with_a_run_of_spaces_before_begin_is_a_block() {
         // MAGI FIX (MS3 §6 loop19, R6a2 Caspar): only one space was read before `BEGIN`, so two
         // (or a tab) between the armor dashes and `BEGIN` opened no block and the body left as
