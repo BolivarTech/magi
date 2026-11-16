@@ -1539,6 +1539,23 @@ mod tests {
     }
 
     #[test]
+    fn hmac_result_and_digests_are_zeroized() {
+        // [MAGI §6 MS3 loop22, R1] with the data key as key the MAC is the tag subkey, and the
+        // inner/outer digests are derived from it: the MAC is returned `Zeroizing` and both
+        // digests are wiped before return.
+        let src = include_str!("review_docs.rs").replace('\r', "");
+        let start = src.find("fn hmac_sha256(").expect("the function");
+        let body = &src[start..];
+        let body = &body[..body.find("/// Lowercase hex").expect("its end")];
+        assert!(
+            body.contains("-> Zeroizing<[u8; 32]>"),
+            "the MAC is returned as Zeroizing: {body}"
+        );
+        assert!(body.contains("inner.as_mut_slice().zeroize()"), "{body}");
+        assert!(body.contains("outer.as_mut_slice().zeroize()"), "{body}");
+    }
+
+    #[test]
     fn hmac_sha256_matches_rfc_4231_test_case_2() {
         // RFC 4231, case 2: key "Jefe", data "what do ya want for nothing?".
         let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
