@@ -72,9 +72,8 @@ const REUSE_LOOKUP_SQL: &str = "SELECT embedding_blob FROM code_review_docs \
 /// the 999-parameter limit of older SQLite builds.
 const ALLOWED_PAIRS_PER_QUERY: usize = 400;
 
-/// Seconds another review's [`ReviewDocStore::gc`] spares a source an indexing wrote or reused,
-/// reachable or not: it must exceed a review's span from indexing to its last search, or a
-/// concurrent clean-up deletes what that review still searches. A starting point, not measured.
+/// Seconds another review's `gc` spares a source a review used: above a review's indexing-to-
+/// last-search span (a starting point, not measured).
 pub(crate) const GC_GRACE_SECS: i64 = 3600;
 
 /// The `VALUES` list of `pairs` two-parameter rows, `(?, ?), (?, ?), ...`: the one builder of
@@ -1185,13 +1184,9 @@ impl ReviewDocStore {
     /// passes `true` and leaves those sources. Never `DROP TABLE` (the next open would read an
     /// older database). Every identity's rows count: `live` names sources by `(path, key)`.
     ///
-    /// Grace (S6 MS3 loop 23): a non-working-tree source another review touched last within
-    /// [`GC_GRACE_SECS`] stays (it may still be searched); one this store touched last goes, and
-    /// so does a working-tree one, whoever touched it (a listed tree is authoritative).
-    /// Declared, safe direction (never a leak or wrong chunk): such a source waits for a later
-    /// clean-up; two reviews reusing one unreachable source share its last toucher, whose
-    /// clean-up can still delete it under the other; so can a working-tree version a concurrent
-    /// review read before the file changed. Losses are reported as vanished ([`DocLoss`]).
+    /// Grace: a non-working-tree source another review touched last within [`GC_GRACE_SECS`]
+    /// stays, purged later. Declared (never a leak): its last toucher's clean-up, or a working-tree
+    /// listing, can still delete it under a concurrent review, reported as vanished ([`DocLoss`]).
     ///
     /// Complexity: O(stored sources), one pair of deletes per [`ALLOWED_PAIRS_PER_QUERY`] doomed
     /// sources; each delete by `(path, key)` scans `code_review_docs` (keyed `(key, chunk_hash)`),
@@ -1210,7 +1205,6 @@ impl ReviewDocStore {
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_err)?;
-        // MAGI FIX (S6 MS3 loop23, R1): touches read in the deletes' IMMEDIATE transaction.
         let stored: Vec<SourceTag> = {
             let mut stmt = tx
                 .prepare(&format!(
