@@ -4,9 +4,18 @@
 
 //! Encrypted store of remembered review findings (RV07(4), RV08, RV19).
 //!
-//! The title and detail of a finding are encrypted with the data key, exactly like
-//! [`crate::memory::review_docs::ReviewDocStore`]; the file, line, commit, status and the two
-//! timestamps stay in the clear so rows can be selected and ordered without decrypting anything.
+//! At rest, like [`crate::memory::review_docs::ReviewDocStore`], nothing names the reviewed
+//! repository without the passphrase: the path, line, title and detail of a finding are sealed
+//! with the data key in `finding_blob`, the reviewed commit in its own small `commit_blob` (so
+//! the ancestry filter decrypts only commits), and the `file` column holds the HMAC-SHA-256 tag of
+//! the path under this table's own subkey ([`crate::memory::lookup_tag`]), which the `by_file`
+//! index and the context read match on. The status and the two timestamps stay in the clear for
+//! ordering; they name nothing.
+//!
+//! Declared residual (MS3 §6 loop24): the `id` is magi-core's unkeyed `generate_finding_id`
+//! (SHA-256 of `path:line:category`, the category fixed), so someone holding the file can confirm
+//! a guessed path and line by hashing it. Keying it needs the data key where the id is built
+//! (`entries_from_review`, called by the tool), outside this store.
 //!
 //! # Lock discipline
 //!
@@ -32,6 +41,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use zeroize::Zeroizing;
 
 use crate::memory::error::MemoryError;
+use crate::memory::lookup_tag::lookup_tags;
 use cryptovault::CryptoVault;
 use magi_rs::review::history::{HistoryEntry, HistoryStatus};
 use magi_rs::review::secrets::outward_text;
@@ -49,8 +59,8 @@ const FILES_PER_QUERY: usize = 400;
 /// trimmed. Past it the newest are kept and the cut is declared.
 pub const MAX_HISTORY_PER_BATCH: usize = 32;
 
-/// Raw rows (still encrypted, never decrypted here) one file batch of the context read returns
-/// from SQLite to be checked against `HEAD`'s line, eight times [`MAX_HISTORY_PER_BATCH`]: a
+/// Raw rows (still encrypted; only their sealed commit is decrypted) one file batch of the context
+/// read returns from SQLite to be checked against `HEAD`'s line, eight times [`MAX_HISTORY_PER_BATCH`]: a
 /// starting point. It bounds the rows held, ancestry-checked and decrypted, and past it the read
 /// declares a cut. It does not bound SQLite's own matching: the query finds the batch's validated
 /// rows through the `file` index and sorts those (`LIMIT` stops the output, not the sort), which
@@ -64,8 +74,15 @@ pub const MAX_HISTORY_SCAN: usize = 8 * MAX_HISTORY_PER_BATCH;
 /// cap, a starting point: a backlog beyond it only says "at least this many".
 pub const MAX_COUNTED_HISTORY: usize = 10_000;
 
+/// The label the history's path-tag subkey is derived under: its own, never the doc index's.
+/// Versioned: changing it orphans every stored tag.
+const TAG_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-history/lookup-tag-key/v1";
+
+/// The domain prefix of a path tag.
+const PATH_TAG_DOMAIN: &[u8] = b"path\0";
+
 /// The columns every read selects, in the order [`RawRow`] reads them.
-const COLUMNS: &str = "id, file, line, reviewed_commit, finding_blob, status, created_at";
+const COLUMNS: &str = "id, commit_blob, finding_blob, status, created_at";
 
 /// The rows [`ReviewHistoryStore::due`] reads: every entry, least recently checked first, at
 /// most `?1`.
@@ -89,12 +106,10 @@ fn validated_sql(files: usize) -> String {
     )
 }
 
-/// One row as stored: the finding text still encrypted.
+/// One row as stored: the commit and the finding (path, line, text) still encrypted.
 struct RawRow {
     id: String,
-    file: String,
-    line: Option<i64>,
-    reviewed_commit: String,
+    commit_blob: Vec<u8>,
     finding_blob: Vec<u8>,
     status: String,
     /// Unix seconds of the recording, for the newest-first order of the context read.
@@ -176,19 +191,50 @@ impl ReviewHistoryStore {
             .map_err(|e| MemoryError::Crypto(e.to_string()))
     }
 
-    /// The encrypted `(title, detail)` pair, as a self-describing JSON array: merged titles
-    /// carry newlines, which any separator-based encoding would split.
-    fn seal_text(&self, entry: &HistoryEntry) -> Result<Vec<u8>, MemoryError> {
-        let json = serde_json::to_string(&(&entry.title, &entry.detail))
-            .map_err(|e| MemoryError::Storage(format!("history text serialization: {e}")))?;
+    /// The encrypted `(file, line, title, detail)` tuple, as a self-describing JSON array: merged
+    /// titles carry newlines, which any separator-based encoding would split.
+    fn seal_finding(&self, entry: &HistoryEntry) -> Result<Vec<u8>, MemoryError> {
+        let json = serde_json::to_string(&(
+            &entry.file,
+            entry.line.map(i64::from),
+            &entry.title,
+            &entry.detail,
+        ))
+        .map_err(|e| MemoryError::Storage(format!("history text serialization: {e}")))?;
         self.seal(&json)
     }
 
-    /// Rebuilds an entry from a raw row, decrypting its text (off the connection lock).
-    fn decode(&self, row: RawRow) -> Result<HistoryEntry, MemoryError> {
+    /// The tags of `paths`, in order ([`lookup_tags`] under this table's subkey). Never call
+    /// while holding the connection lock.
+    fn path_tags<'p>(&self, paths: impl IntoIterator<Item = &'p str>) -> Vec<String> {
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        lookup_tags(&mut dek, TAG_SUBKEY_LABEL, PATH_TAG_DOMAIN, paths)
+    }
+
+    /// The reviewed commit of a raw row, decrypted (off the connection lock).
+    fn unseal_commit(&self, row: &RawRow) -> Result<String, MemoryError> {
+        Ok(self.unseal(&row.commit_blob)?.as_str().to_string())
+    }
+
+    /// Counts one row that did not decode and WARNs it (never its content).
+    fn note_corrupt(&self, e: &MemoryError) {
+        self.corrupt.fetch_add(1, Ordering::SeqCst);
+        let error = outward_text(&e.to_string());
+        tracing::event!(
+            target: LOG_TARGET,
+            tracing::Level::WARN,
+            error = error.as_str(),
+            "a code-review history row could not be decoded and was skipped"
+        );
+    }
+
+    /// Rebuilds an entry from a raw row and its decrypted commit, decrypting the finding (off the
+    /// connection lock).
+    fn decode(&self, row: RawRow, reviewed_commit: String) -> Result<HistoryEntry, MemoryError> {
         let json = self.unseal(&row.finding_blob)?;
-        let (title, detail): (String, String) = serde_json::from_str(json.as_str())
-            .map_err(|e| MemoryError::Storage(format!("history text deserialization: {e}")))?;
+        let (file, line, title, detail): (String, Option<i64>, String, String) =
+            serde_json::from_str(json.as_str())
+                .map_err(|e| MemoryError::Storage(format!("history text deserialization: {e}")))?;
         let status = HistoryStatus::parse(&row.status).ok_or_else(|| {
             MemoryError::Storage(format!(
                 "history entry `{}` has the unknown status `{}`",
@@ -196,8 +242,7 @@ impl ReviewHistoryStore {
             ))
         })?;
         // MAGI FIX (MS3 §6 loop4): a line out of range read silently as no line; now an error.
-        let line = row
-            .line
+        let line = line
             .map(|l| {
                 u32::try_from(l).map_err(|_| {
                     MemoryError::Storage(format!(
@@ -209,9 +254,9 @@ impl ReviewHistoryStore {
             .transpose()?;
         Ok(HistoryEntry {
             id: row.id,
-            file: row.file,
+            file,
             line,
-            reviewed_commit: row.reviewed_commit,
+            reviewed_commit,
             title,
             detail,
             status,
@@ -232,6 +277,7 @@ impl ReviewHistoryStore {
     /// `touched`, so [`Self::due`] moves it behind the queue itself (`corrupt_rows_never_starve_the_valid_ones`);
     /// the WARN per read stays, so a damaged file or a foreign key is still signalled.
     // MAGI FIX (MS3 §6 loop11): one corrupt row failed the whole read.
+    #[cfg(test)]
     fn decode_all(&self, rows: Vec<RawRow>) -> Result<Vec<HistoryEntry>, MemoryError> {
         self.decode_noting_corrupt(rows).map(|(entries, _)| entries)
     }
@@ -246,18 +292,14 @@ impl ReviewHistoryStore {
         let mut skipped = Vec::new();
         for row in rows {
             let id = row.id.clone();
-            match self.decode(row) {
+            match self
+                .unseal_commit(&row)
+                .and_then(|commit| self.decode(row, commit))
+            {
                 Ok(entry) => out.push(entry),
                 Err(e) => {
                     skipped.push(id);
-                    self.corrupt.fetch_add(1, Ordering::SeqCst);
-                    let error = outward_text(&e.to_string());
-                    tracing::event!(
-                        target: LOG_TARGET,
-                        tracing::Level::WARN,
-                        error = error.as_str(),
-                        "a code-review history row could not be decoded and was skipped"
-                    );
+                    self.note_corrupt(&e);
                 }
             }
         }
@@ -274,7 +316,14 @@ impl ReviewHistoryStore {
     }
 }
 
-/// Records new entries over `tx` (`sealed`: their encrypted text, in order; the caller commits);
+/// An entry as it is written: its path tag and its two sealed blobs, built before the lock.
+struct SealedEntry {
+    file_tag: String,
+    commit_blob: Vec<u8>,
+    finding_blob: Vec<u8>,
+}
+
+/// Records new entries over `tx` (`sealed`: their stored form, in order; the caller commits);
 /// an `id` already stored is kept as it is (first sighting wins), so its `reviewed_commit` stays
 /// the one `classify` compares from. Replacing it would restart the clock on every review, and a
 /// finding nobody attends would never become a weak reject.
@@ -288,7 +337,7 @@ impl ReviewHistoryStore {
 fn record_in(
     tx: &Connection,
     entries: &[HistoryEntry],
-    sealed: &[Vec<u8>],
+    sealed: &[SealedEntry],
 ) -> Result<usize, MemoryError> {
     let created_at = now_secs();
     let mut inserted = 0;
@@ -297,23 +346,22 @@ fn record_in(
             let mut stmt = tx
                 .prepare_cached(
                     "INSERT INTO code_review_history \
-                     (id, file, line, reviewed_commit, finding_blob, status, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                     (id, file, commit_blob, finding_blob, status, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
                      ON CONFLICT(id) DO UPDATE SET file = excluded.file, \
-                     line = excluded.line, reviewed_commit = excluded.reviewed_commit, \
+                     commit_blob = excluded.commit_blob, \
                      finding_blob = excluded.finding_blob, status = excluded.status, \
                      created_at = excluded.created_at, checked_at = 0 \
-                     WHERE code_review_history.status = ?8",
+                     WHERE code_review_history.status = ?7",
                 )
                 .map_err(db_err)?;
-            for (e, blob) in entries.iter().zip(sealed) {
+            for (e, s) in entries.iter().zip(sealed) {
                 inserted += stmt
                     .execute(params![
                         e.id,
-                        e.file,
-                        e.line.map(i64::from),
-                        e.reviewed_commit,
-                        blob,
+                        s.file_tag,
+                        s.commit_blob,
+                        s.finding_blob,
                         e.status.as_str(),
                         created_at,
                         HistoryStatus::Attended.as_str()
@@ -425,8 +473,8 @@ impl ReviewHistoryStore {
         tx.commit().map_err(db_err)
     }
 
-    /// The validated (`attended` / `weak_reject`) entries on `files`, by SQL over the clear
-    /// `file` and `status` columns, newest first and then by id (a stable order, so the tail the
+    /// The validated (`attended` / `weak_reject`) entries on `files`, by SQL over the `file` tag
+    /// (the tags of `files` are computed first) and the clear `status`, newest first and then by id (a stable order, so the tail the
     /// context trims is the same on every run), at most [`MAX_HISTORY_PER_BATCH`], and whether
     /// more existed. Only the returned rows are decrypted. This is the context read, once per
     /// batch. The files go in batches of [`FILES_PER_QUERY`] so no query passes SQLite's
@@ -464,8 +512,10 @@ impl ReviewHistoryStore {
     /// [`Self::validated_on_files`] restricted to the entries whose reviewed commit `on_line`
     /// accepts (the context read passes its `HEAD` ancestry check), applied to the raw rows
     /// **before** the bound, so entries of another branch never fill it
-    /// (`off_line_never_starves`). Each file batch reads at most [`MAX_HISTORY_SCAN`] raw rows
-    /// (no decryption); when one reaches it, rows past it are unread, so the cut is declared
+    /// (`off_line_never_starves`). Each file batch reads at most [`MAX_HISTORY_SCAN`] raw rows and
+    /// decrypts only their `commit_blob` (MS3 §6 loop24: the commit is sealed, so the filter costs
+    /// O(scan) small decryptions per batch, off the lock; the finding blob only for the kept
+    /// bound); when one reaches it, rows past it are unread, so the cut is declared
     /// even if every row read was off the line: a conservative cut (declared, MAGI FIX MS3 §6
     /// loop13, R3 Caspar), since what lies past the scan is unknown and a false "nothing more"
     /// would hide history. O(scan) `on_line` calls (the caller memoizes them per commit).
@@ -480,25 +530,40 @@ impl ReviewHistoryStore {
     ) -> Result<(Vec<HistoryEntry>, bool), MemoryError> {
         // MAGI FIX (MS3 §6 loop4): no order (the trimmed tail varied run to run) and no bound
         // (every validated row of the files was decrypted for every batch).
-        let distinct: Vec<&String> = files.iter().collect::<BTreeSet<_>>().into_iter().collect();
+        let distinct: Vec<&str> = files
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        // MAGI FIX (MS3 §6 loop24, R3): the `file` column held the path; it holds its tag.
+        let tags = self.path_tags(distinct.iter().copied());
         let scan = i64::try_from(MAX_HISTORY_SCAN).unwrap_or(i64::MAX);
-        let newest_first = |a: &RawRow, b: &RawRow| {
-            b.created_at
-                .cmp(&a.created_at)
-                .then_with(|| a.id.cmp(&b.id))
+        let newest_first = |a: &(RawRow, String), b: &(RawRow, String)| {
+            b.0.created_at
+                .cmp(&a.0.created_at)
+                .then_with(|| a.0.id.cmp(&b.0.id))
         };
         let keep = MAX_HISTORY_PER_BATCH.saturating_add(1);
         let (mut raw, mut saturated) = (Vec::new(), false);
-        for batch in distinct.chunks(FILES_PER_QUERY) {
+        for batch in tags.chunks(FILES_PER_QUERY) {
             let mut args: Vec<&dyn rusqlite::ToSql> =
-                batch.iter().map(|f| *f as &dyn rusqlite::ToSql).collect();
+                batch.iter().map(|f| f as &dyn rusqlite::ToSql).collect();
             args.push(&scan);
             let rows = self.raw_rows(
                 &validated_sql(batch.len()),
                 rusqlite::params_from_iter(args),
             )?;
             saturated |= rows.len() >= MAX_HISTORY_SCAN;
-            raw.extend(rows.into_iter().filter(|r| on_line(&r.reviewed_commit)));
+            // Only the small commit blob is decrypted here, off the lock; a row whose commit does
+            // not decrypt is skipped like any corrupt row.
+            for row in rows {
+                match self.unseal_commit(&row) {
+                    Ok(commit) if on_line(&commit) => raw.push((row, commit)),
+                    Ok(_) => {}
+                    Err(e) => self.note_corrupt(&e),
+                }
+            }
             // MAGI FIX (MS3 §6 loop7): every batch's rows were kept until the end, linear in the
             // files; the newest bound + 1 are kept after each one, so the buffer is O(bound).
             raw.sort_by(newest_first);
@@ -506,7 +571,14 @@ impl ReviewHistoryStore {
         }
         let cut = raw.len() > MAX_HISTORY_PER_BATCH || saturated;
         raw.truncate(MAX_HISTORY_PER_BATCH);
-        Ok((self.decode_all(raw)?, cut))
+        let mut out = Vec::with_capacity(raw.len());
+        for (row, commit) in raw {
+            match self.decode(row, commit) {
+                Ok(entry) => out.push(entry),
+                Err(e) => self.note_corrupt(&e),
+            }
+        }
+        Ok((out, cut))
     }
 
     /// [`Self::apply_review`] touching `ids` alone (tests): `checked_at = now`, all or nothing.
@@ -544,10 +616,18 @@ impl ReviewHistoryStore {
         now: i64,
         entries: &[HistoryEntry],
     ) -> Result<usize, MemoryError> {
-        let sealed: Vec<Vec<u8>> = entries
+        let tags = self.path_tags(entries.iter().map(|e| e.file.as_str()));
+        let sealed: Vec<SealedEntry> = entries
             .iter()
-            .map(|e| self.seal_text(e))
-            .collect::<Result<_, _>>()?;
+            .zip(tags)
+            .map(|(e, file_tag)| {
+                Ok(SealedEntry {
+                    file_tag,
+                    commit_blob: self.seal(&e.reviewed_commit)?,
+                    finding_blob: self.seal_finding(e)?,
+                })
+            })
+            .collect::<Result<_, MemoryError>>()?;
         let mut c = self.locked_conn();
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -600,12 +680,10 @@ fn raw_rows_in(
         .query_map(args, |r| {
             Ok(RawRow {
                 id: r.get(0)?,
-                file: r.get(1)?,
-                line: r.get(2)?,
-                reviewed_commit: r.get(3)?,
-                finding_blob: r.get(4)?,
-                status: r.get(5)?,
-                created_at: r.get(6)?,
+                commit_blob: r.get(1)?,
+                finding_blob: r.get(2)?,
+                status: r.get(3)?,
+                created_at: r.get(4)?,
             })
         })
         .map_err(db_err)?;
@@ -1008,14 +1086,17 @@ mod tests {
         store
             .record(&[stored("bad", Some(3), "c1")])
             .expect("record");
+        // MS3 §6 loop24: the line is sealed in the finding blob now, so the hand edit seals one.
         for (n, line) in [(1, -5_i64), (2, i64::from(u32::MAX) + 1)] {
+            let json = serde_json::to_string(&("src/a.rs", Some(line), "t", "d")).expect("json");
+            let blob = store.seal(&json).expect("seal");
             store
                 .connection_for_test()
                 .lock()
                 .expect("lock")
                 .execute(
-                    "UPDATE code_review_history SET line = ?1 WHERE id = 'bad'",
-                    [line],
+                    "UPDATE code_review_history SET finding_blob = ?1 WHERE id = 'bad'",
+                    [blob],
                 )
                 .expect("edit");
             assert!(store.all().expect("read").is_empty(), "{line}");

@@ -805,6 +805,8 @@ pub(crate) fn review_tables_for_test(conn: &Arc<Mutex<Connection>>) -> i64 {
 // lookup tags, never the path, the content key or the chunk hash (RV19, S6 loop 17); the path
 // itself is `path_blob`, sealed. `worktree` is the boolean class of the key (the clean-up needs it).
 // `touched_at`/`touched_by`: when and by which review a source was last used (`ReviewDocStore::gc`).
+// `code_review_history.file` is the HMAC tag of the path (its own subkey); the path and line ride
+// sealed in `finding_blob`, the reviewed commit in `commit_blob` (`ReviewHistoryStore`).
 const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
             key TEXT NOT NULL,
             chunk_hash TEXT NOT NULL,
@@ -831,8 +833,7 @@ const SCHEMA_DDL: &str = "CREATE TABLE IF NOT EXISTS code_review_docs (
         CREATE TABLE IF NOT EXISTS code_review_history (
             id TEXT PRIMARY KEY,
             file TEXT NOT NULL,
-            line INTEGER,
-            reviewed_commit TEXT NOT NULL,
+            commit_blob BLOB NOT NULL,
             finding_blob BLOB NOT NULL,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL,
@@ -2729,8 +2730,8 @@ mod tests {
         {
             let conn = db.conn_for_test().lock().expect("lock");
             conn.execute(
-                "INSERT INTO code_review_history (id,file,line,reviewed_commit,finding_blob,status,created_at) \
-                 VALUES ('a','f',1,'c',x'00','pending',0)",
+                "INSERT INTO code_review_history (id,file,commit_blob,finding_blob,status,created_at) \
+                 VALUES ('a','f',x'00',x'00','pending',0)",
                 [],
             )
             .expect("insert history");
