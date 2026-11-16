@@ -594,10 +594,18 @@ fn item_name_after(lines: &[&str], from: usize) -> String {
         let Some(line) = lines.get(k) else {
             break;
         };
-        let t = line.trim();
+        let mut t = line.trim();
         if in_comment {
-            in_comment = !t.contains(BLOCK_COMMENT_CLOSER);
-            continue;
+            // MAGI FIX (MS3 §6 loop23, R1): what follows the closer on the closing line is read
+            // as a line of its own (an item, an attribute or another comment).
+            let Some((_, after)) = t.split_once(BLOCK_COMMENT_CLOSER) else {
+                continue;
+            };
+            in_comment = false;
+            t = after.trim();
+            if t.is_empty() {
+                continue;
+            }
         }
         if attr_depth > 0 || t.starts_with("#[") || t.starts_with("#![") {
             // MAGI FIX (MS3 §6 loop12): an item written after its attribute on one line is named.
