@@ -1813,6 +1813,22 @@ mod tests {
     }
 
     #[test]
+    fn an_item_after_the_closer_of_a_plain_block_comment_is_named() {
+        // MAGI FIX (MS3 §6 loop23, R1 Melchior): the line holding the `*/` was skipped whole, so
+        // `*/ fn h() {}` lost its item to the next one.
+        for (line, name) in [
+            ("   comment */ fn h() {}", "h"),
+            ("   comment */ #[inline] fn h() {}", "h"),
+            ("   comment */", "k"),
+        ] {
+            let lines = ["/// Doc.", "/* plain", line, "fn k() {}"];
+            let c = rust_doc_chunks("a.rs", &lines);
+            assert_eq!(c.len(), 1, "{line}: {c:?}");
+            assert_eq!(c[0].section, name, "{line}: {c:?}");
+        }
+    }
+
+    #[test]
     fn a_multi_line_attribute_before_the_item_is_skipped_whole() {
         // [MAGI S6 MS3 loop3, R1 Melchior] The attribute's continuation lines were read as the
         // item line, leaving the chunk without a section.
