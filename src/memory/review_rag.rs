@@ -4369,6 +4369,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_masked_source_whose_chunks_all_reuse_stored_vectors_is_declared_masked() {
+        // [MAGI S6 MS3 loop26, R2a, controller follow-up] Masked bytes also leave when a chunk is
+        // served to the trio: a new source whose chunks all reuse vectors already stored (no
+        // embed request) is served, yet it was not declared masked.
+        let readme = "# Setup\nexport KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n"; // allow-secret-scan
+        let f = RagFixture::new(&[("README.md", readme), ("COPY.md", readme)]).await;
+        let prepare = |paths: Vec<String>| {
+            let f = &f;
+            async move {
+                prepare_docs(
+                    &f.docs,
+                    None,
+                    None,
+                    &f.source,
+                    &paths,
+                    &|_: &str| true,
+                    &f.registry,
+                    &f.embedder,
+                    BOUND,
+                )
+                .await
+            }
+        };
+        assert_eq!(
+            prepare(vec!["README.md".into()]).await.masked_sources.len(),
+            1
+        );
+        let calls = f.embedder.calls();
+        let second = prepare(vec!["README.md".into(), "COPY.md".into()]).await;
+        assert_eq!(
+            f.embedder.calls(),
+            calls,
+            "precondition: COPY.md reused every vector"
+        );
+        assert!(!second.docs_unavailable);
+        assert_eq!(
+            second.masked_sources,
+            vec![("COPY.md".to_string(), "anthropic-key")]
+        );
+    }
+
+    #[tokio::test]
     async fn a_masked_source_whose_embed_answer_is_garbage_is_still_declared_masked() {
         // [MAGI S6 MS3 loop26, R2a Caspar, controller ruling] The embed request left with the
         // masked chunks; the answer was unusable, so the batch was not written and its source was
