@@ -1888,6 +1888,10 @@ mod tests {
     /// [CP2 MS3 loop 8] The production budget, for the tests that are not about it.
     const BUDGET: Duration = Duration::from_secs(RECLASSIFY_BUDGET_SECS);
 
+    /// [MAGI S6 MS3 loop26] The label of a documentation index that shrank under the review but
+    /// still serves, pinned verbatim.
+    const SHRUNK: &str = "some documentation rows vanished during the review; the rest is served";
+
     // [RED-DRYRUN 2026-10-20] WorktreeSource carries a lifetime (its optional old-side git): 'static here, no git.
     struct RagFixture {
         docs: ReviewDocStore,
@@ -5015,9 +5019,11 @@ mod tests {
             .expect("delete");
         let hits = rag.documentation(&query, &mut declared);
         assert_eq!(hits.len(), 1, "the surviving hit still serves");
+        // [MAGI S6 MS3 loop26, R2a Balthasar] A partial loss read "index unavailable", the label
+        // of a layer that serves nothing; it has its own label now.
         assert_eq!(
             declared,
-            vec![(ContextKind::Documentation, INDEX_UNAVAILABLE.to_string())]
+            vec![(ContextKind::Documentation, SHRUNK.to_string())]
         );
         // [MAGI S6 MS3 loop16, R2 Caspar] The loss touched one row: the next batch still serves
         // the survivor and the declaration is not repeated.
@@ -5058,7 +5064,7 @@ mod tests {
         assert_eq!(hits.len(), 1, "the other source serves");
         assert_eq!(
             declared,
-            vec![(ContextKind::Documentation, INDEX_UNAVAILABLE.to_string())]
+            vec![(ContextKind::Documentation, SHRUNK.to_string())]
         );
         let again = rag.documentation(&query, &mut declared);
         assert_eq!((again.len(), declared.len()), (1, 1));
