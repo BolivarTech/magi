@@ -72,9 +72,9 @@ const REUSE_LOOKUP_SQL: &str = "SELECT embedding_blob FROM code_review_docs \
 /// indexes (`the_foreign_fingerprint_is_served_by_an_index`).
 const FOREIGN_FINGERPRINT_SQL: &str =
     "SELECT (SELECT COUNT(*) FROM code_review_docs WHERE index_id <> ?1), \
-     (SELECT COALESCE(MAX(rowid), 0) FROM code_review_docs WHERE index_id <> ?1), \
+     (SELECT COALESCE(MAX(+rowid), 0) FROM code_review_docs WHERE index_id <> ?1), \
      (SELECT COUNT(*) FROM code_review_doc_sources WHERE index_id <> ?1), \
-     (SELECT COALESCE(MAX(rowid), 0) FROM code_review_doc_sources WHERE index_id <> ?1)";
+     (SELECT COALESCE(MAX(+rowid), 0) FROM code_review_doc_sources WHERE index_id <> ?1)";
 
 /// `(path, key)` pairs per `search` query: two parameters each plus two fixed ones stay under
 /// the 999-parameter limit of older SQLite builds.
@@ -2310,8 +2310,9 @@ mod tests {
     #[tokio::test]
     async fn the_foreign_fingerprint_is_served_by_an_index() {
         // [MAGI S6 MS3 loop25, R1 Caspar] `MAX(rowid) ... WHERE index_id <> ?` walked the blob
-        // table (reading overflow pages) once per indexing group; no step may touch a table
-        // without an index.
+        // table (reading overflow pages) once per indexing group; no step may touch that table
+        // without a covering index. The sources table holds short tags only, so a scan of it
+        // reads no overflow pages and is not guarded.
         let (store, _dir) = store_for_test();
         let plan: Vec<String> = store
             .connection_for_test()
@@ -2325,7 +2326,9 @@ mod tests {
             .expect("rows");
         let table_steps: Vec<&String> = plan
             .iter()
-            .filter(|s| s.starts_with("SCAN code_review") || s.starts_with("SEARCH code_review"))
+            .filter(|s| {
+                s.starts_with("SCAN code_review_docs") || s.starts_with("SEARCH code_review_docs")
+            })
             .collect();
         assert!(!table_steps.is_empty(), "{plan:?}");
         for step in table_steps {
