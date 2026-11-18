@@ -4372,41 +4372,41 @@ mod tests {
     async fn a_masked_source_whose_chunks_all_reuse_stored_vectors_is_declared_masked() {
         // [MAGI S6 MS3 loop26, R2a, controller follow-up] Masked bytes also leave when a chunk is
         // served to the trio: a new source whose chunks all reuse vectors already stored (no
-        // embed request) is served, yet it was not declared masked.
+        // embed request) is served, yet it was not declared masked. The chunk hash includes the
+        // path, so the reuse is README.md's own: trailing blank lines added between the two
+        // reviews give the file another key and the same chunk (its text is trimmed).
         let readme = "# Setup\nexport KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n"; // allow-secret-scan
-        let f = RagFixture::new(&[("README.md", readme), ("COPY.md", readme)]).await;
-        let prepare = |paths: Vec<String>| {
-            let f = &f;
-            async move {
-                prepare_docs(
-                    &f.docs,
-                    None,
-                    None,
-                    &f.source,
-                    &paths,
-                    &|_: &str| true,
-                    &f.registry,
-                    &f.embedder,
-                    BOUND,
-                )
-                .await
-            }
+
+        let f = RagFixture::new(&[("README.md", readme)]).await;
+        let paths = ["README.md".to_string()];
+        let prepare = || {
+            prepare_docs(
+                &f.docs,
+                None,
+                None,
+                &f.source,
+                &paths,
+                &|_: &str| true,
+                &f.registry,
+                &f.embedder,
+                BOUND,
+            )
         };
-        assert_eq!(
-            prepare(vec!["README.md".into()]).await.masked_sources.len(),
-            1
-        );
+        assert_eq!(prepare().await.masked_sources.len(), 1, "the first review");
+        std::fs::write(f._ws.path().join("README.md"), format!("{readme}\n\n")).expect("write");
         let calls = f.embedder.calls();
-        let second = prepare(vec!["README.md".into(), "COPY.md".into()]).await;
+        let second = prepare().await;
         assert_eq!(
             f.embedder.calls(),
             calls,
-            "precondition: COPY.md reused every vector"
+            "precondition: every vector reused"
         );
+        assert_eq!(second.doc_sources.len(), 1, "precondition: {second:?}");
         assert!(!second.docs_unavailable);
         assert_eq!(
             second.masked_sources,
-            vec![("COPY.md".to_string(), "anthropic-key")]
+            vec![("README.md".to_string(), "anthropic-key")],
+            "a new source key, served"
         );
     }
 
