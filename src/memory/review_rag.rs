@@ -4327,6 +4327,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_masked_source_whose_embed_answer_is_garbage_is_still_declared_masked() {
+        // [MAGI S6 MS3 loop26, R2a Caspar, controller ruling] The embed request left with the
+        // masked chunks; the answer was unusable, so the batch was not written and its source was
+        // not declared, though its bytes left the process.
+        struct Garbage;
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for Garbage {
+            async fn embed(&self, _t: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+                Ok(Vec::new())
+            }
+            fn model_id(&self) -> &str {
+                "fake"
+            }
+            fn dim(&self) -> usize {
+                3
+            }
+            fn query_prefix(&self) -> &str {
+                ""
+            }
+            fn document_prefix(&self) -> &str {
+                ""
+            }
+        }
+        let readme = "# Setup\nexport KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n"; // allow-secret-scan
+        let f = RagFixture::new(&[("README.md", readme)]).await;
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &Garbage,
+            BOUND,
+        )
+        .await;
+        assert!(prep.docs_unavailable, "precondition: the reindex failed");
+        assert_eq!(
+            prep.masked_sources,
+            vec![("README.md".to_string(), "anthropic-key")]
+        );
+    }
+
+    #[tokio::test]
     async fn a_masked_source_sent_before_a_later_batch_fails_is_still_declared_masked() {
         // [MAGI S6 MS3 loop26, R2a Caspar, controller follow-up] RV22 declares what left the
         // process masked: the first batch's masked chunks reached the embedder, so its source is
