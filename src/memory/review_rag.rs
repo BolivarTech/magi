@@ -1562,7 +1562,8 @@ pub async fn prepare_docs(
         let left = deadline.saturating_duration_since(Instant::now());
         prep.doc_index.still_indexing |= left.is_zero();
         if left.is_zero() || !index_batch(docs, &batch, embedder, left, &mut prep).await {
-            declare_masked(&mut prep, masked);
+            // MAGI FIX (MS3 §6 loop26, R2a Caspar): the review degrades to no documentation, so
+            // no source is served and none is declared masked (`masked_sources` stays empty).
             let cause = "a batch of documentation sources was not indexed";
             return degraded(prep, cause, started);
         }
