@@ -14,8 +14,9 @@ _TRIO = "/api/chat"
 _FRAME = ("<<<context kind=history file=%s>>>" % _PATH).encode()
 
 
-def _located(title: str) -> list:
-    return [{"file": _PATH, "line": 3, "title": title}]
+def _located(*titles: str) -> list:
+    """A located finding in the product's shape: ``titles`` is a list (``with_gate``)."""
+    return [{"file": _PATH, "line": 3, "titles": list(titles)}]
 
 
 def _body(*items: str) -> bytes:
@@ -33,6 +34,19 @@ class HistoryServedTest(unittest.TestCase):
         title = "Shift <<< overflows"
         bodies = ((_TRIO, _body(title + " (attended)\n")),)
         self.assertTrue(review_context._history_served(bodies, _located(title)))
+
+    def test_a_merged_finding_is_read_by_its_joined_titles(self):
+        # The history stores the merged titles joined with a newline (JSON-escaped in the body).
+        bodies = ((_TRIO, _body("First\\nSecond (attended)\\n")),)
+        self.assertTrue(review_context._history_served(bodies, _located("First", "Second")))
+
+    def test_a_merged_finding_is_not_read_by_a_title_it_does_not_hold(self):
+        bodies = ((_TRIO, _body("First\\nSecond (attended)\\n")),)
+        self.assertFalse(review_context._history_served(bodies, _located("Third")))
+
+    def test_a_finding_without_titles_is_not_served(self):
+        bodies = ((_TRIO, _body("First (attended)\\n")),)
+        self.assertFalse(review_context._history_served(bodies, [{"file": _PATH, "line": 3}]))
 
     def test_a_title_in_another_status_is_not_served(self):
         bodies = ((_TRIO, _body("Guard missing (open)\n")),)
