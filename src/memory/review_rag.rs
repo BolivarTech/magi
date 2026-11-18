@@ -257,9 +257,13 @@ impl DocPrep {
     /// The working-tree set [`collect_garbage`] may judge `wt:` sources by: `doc_sources` for a
     /// working-tree review (`rev` is `None`) whose listing completed; `None` otherwise, so a
     /// degraded, partial listing never deletes a source it did not reach (RV19,
-    /// `degraded_listing_keeps_worktree`).
+    /// `degraded_listing_keeps_worktree`). A listing with a source it could not read
+    /// (`doc_index.unreadable`) is partial too
+    /// (`an_unreadable_worktree_source_keeps_its_row_through_gc`).
+    // MAGI FIX (MS3 §6 loop26, R2a Caspar): an unreadable source's row was deleted by the GC.
     pub fn gc_worktree(&self, rev: Option<&str>) -> Option<BTreeSet<DocSource>> {
-        (rev.is_none() && !self.docs_unavailable).then(|| self.doc_sources.clone())
+        (rev.is_none() && !self.docs_unavailable && !self.doc_index.unreadable)
+            .then(|| self.doc_sources.clone())
     }
 }
 
