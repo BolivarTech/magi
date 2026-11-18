@@ -74,6 +74,13 @@ const TAG_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-history/lookup-tag-key/v1"
 /// The domain prefix of a path tag.
 const PATH_TAG_DOMAIN: &[u8] = b"path\0";
 
+/// The history's own finding-id subkey label, apart from the path tag's (versioned: changing it
+/// gives every `file:line` a new id, so old rows are never matched again).
+const ID_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-history/id-key/v1";
+
+/// The domain prefix of a finding id.
+const ID_DOMAIN: &[u8] = b"id\0";
+
 /// The columns every read selects, in the order [`RawRow`] reads them.
 const COLUMNS: &str = "id, commit_blob, finding_blob, status, created_at";
 
@@ -204,9 +211,25 @@ impl ReviewHistoryStore {
         lookup_tags(&mut dek, TAG_SUBKEY_LABEL, PATH_TAG_DOMAIN, paths)
     }
 
-    /// The stored id of a finding on `file:line`.
+    /// The stored id of a finding on `file:line`: `HMAC(id subkey, "id\0" || line ":" file)`
+    /// under the history's own id subkey ([`ID_SUBKEY_LABEL`]), so the `id` column confirms no
+    /// guessed path or line without the passphrase. Deterministic per database, so the first
+    /// sighting of a `file:line` keeps its row across reviews. The line comes first: it holds no
+    /// `:`, so no two `(file, line)` pairs share an input. Never call while holding the connection
+    /// lock (R-V08). O(path length).
+    ///
+    /// # Arguments
+    /// * `file` - the reported path, relative to the workspace.
+    /// * `line` - the reported 1-based line.
+    ///
+    /// # Returns
+    /// The id as lowercase hex.
     pub fn finding_id(&self, file: &str, line: u32) -> String {
-        magi_core::finding_id::generate_finding_id(file, line, magi_core::schema::Category::Other)
+        let value = format!("{line}:{file}");
+        let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
+        lookup_tags(&mut dek, ID_SUBKEY_LABEL, ID_DOMAIN, [value.as_str()])
+            .pop()
+            .unwrap_or_default()
     }
 
     /// The reviewed commit of a raw row, decrypted (off the connection lock).
