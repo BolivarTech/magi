@@ -2255,7 +2255,8 @@ fn record_history(
         return Err(NOT_A_FULL_SHA.to_string());
     }
     let budget = reclassification_budget(git, sha, budget);
-    let entries = entries_from_review(findings, sha);
+    let history = memory.history();
+    let entries = entries_from_review(findings, sha, &|file, line| history.finding_id(file, line));
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
@@ -4574,6 +4575,68 @@ mod tests {
         let r = record_history(&memory, &git, "main", &[], Duration::from_secs(1));
         assert!(r.is_ok(), "{r:?}");
         assert_eq!(git.0.load(Ordering::SeqCst), 1, "one ancestor query");
+    }
+
+    #[test]
+    fn a_recorded_history_id_is_keyed_and_names_no_path() {
+        // [MAGI S6 MS3 pre-loop25, R5] the stored `id` was magi-core's unkeyed hash of
+        // `path:line:category`, so a stolen database confirmed guessed paths and lines by
+        // dictionary, undoing the sealed `file`/`line` columns.
+        struct Sha;
+        impl GitCommand for Sha {
+            fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                match args.first() {
+                    Some(&"rev-parse") => {
+                        Ok(b"abc1234def5678901234567890123456789abcde\n".to_vec())
+                    }
+                    _ => Err(ReviewError::Git("no".into())),
+                }
+            }
+        }
+        let path = "src/IDPATHMARKER.rs";
+        let finding = ConsolidatedFinding {
+            file: Some(path.into()),
+            line: Some(4242),
+            severity: magi_core::schema::Severity::Warning,
+            reported_severity: magi_core::schema::Severity::Warning,
+            titles: vec!["t".into()],
+            details: vec!["d".into()],
+            categories: vec![],
+            sources: vec![],
+            marks: vec![],
+            batches: vec![0],
+        };
+        let verdict = GateVerdict {
+            state: magi_rs::review::gate::GateState::Kept,
+            cause: None,
+            causes: vec![],
+            model: None,
+            lean: None,
+            confidence: None,
+            skipped: vec![],
+            status: None,
+        };
+        let (_db, _mem, memory) = review_memory();
+        let r = record_history(&memory, &Sha, "main", &[(finding, verdict)], Duration::ZERO);
+        assert_eq!(r.map(|s| s.recorded), Ok(1));
+        let ids: Vec<String> = {
+            let c = memory.history().connection_for_test().lock().expect("lock");
+            let mut stmt = c
+                .prepare("SELECT id FROM code_review_history")
+                .expect("select");
+            stmt.query_map([], |r| r.get(0))
+                .expect("rows")
+                .collect::<Result<_, _>>()
+                .expect("ids")
+        };
+        let unkeyed = magi_core::finding_id::generate_finding_id(
+            path,
+            4242,
+            magi_core::schema::Category::Other,
+        );
+        assert_eq!(ids.len(), 1);
+        assert_ne!(ids[0], unkeyed, "the id is keyed");
+        assert!(!ids[0].contains("IDPATHMARKER"), "{}", ids[0]);
     }
 
     #[tokio::test]

@@ -19,9 +19,7 @@
 //! let (updates, to_record) = reclassify_then_record(&existing, &fresh, "HEAD", &git);
 //! ```
 
-use magi_core::finding_id::generate_finding_id;
-
-use super::consolidate::{ConsolidatedFinding, NEUTRAL_CATEGORY};
+use super::consolidate::ConsolidatedFinding;
 use super::gate::{GateState, GateVerdict};
 use super::secrets::{find_secret, holds_key_block, mask_secrets};
 use super::source::GitCommand;
@@ -526,6 +524,7 @@ pub fn reclassify_then_record(
 pub fn entries_from_review(
     findings: &[(ConsolidatedFinding, GateVerdict)],
     reviewed_commit: &str,
+    finding_id: &dyn Fn(&str, u32) -> String,
 ) -> Vec<HistoryEntry> {
     // MAGI FIX (MS3 §6 loop5): the anchor is checked where it is written, not only when it is
     // classified: no commit id, no history (RV08).
@@ -559,7 +558,7 @@ pub fn entries_from_review(
             }
             let (title, detail) = masked_text(&title, &detail);
             Some(HistoryEntry {
-                id: generate_finding_id(file, line, NEUTRAL_CATEGORY),
+                id: finding_id(file, line),
                 file: file.clone(),
                 line: Some(line),
                 reviewed_commit: reviewed_commit.to_string(),
@@ -649,6 +648,19 @@ mod tests {
     use super::*;
 
     use crate::review::test_support::FakeGit;
+
+    /// A stand-in id function: the store's keyed id needs the data key, which the lib never has.
+    fn test_id(file: &str, line: u32) -> String {
+        format!("id:{file}:{line}")
+    }
+
+    /// [`super::entries_from_review`] with [`test_id`].
+    fn entries_from_review(
+        findings: &[(ConsolidatedFinding, GateVerdict)],
+        reviewed_commit: &str,
+    ) -> Vec<HistoryEntry> {
+        super::entries_from_review(findings, reviewed_commit, &test_id)
+    }
 
     fn entry(line: Option<u32>) -> HistoryEntry {
         HistoryEntry {
@@ -1022,11 +1034,8 @@ mod tests {
             .all(|e| e.reviewed_commit == "c1" && e.status == HistoryStatus::Pending));
         assert_eq!(
             entries[0].id,
-            magi_core::finding_id::generate_finding_id(
-                "a.rs",
-                3,
-                magi_core::schema::Category::Other
-            )
+            test_id("a.rs", 3),
+            "the id is the given function's"
         );
         assert_eq!(
             (entries[0].file.as_str(), entries[0].line),

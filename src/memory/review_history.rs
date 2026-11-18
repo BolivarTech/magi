@@ -204,6 +204,11 @@ impl ReviewHistoryStore {
         lookup_tags(&mut dek, TAG_SUBKEY_LABEL, PATH_TAG_DOMAIN, paths)
     }
 
+    /// The stored id of a finding on `file:line`.
+    pub fn finding_id(&self, file: &str, line: u32) -> String {
+        magi_core::finding_id::generate_finding_id(file, line, magi_core::schema::Category::Other)
+    }
+
     /// The reviewed commit of a raw row, decrypted (off the connection lock).
     fn unseal_commit(&self, row: &RawRow) -> Result<String, MemoryError> {
         Ok(self.unseal(&row.commit_blob)?.as_str().to_string())
@@ -902,6 +907,50 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_finding_id_is_keyed_by_the_data_key_of_its_database() {
+        // [MAGI S6 MS3 pre-loop25, R3] the id was magi-core's unkeyed hash of `path:line`, so a
+        // stolen database confirmed guessed paths and lines by dictionary. Keyed by the data key:
+        // another database gives another id, the same key the same one (first sighting wins).
+        let tmp = tempfile::NamedTempFile::new().expect("tmp");
+        let mem = crate::system::database::EncryptedSqliteMemory::new(
+            tmp.path().to_path_buf(),
+            zeroize::Zeroizing::new(crate::system::database::TEST_MASTER_PASSPHRASE.to_string()),
+        )
+        .expect("db");
+        let one = ReviewHistoryStore::new(mem.shared_conn(), mem.data_key().expect("dek"))
+            .expect("store");
+        let same = ReviewHistoryStore::new(mem.shared_conn(), mem.data_key().expect("dek"))
+            .expect("store");
+        let (other, _t) = store_for_test();
+        let id = one.finding_id("src/a.rs", 7);
+        assert_eq!(id, one.finding_id("src/a.rs", 7), "deterministic");
+        assert_eq!(
+            id,
+            same.finding_id("src/a.rs", 7),
+            "the same key, the same id"
+        );
+        assert_ne!(
+            id,
+            other.finding_id("src/a.rs", 7),
+            "another key, another id"
+        );
+        assert_ne!(
+            id,
+            one.finding_id("src/a.rs", 8),
+            "another line, another id"
+        );
+        assert_ne!(
+            id,
+            magi_core::finding_id::generate_finding_id(
+                "src/a.rs",
+                7,
+                magi_core::schema::Category::Other
+            ),
+            "never magi-core's unkeyed id"
+        );
     }
 
     #[test]
