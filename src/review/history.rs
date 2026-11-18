@@ -83,7 +83,8 @@ impl HistoryStatus {
 /// One remembered finding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {
-    /// The stable finding id (magi-core's `generate_finding_id`).
+    /// The stable finding id, from the id function handed to [`entries_from_review`] (the
+    /// history store's keyed one in production).
     pub id: String,
     /// The reported file, relative to the workspace.
     pub file: String,
@@ -500,21 +501,21 @@ pub fn reclassify_then_record(
 /// that holds the header, `a_key_block_whose_header_ends_the_title_and_body_opens_the_detail_is_not_stored`); the context
 /// read masks again when it serves an entry back
 /// (`a_history_entry_quoting_a_secret_reaches_the_context_masked`, `memory::review_rag`).
-/// The `id` is magi-core's `generate_finding_id` over file, line and the neutral category
-/// consolidation uses, so it is stable across reviews while file and line do not change; a
+/// The `id` is `finding_id(file, line)`: the caller's function, in production the history
+/// store's HMAC under a data-key subkey (this crate never holds the data key), so it is stable
+/// across reviews while file and line do not change and names neither at rest; a
 /// failure that moves to another line is another id. Declared limitation: two different
 /// findings on one unchanged `file:line` in two reviews share the id, and the first sighting
 /// wins (by design: the trio rewords a title on every run, so an id keyed on it would record the
 /// same defect anew each review and the history would grow without bound; the consolidated
-/// row already merges the titles of one review, as RV12 does across mages) (`ReviewHistoryStore::record`) unless the stored one is `attended`, whose code changed. It depends on magi-core's algorithm
-/// (pinned `=4.2.0`): a bump that changes it leaves old rows with ids no new review
-/// repeats, and must re-verify this.
+/// row already merges the titles of one review, as RV12 does across mages) (`ReviewHistoryStore::record`) unless the stored one is `attended`, whose code changed.
 ///
 /// Complexity: O(findings).
 ///
 /// # Arguments
 /// * `findings` - the judged main list with each finding's gate verdict.
 /// * `reviewed_commit` - the pinned SHA of the reviewed revision.
+/// * `finding_id` - the id of a finding on `(file, line)`; deterministic.
 ///
 /// # Returns
 /// One `Pending` entry per recordable finding; none when `reviewed_commit` is no commit id

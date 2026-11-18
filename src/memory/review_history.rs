@@ -7,9 +7,9 @@
 //! At rest nothing names the repository without the passphrase: path, line and text are sealed
 //! in `finding_blob`, the commit in a small `commit_blob` (the ancestry filter decrypts only it),
 //! and `file` is the path's HMAC tag under this table's subkey ([`crate::memory::lookup_tag`]).
-//! Status and timestamps stay clear for ordering. Declared residual: `id` is magi-core's unkeyed
-//! `generate_finding_id(path, line, fixed category)`, so a guessed path and line can be confirmed;
-//! keying it needs the data key in `entries_from_review`, outside this store.
+//! `id` is an HMAC of line and path under its own subkey ([`ReviewHistoryStore::finding_id`]),
+//! which the caller hands to `entries_from_review`, so no column confirms a guessed path or line.
+//! Status and timestamps stay clear for ordering.
 //!
 //! # Lock discipline
 //!
