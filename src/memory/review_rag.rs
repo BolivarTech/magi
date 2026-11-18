@@ -113,6 +113,11 @@ const LOG_TARGET: &str = "magi_rs::review";
 /// The `trimmed` label of a documentation or history source that is unavailable for the review.
 const INDEX_UNAVAILABLE: &str = "index unavailable";
 
+/// The `trimmed` label of a documentation index that lost rows or sources during the review
+/// (another process's clean-up) while what survived still serves: not [`INDEX_UNAVAILABLE`].
+// MAGI FIX (MS3 §6 loop26, R2a Balthasar): a partial loss read as a layer serving nothing.
+const INDEX_SHRUNK: &str = "some documentation rows vanished during the review; the rest is served";
+
 /// The `trimmed` label of documentation left out because the indexing deadline
 /// ([`REINDEX_TIMEOUT_SECS`] for the whole preparation) passed while sources were still being
 /// indexed: each group written is kept (`reindex` commits per group), so a later review resumes.
@@ -521,7 +526,7 @@ impl StoreRag<'_> {
                         hits_missed = loss.hits_missed,
                         "documentation rows vanished during the review: the index shrank under it"
                     );
-                    declared.push((ContextKind::Documentation, INDEX_UNAVAILABLE.to_string()));
+                    declared.push((ContextKind::Documentation, INDEX_SHRUNK.to_string()));
                 }
                 hits.into_iter().map(|(chunk, _)| doc_item(chunk)).collect()
             }
