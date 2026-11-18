@@ -55,7 +55,7 @@ use magi_rs::review::window::estimate_tokens;
 use magi_rs::vault::MaskedDek;
 
 use crate::memory::embedding::EmbeddingProvider;
-use crate::memory::error::MemoryError;
+use crate::memory::error::{EmbeddingError, MemoryError};
 use crate::memory::review_docs::{DocLoss, DocVectors, ReviewDocStore, EMBED_BATCH_ITEMS};
 use crate::memory::review_history::{ReviewHistoryStore, MAX_HISTORY_PER_BATCH};
 
@@ -1614,18 +1614,26 @@ pub async fn prepare_docs(
     }
     let kept = bounded_into(&mut prep, chunked);
     // MAGI FIX (MS3 §6 loop26, R2a Caspar): RV22 declares what left the process masked, so only
-    // the sources of batches written (their chunks reached the embedder) are declared, also
-    // when a later batch fails; a failed batch's source sent nothing and is not.
+    // the sources of batches whose embed request was issued are declared, also when the answer
+    // is unusable or a later batch fails; a batch that failed before any request is not.
     let mut sent: BTreeSet<DocSource> = BTreeSet::new();
     for batch in reindex_batches(kept) {
         let left = deadline.saturating_duration_since(Instant::now());
         prep.doc_index.still_indexing |= left.is_zero();
-        if left.is_zero() || !index_batch(docs, &batch, embedder, left, &mut prep).await {
+        // The batch's sources join `sent` once an embed request was issued for it ([`SentMarker`]).
+        let marker = SentMarker {
+            inner: embedder,
+            requested: AtomicBool::new(false),
+        };
+        let written = !left.is_zero() && index_batch(docs, &batch, &marker, left, &mut prep).await;
+        if marker.requested.load(Ordering::SeqCst) {
+            sent.extend(batch.into_iter().map(|(source, _)| source));
+        }
+        if !written {
             declare_masked(&mut prep, masked, &sent);
             let cause = "a batch of documentation sources was not indexed";
             return degraded(prep, cause, started);
         }
-        sent.extend(batch.into_iter().map(|(source, _)| source));
     }
     declare_masked(&mut prep, masked, &sent);
     prep.index_ms = millis(started.elapsed());
@@ -1635,6 +1643,8 @@ pub async fn prepare_docs(
 /// Declares as masked the candidates whose source is in `sent` (a reindex batch wrote it, so its
 /// chunks reached the embedder) and still in `prep.doc_sources`: one the chunk bound cut, the
 /// store refused or a failed batch held was never sent, so it is not "masked" (RV13, RV22).
+/// A source whose masked chunks reused stored vectors is declared when its batch embedded any
+/// other chunk, though its own were not sent: the accepted safe direction.
 fn declare_masked(
     prep: &mut DocPrep,
     candidates: Vec<(DocSource, String, &'static str)>,
@@ -1692,6 +1702,38 @@ async fn index_batch(
         }
     }
     true
+}
+
+/// The embedder of one reindex batch, recording that an embed request was issued: the flag is
+/// set on entering [`EmbeddingProvider::embed`], before the request is awaited, so a malformed
+/// answer, a later store error or a timeout still counts the chunks as sent (RV22). It marks the
+/// whole batch on its first request, though `reindex` may split the batch into several: a source
+/// of a later request is declared too, the accepted safe direction (over-declaration).
+struct SentMarker<'e> {
+    /// The embedder every call goes to.
+    inner: &'e dyn EmbeddingProvider,
+    /// An embed request was issued.
+    requested: AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl EmbeddingProvider for SentMarker<'_> {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        self.requested.store(true, Ordering::SeqCst);
+        self.inner.embed(texts).await
+    }
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+    fn query_prefix(&self) -> &str {
+        self.inner.query_prefix()
+    }
+    fn document_prefix(&self) -> &str {
+        self.inner.document_prefix()
+    }
 }
 
 /// Why a bounded reindex did not complete.
