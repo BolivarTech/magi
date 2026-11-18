@@ -68,6 +68,14 @@ const _: () = assert!(EMBED_BATCH_BYTES >= MAX_DOC_CHUNK_BYTES);
 const REUSE_LOOKUP_SQL: &str = "SELECT embedding_blob FROM code_review_docs \
      WHERE chunk_hash = ?1 AND index_id = ?2 LIMIT 1";
 
+/// The foreign-row fingerprint of [`ReviewDocStore::foreign_fingerprint`], served by covering
+/// indexes (`the_foreign_fingerprint_is_served_by_an_index`).
+const FOREIGN_FINGERPRINT_SQL: &str =
+    "SELECT (SELECT COUNT(*) FROM code_review_docs WHERE index_id <> ?1), \
+     (SELECT COALESCE(MAX(rowid), 0) FROM code_review_docs WHERE index_id <> ?1), \
+     (SELECT COUNT(*) FROM code_review_doc_sources WHERE index_id <> ?1), \
+     (SELECT COALESCE(MAX(rowid), 0) FROM code_review_doc_sources WHERE index_id <> ?1)";
+
 /// `(path, key)` pairs per `search` query: two parameters each plus two fixed ones stay under
 /// the 999-parameter limit of older SQLite builds.
 const ALLOWED_PAIRS_PER_QUERY: usize = 400;
@@ -445,14 +453,9 @@ impl ReviewDocStore {
     /// Count and highest rowid of the foreign rows of each table: any write or delete by another
     /// identity changes it (a delete of its highest row plus one insert would not; declared).
     fn foreign_fingerprint(&self, c: &Connection) -> Result<[i64; 4], MemoryError> {
-        c.query_row(
-            "SELECT (SELECT COUNT(*) FROM code_review_docs WHERE index_id <> ?1), \
-             (SELECT COALESCE(MAX(rowid), 0) FROM code_review_docs WHERE index_id <> ?1), \
-             (SELECT COUNT(*) FROM code_review_doc_sources WHERE index_id <> ?1), \
-             (SELECT COALESCE(MAX(rowid), 0) FROM code_review_doc_sources WHERE index_id <> ?1)",
-            [&self.index_id],
-            |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]),
-        )
+        c.query_row(FOREIGN_FINGERPRINT_SQL, [&self.index_id], |r| {
+            Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?])
+        })
         .map_err(db_err)
     }
 
@@ -2302,6 +2305,32 @@ mod tests {
             plan.contains("code_review_docs_by_chunk (chunk_hash=?"),
             "{plan}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_foreign_fingerprint_is_served_by_an_index() {
+        // [MAGI S6 MS3 loop25, R1 Caspar] `MAX(rowid) ... WHERE index_id <> ?` walked the blob
+        // table (reading overflow pages) once per indexing group; no step may touch a table
+        // without an index.
+        let (store, _dir) = store_for_test();
+        let plan: Vec<String> = store
+            .connection_for_test()
+            .lock()
+            .expect("lock")
+            .prepare(&format!("EXPLAIN QUERY PLAN {FOREIGN_FINGERPRINT_SQL}"))
+            .expect("prep")
+            .query_map(["i"], |r| r.get::<_, String>(3))
+            .expect("q")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+        let table_steps: Vec<&String> = plan
+            .iter()
+            .filter(|s| s.starts_with("SCAN code_review") || s.starts_with("SEARCH code_review"))
+            .collect();
+        assert!(!table_steps.is_empty(), "{plan:?}");
+        for step in table_steps {
+            assert!(step.contains("COVERING INDEX"), "{plan:?}");
+        }
     }
 
     #[tokio::test]
