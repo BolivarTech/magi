@@ -4375,8 +4375,9 @@ mod tests {
     async fn a_masked_source_sent_before_a_later_batch_fails_is_still_declared_masked() {
         // [MAGI S6 MS3 loop26, R2a Caspar, controller follow-up] RV22 declares what left the
         // process masked: the first batch's masked chunks reached the embedder, so its source is
-        // declared even though a later batch fails and the review degrades; the failing batch's
-        // masked source sent nothing and is not.
+        // declared even though a later batch fails and the review degrades. The failing batch's
+        // request was issued too (the embedder answered an error), so its source is declared as
+        // well (controller ruling: declared once the request is issued).
         use crate::memory::review_docs::EMBED_BATCH_ITEMS;
         let secret = "export KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n"; // allow-secret-scan
         let first = format!("# B\n{secret}");
@@ -4406,7 +4407,10 @@ mod tests {
         );
         assert_eq!(
             prep.masked_sources,
-            vec![("CLAUDE.md".to_string(), "anthropic-key")]
+            vec![
+                ("CLAUDE.md".to_string(), "anthropic-key"),
+                ("README.md".to_string(), "anthropic-key")
+            ]
         );
     }
 
