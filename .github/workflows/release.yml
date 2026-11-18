@@ -345,7 +345,7 @@ jobs:
     name: Build macos-universal2
     needs: [gate, ci]
     if: needs.gate.outputs.should_release == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.98.0
