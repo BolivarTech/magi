@@ -4318,6 +4318,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_masked_source_sent_before_a_later_batch_fails_is_still_declared_masked() {
+        // [MAGI S6 MS3 loop26, R2a Caspar, controller follow-up] RV22 declares what left the
+        // process masked: the first batch's masked chunks reached the embedder, so its source is
+        // declared even though a later batch fails and the review degrades; the failing batch's
+        // masked source sent nothing and is not.
+        use crate::memory::review_docs::EMBED_BATCH_ITEMS;
+        let secret = "export KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n"; // allow-secret-scan
+        let first = format!("# B\n{secret}");
+        let mut big = format!("# Setup\n{secret}");
+        for i in 0..EMBED_BATCH_ITEMS {
+            big.push_str(&format!("# S{i}\nx{i}\n"));
+        }
+        // CLAUDE.md (1 chunk) sorts first and is the first batch; README.md is the second.
+        let f =
+            RagFixture::new(&[("CLAUDE.md", first.as_str()), ("README.md", big.as_str())]).await;
+        let down = FailsAfterFirst(Default::default());
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &["CLAUDE.md".to_string(), "README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &down,
+            BOUND,
+        )
+        .await;
+        assert!(
+            prep.docs_unavailable,
+            "precondition: the second batch failed"
+        );
+        assert_eq!(
+            prep.masked_sources,
+            vec![("CLAUDE.md".to_string(), "anthropic-key")]
+        );
+    }
+
+    #[tokio::test]
     async fn a_source_masked_by_an_earlier_review_is_served_with_its_mask() {
         // [MAGI S6 MS3 loop6, R2 Caspar] A second review finds the source indexed, so its
         // `masked_sources` is empty; what it serves still carries the mask, which is what the
