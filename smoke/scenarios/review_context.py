@@ -560,6 +560,11 @@ def _seeded_findings(run) -> list:
             and f["file"].replace("\\", "/") == runs.REVIEW_HISTORY_FILE]
 
 
+def _is_titles(value) -> bool:
+    """Whether *value* is a finding's ``titles``: a non-empty list of strings."""
+    return isinstance(value, list) and bool(value) and all(isinstance(t, str) for t in value)
+
+
 def _history_served(request_bodies, located) -> bool:
     """Whether a trio prompt carries a validated history item of *located* (MAGI FIX, MS3 §6 loop10).
 
@@ -569,7 +574,11 @@ def _history_served(request_bodies, located) -> bool:
     must sit in a trio request, after its frame, with the title of a finding
     the first review located there and the ``(attended)`` status the second
     review's reclassification gave it (``history_item`` in
-    ``src/memory/review_rag.rs``); titles are compared JSON-escaped, as sent.
+    ``src/memory/review_rag.rs``); titles are compared JSON-escaped, as sent. A
+    finding carries ``titles``, a list (``with_gate`` in ``src/review/report.rs``);
+    the history stores a merged finding's titles joined with a newline
+    (``MERGED_TEXT_SEPARATOR`` in ``src/review/history.rs``), so the needle is
+    that join, escaped.
 
     Coupling, declared (MAGI FIX, MS3 §6 loop11): this reads the product's
     prompt framing byte for byte (the ``<<<context kind=history file=…>>>``
@@ -590,8 +599,8 @@ def _history_served(request_bodies, located) -> bool:
     path = runs.REVIEW_HISTORY_FILE
     frames = [b"<<<context kind=history file=" + shown.encode("utf-8") + b">>>"
               for shown in (path, path.replace("/", "\\"), path.replace("/", "\\\\"))]
-    titles = [json.dumps(f["title"], ensure_ascii=False)[1:-1].encode("utf-8")
-              for f in located if isinstance(f.get("title"), str)]
+    titles = [json.dumps("\n".join(f["titles"]), ensure_ascii=False)[1:-1].encode("utf-8")
+              for f in located if _is_titles(f.get("titles"))]
     # MAGI FIX (MS3 §6 loop15, R7a2 Caspar): every frame of the file in a body is read (a body can
     # carry several history frames), and an item ends at the next frame, never at a bare `<<<`,
     # which a finding title may contain.
