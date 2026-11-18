@@ -443,7 +443,7 @@ class LoopSixteenRelayTests(unittest.TestCase):
     def test_s57_a_finding_outside_the_seeded_file_is_cannot_test(self) -> None:
         for line in (0, 99):
             found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": line,
-                                                   "title": "off by one"}]}}
+                                                   "titles": ["off by one"]}]}}
             first = ProductOutput(stdout=json.dumps(found).encode(), stderr=b"", exit_code=0, command=["m"])
             r = _with(_result("R21", 0, {}), request_bodies=(), setup_outputs=(first, first))
             self.assertEqual([P, C], _judged("S57", r, rc.S57_ASSERTIONS), line)
@@ -666,7 +666,7 @@ class RelayScenarioTests(unittest.TestCase):
 
     def test_s57_serves_validated_history(self) -> None:
         found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3,
-                                               "title": "off by one"}]}}
+                                               "titles": ["off by one"]}]}}
         first = ProductOutput(stdout=json.dumps(found).encode(), stderr=b"", exit_code=0, command=["m"])
         empty = _with(first, stdout=b'{"code_review": {"findings": []}}')
         frame = b"<<<context kind=history file=%s>>>" % runs.REVIEW_HISTORY_FILE.encode()
@@ -697,7 +697,7 @@ class RelayScenarioTests(unittest.TestCase):
         # MAGI FIX (MS3 §6 loop13, R7a): the product's JSON body keeps non-ASCII characters
         # (serde_json does not escape them) and may write the path with either separator.
         title = "décalage à l'index"
-        found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3, "title": title}]}}
+        found = {"code_review": {"findings": [{"file": runs.REVIEW_HISTORY_FILE, "line": 3, "titles": [title]}]}}
         first = ProductOutput(stdout=json.dumps(found).encode(), stderr=b"", exit_code=0, command=["m"])
         item = ("\\n%s (attended)\\n" % title).encode("utf-8")
         path = runs.REVIEW_HISTORY_FILE
