@@ -18,7 +18,7 @@
 //! synchronous one: no database lock is ever held across an `.await`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -87,6 +87,11 @@ const QUERY_WITHHELD: &str = "the query prefix holds a private-key block: no que
 
 /// Why no history entry is served when the review has no git to check it against `HEAD`.
 const HISTORY_NO_GIT: &str = "history not served: there is no git to check it against HEAD";
+
+/// Why some history entries were not served when git failed to check their commit against
+/// `HEAD` (it could not resolve `HEAD`): declared once per review, the entries stay unserved.
+const HISTORY_GIT_UNANSWERED: &str =
+    "history not served for some entries: git could not check them against HEAD";
 
 /// Why a batch's documentation and history were not searched when its own text holds a private-key
 /// block (RV22): declared for that batch, apart from a missing or down embedder.
@@ -196,6 +201,10 @@ pub struct StoreRag<'a> {
     pub corrupt_baseline: std::sync::OnceLock<usize>,
     /// The absence of a git, which leaves history unserved, was declared once.
     pub history_no_git_declared: AtomicBool,
+    /// A history check got no answer from git (see [`Self::commit_on_line`]).
+    pub history_git_unanswered: AtomicBool,
+    /// [`Self::history_git_unanswered`] was declared once.
+    pub history_git_unanswered_declared: AtomicBool,
     /// The reviewed revision's documentation sources: `search` sees only these (RV21).
     pub doc_sources: BTreeSet<DocSource>,
     /// Documentation paths left out for a secret, as `display_path`, returned by `skipped`: a
@@ -232,6 +241,22 @@ pub struct StoreRag<'a> {
     /// The history entries already counted as withheld, id to the [`display_path`] of their file,
     /// so an entry two batches meet counts once and its file is declared `secret` (`skipped`).
     pub withheld_history: Mutex<BTreeMap<String, String>>,
+}
+
+/// A git that counts the calls made through it, so [`StoreRag::commit_on_line`] tells a check
+/// git answered from one that never reached it (a stored commit that is no commit id).
+struct CountingGit<'g> {
+    /// The git every call goes to.
+    git: &'g dyn GitCommand,
+    /// Calls made so far.
+    calls: AtomicUsize,
+}
+
+impl GitCommand for CountingGit<'_> {
+    fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, ReviewError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.git.run_bytes(args)
+    }
 }
 
 /// What the documentation preparation of one review produced.
@@ -627,12 +652,28 @@ impl StoreRag<'_> {
     }
 
     /// [`on_heads_line`] of `commit` on `HEAD`, memoized in [`Self::on_line`]; `false` without a
-    /// git. O(1) after the first call for a commit.
+    /// git. A `false` after git was asked is checked once more with `rev-parse --verify` of
+    /// `HEAD`: when that fails too, git gave no answer, recorded in
+    /// [`Self::history_git_unanswered`] for the review to declare; the entry stays unserved.
+    /// O(1) after the first call for a commit.
+    // MAGI FIX (MS3 §6 loop26, R2a Melchior): a git failure folded into "not on line" silently.
     fn commit_on_line(&self, git: &dyn GitCommand, commit: &str) -> bool {
         let mut memo = relock(&self.on_line);
-        *memo
-            .entry(commit.to_string())
-            .or_insert_with(|| on_heads_line(commit, HISTORY_HEAD, git))
+        *memo.entry(commit.to_string()).or_insert_with(|| {
+            let counted = CountingGit {
+                git,
+                calls: AtomicUsize::new(0),
+            };
+            let on = on_heads_line(commit, HISTORY_HEAD, &counted);
+            let head = format!("{HISTORY_HEAD}^{{commit}}");
+            if !on
+                && counted.calls.load(Ordering::SeqCst) > 0
+                && git.run(&["rev-parse", "--verify", &head]).is_err()
+            {
+                self.history_git_unanswered.store(true, Ordering::SeqCst);
+            }
+            on
+        })
     }
 
     /// Whether the history entry `id`, on `file`, is withheld for the first time in this review.
@@ -692,7 +733,7 @@ impl StoreRag<'_> {
                         ),
                     ));
                 }
-                entries
+                let items = entries
                     .into_iter()
                     // MAGI FIX (MS3 §6 loop7): an entry validated off HEAD's line (another
                     // branch) was served; each one is checked against HEAD first.
@@ -716,7 +757,15 @@ impl StoreRag<'_> {
                             }))
                         }
                     })
-                    .collect()
+                    .collect();
+                if self.history_git_unanswered.load(Ordering::SeqCst)
+                    && !self
+                        .history_git_unanswered_declared
+                        .swap(true, Ordering::SeqCst)
+                {
+                    declared.push((ContextKind::History, HISTORY_GIT_UNANSWERED.to_string()));
+                }
+                items
             }
             Err(e) => {
                 if !self.history_failed.swap(true, Ordering::SeqCst) {
@@ -1155,6 +1204,8 @@ impl RagSource for ReviewRag<'_> {
             corrupt_declared: AtomicBool::new(false),
             corrupt_baseline: std::sync::OnceLock::new(),
             history_no_git_declared: AtomicBool::new(false),
+            history_git_unanswered: AtomicBool::new(false),
+            history_git_unanswered_declared: AtomicBool::new(false),
             doc_sources: BTreeSet::new(),
             withheld_sources: Vec::new(),
             masked_sources: Vec::new(),
@@ -1968,6 +2019,8 @@ mod tests {
                 corrupt_declared: Default::default(),
                 corrupt_baseline: Default::default(),
                 history_no_git_declared: Default::default(),
+                history_git_unanswered: Default::default(),
+                history_git_unanswered_declared: Default::default(),
                 doc_sources: BTreeSet::new(),
                 withheld_sources: Vec::new(),
                 masked_sources: Vec::new(),
