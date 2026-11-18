@@ -4151,6 +4151,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_masked_source_whose_reindex_fails_is_not_declared_masked() {
+        // [MAGI S6 MS3 loop26, R2a Caspar] A failed reindex degrades the review to no
+        // documentation, yet its masked source was still declared masked: nothing of it is served.
+        let readme = "# Setup\nexport KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n"; // allow-secret-scan
+        let f = RagFixture::new(&[("README.md", readme)]).await;
+        let down = CountingFailingEmbedder(Default::default());
+        let prep = prepare_docs(
+            &f.docs,
+            None,
+            None,
+            &f.source,
+            &["README.md".to_string()],
+            &|_: &str| true,
+            &f.registry,
+            &down,
+            BOUND,
+        )
+        .await;
+        assert!(prep.docs_unavailable, "precondition: the reindex failed");
+        assert!(prep.masked_sources.is_empty(), "{:?}", prep.masked_sources);
+        let rag = f.rag(true).with_prep(prep);
+        assert!(rag.masked().is_empty(), "{:?}", rag.masked());
+    }
+
+    #[tokio::test]
     async fn a_source_masked_by_an_earlier_review_is_served_with_its_mask() {
         // [MAGI S6 MS3 loop6, R2 Caspar] A second review finds the source indexed, so its
         // `masked_sources` is empty; what it serves still carries the mask, which is what the
