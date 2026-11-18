@@ -1630,29 +1630,39 @@ pub async fn prepare_docs(
             sent.extend(batch.into_iter().map(|(source, _)| source));
         }
         if !written {
-            declare_masked(&mut prep, masked, &sent);
+            declare_masked(&mut prep, masked, Some(&sent));
             let cause = "a batch of documentation sources was not indexed";
             return degraded(prep, cause, started);
         }
     }
-    declare_masked(&mut prep, masked, &sent);
+    declare_masked(&mut prep, masked, None);
     prep.index_ms = millis(started.elapsed());
     prep
 }
 
-/// Declares as masked the candidates whose source is in `sent` (a reindex batch wrote it, so its
-/// chunks reached the embedder) and still in `prep.doc_sources`: one the chunk bound cut, the
-/// store refused or a failed batch held was never sent, so it is not "masked" (RV13, RV22).
-/// A source whose masked chunks reused stored vectors is declared when its batch embedded any
-/// other chunk, though its own were not sent: the accepted safe direction.
+/// Declares as masked the candidates whose masked bytes may leave the process (RV13, RV22), by
+/// either of two routes: an embed request, or a chunk served into the trio's prompt.
+///
+/// * `sent` is `None` on the success path: documentation is served, so every candidate still in
+///   `prep.doc_sources` may be retrieved and sent, embedded now or not (its chunks may all have
+///   reused stored vectors).
+/// * `sent` is `Some` on the degraded path: nothing is served, so only the candidates whose batch
+///   issued an embed request ([`SentMarker`]) are declared; a source whose request was never
+///   issued sent nothing.
+///
+/// A source the chunk bound cut or the store refused is out of `doc_sources` and never declared.
+/// Over-declaration (a reused-vector source of a degraded batch that embedded other chunks) is the
+/// accepted safe direction.
 fn declare_masked(
     prep: &mut DocPrep,
     candidates: Vec<(DocSource, String, &'static str)>,
-    sent: &BTreeSet<DocSource>,
+    sent: Option<&BTreeSet<DocSource>>,
 ) {
     prep.masked_sources = candidates
         .into_iter()
-        .filter(|(source, _, _)| sent.contains(source) && prep.doc_sources.contains(source))
+        .filter(|(source, _, _)| {
+            sent.is_none_or(|sent| sent.contains(source)) && prep.doc_sources.contains(source)
+        })
         .map(|(_, path, pattern)| (path, pattern))
         .collect();
 }
