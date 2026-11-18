@@ -42,7 +42,7 @@ pub struct DocChunk {
     pub section: String,
     /// The text embedded and shown to the reviewers.
     pub text: String,
-    /// SHA-256 hex of `path + "\n" + section + "\n" + text`; independent of any revision.
+    /// SHA-256 hex of the length-prefixed `path`, `section` and `text` ([`chunk_hash`]); independent of any revision.
     pub hash: String,
 }
 
@@ -1151,7 +1151,7 @@ pub fn without_secrets(chunks: Vec<DocChunk>) -> (Vec<DocChunk>, Vec<String>) {
 /// (text and section) in [`MAX_DOC_INDEX_BYTES`] (`bytes_bound_the_index_too`).
 ///
 /// A source that does not fit is skipped and the next ones still enter (one big source never
-/// starves the rest); a source with more chunks than the bound is never indexed. A source left
+/// starves the rest); a source with more chunks than [`MAX_DOC_CHUNKS`], or more bytes than [`MAX_DOC_INDEX_BYTES`], is never indexed. A source left
 /// out is not indexed, so a later review indexes it. O(n log n) in the sources (sorted by path).
 ///
 /// # Returns

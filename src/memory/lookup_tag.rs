@@ -12,6 +12,7 @@
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+use magi_rs::encoding::lower_hex;
 use magi_rs::vault::MaskedDek;
 
 /// The HMAC block size of SHA-256 (RFC 2104).
@@ -51,11 +52,6 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
     mac
 }
 
-/// Lowercase hex of `bytes`.
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// One hex tag per value, in order: `HMAC(subkey, domain || value)`, `subkey = HMAC(dek,
 /// subkey_label)` (one versioned label per table; `domain` separates columns). The key is reached
 /// only through `with_dek`, the subkey is zeroed, the mask rotates once per call. Deterministic.
@@ -73,7 +69,7 @@ pub(crate) fn lookup_tags<'v>(
             .map(|v| {
                 let mut msg = domain.to_vec();
                 msg.extend_from_slice(v.as_bytes());
-                to_hex(hmac_sha256(subkey.as_slice(), &msg).as_slice())
+                lower_hex(hmac_sha256(subkey.as_slice(), &msg).as_slice())
             })
             .collect()
     })
@@ -119,7 +115,7 @@ mod tests {
         // RFC 4231, case 2: key "Jefe", data "what do ya want for nothing?".
         let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
         assert_eq!(
-            to_hex(mac.as_slice()),
+            lower_hex(mac.as_slice()),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
     }

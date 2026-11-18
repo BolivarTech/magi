@@ -663,10 +663,11 @@ impl ReviewDocStore {
     /// dimension) before it is written under a new row, so a damaged blob fails here and is never
     /// copied forward; a verbatim copy would skip the check for a saving the bound makes small.
     ///
-    /// Peak memory is declared too: the call holds every sealed row at once (about 240 MB of
-    /// embedding blobs at the cap and 768 dimensions, plus the decrypted vectors and the 32 MiB
-    /// text bound), because the transaction needs them all before it locks; a streaming write
-    /// would hold the connection across embedding batches, which R-V08 forbids.
+    /// Peak memory is declared too, per group: the call holds the sealed rows of one group (at
+    /// most `EMBED_BATCH_ITEMS` rows; one source with many chunks is one group, bounded by
+    /// `MAX_DOC_CHUNKS`) plus their decrypted vectors, because the transaction needs them all
+    /// before it locks; a streaming write would hold the connection across embedding batches,
+    /// which R-V08 forbids.
     fn encode_rows(
         &self,
         plan: &Plan<'_>,
