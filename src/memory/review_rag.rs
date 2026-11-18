@@ -270,11 +270,12 @@ pub struct RecordStats {
     pub backlog: usize,
 }
 
-/// The dedup key of a containing unit: `"<file>:<first>-<last>"`, with an `old:` marker for an
-/// old-side unit. Returns the key; O(file). Never fails.
+/// The dedup key of a containing unit: `"<file length>:<file>:<first>-<last>"`, with an `old:`
+/// marker after the file for an old-side unit. The length prefix makes it unambiguous for any
+/// file name, colons included (`a:old` new side vs `a` old side). Returns the key; O(file).
 fn companion_key(file: &str, old_side: bool, first: u32, last: u32) -> String {
     let side = if old_side { "old:" } else { "" };
-    format!("{file}:{side}{first}-{last}")
+    format!("{}:{file}:{side}{first}-{last}", file.len())
 }
 
 /// `item` with its text escaped for its frame, so what is charged is what is written.
@@ -475,11 +476,16 @@ impl StoreRag<'_> {
             },
         };
         if !self.embedder_down.swap(true, Ordering::SeqCst) {
+            let message = if prefix_blocked {
+                "the query prefix holds a key block: documentation and history are left out of this review"
+            } else {
+                "the embedder did not answer: documentation and history are left out of this review"
+            };
             tracing::event!(
                 target: LOG_TARGET,
                 tracing::Level::WARN,
                 error = cause.as_str(),
-                "the embedder did not answer: documentation and history are left out of this review"
+                "{message}"
             );
         }
         QueryVector::Unavailable
@@ -968,9 +974,8 @@ impl RagSource for StoreRag<'_> {
         self.index_ms
     }
 
-    /// The item's containing units, each keyed `"<file>:<start>-<end>"`
-    /// (`"<file>:old:<start>-<end>"` for an old-side unit, which `assemble` keeps apart from a
-    /// new-side one with the same numbers) and charged at its escaped cost, so planning counts
+    /// The item's containing units, each keyed by [`companion_key`] (an old-side unit, which
+    /// `assemble` keeps apart from a new-side one with the same numbers, has its own key) and charged at its escaped cost, so planning counts
     /// exactly what `context_for` will add.
     fn companion(&self, item: &BatchItem) -> Result<Vec<Companion>, ReviewError> {
         Ok(
@@ -1847,7 +1852,9 @@ pub fn collect_garbage(
     // `gc`'s second argument is `keep_worktree_keys`: a review that did not list the working
     // tree (`worktree` is `None`, a revision review) keeps every `wt:` source, so a commit review
     // never drops the working tree's documentation; one that listed it judges them by `live`.
-    docs.gc(&live, worktree.is_none()).map(Some)
+    docs.gc(&live, worktree.is_none())
+        .map(Some)
+        .map_err(|e| MemoryError::Storage(outward_text(&e.to_string())))
 }
 
 #[cfg(test)]
