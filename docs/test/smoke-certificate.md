@@ -1,16 +1,16 @@
 # Smoke Certificate
 
-- version: 0.24.2
-- commit: 9f08e47
-- date: 2026-10-14 (UTC)
+- version: 0.25.0
+- commit: 8ad1a8ec
+- date: 2026-11-18 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 03b81695f54fb4cc17e3c502c362ee85ff7db7bd5333e2907103e3a888a36ec4 (rebuilt from the commit above)
-- real cost: 8 backend run(s) in 680s
-- rounds needed: 3
-- scope: 43 of 43 scenarios evaluated
+- binary: sha256 7096129e2b97395a361a69a56e0678d1adb1b4cc0a37bb1485b3428881ba14be (rebuilt from the commit above)
+- real cost: 22 backend run(s) in 2899s
+- rounds needed: 1
+- scope: 58 of 58 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: active memories not measured, 4001 KB database, 2061 KB archived
-- result: 127 passed, 0 not passed, 127 total
+- environment: active memories not measured, 524 KB database, 539 KB archived
+- result: 174 passed, 0 not passed, 174 total
 
 [PASS] D1 - decide answers one question of each type against local Ollama with exit 0
 [PASS] D1 - every answer carries a Magi confidence between 0 and 1
@@ -139,4 +139,51 @@
 [PASS] S25 - no attempt record carries reasoning text, even with the trace opted in
 [PASS] S26 run=R4 - with no reasoning key declared every recorded attempt reports the default control
 [PASS] S26 run=R4 - every recorded attempt reports its reasoning state in magi-core's own shape
+[PASS] S44 run=R9 - exit 0
+[PASS] S44 run=R9 - stderr contains the ignored-system warning even at --log-level error
+[PASS] S44 run=R9 - applied_caps.system_ignored is true
+[PASS] S44 run=R9 - applied_caps.system_override_applied is false
+[PASS] S45 run=R10 - the run produced a consult envelope (a provider or timeout error is CANNOT_TEST)
+[PASS] S45 run=R10 - applied_caps.system_override_applied is true in any envelope the run produced
+[PASS] S45 run=R10 - applied_caps.system_ignored is false in any envelope the run produced
+[PASS] S46 run=R11 - exit 2
+[PASS] S46 run=R11 - stderr names max_system_bytes
+[PASS] S46 run=R11 - no consult or query output on stdout
+[PASS] S47 run=R12 - exit 0
+[PASS] S47 run=R12 - stdout parses as JSON with a code_review.discarded list
+[PASS] S47 run=R12 - code_review.batches_planned is at least 3, batches_completed equals it and failed_batches is empty
+[PASS] S47 run=R12 - consult has one consensus
+[PASS] S47 run=R12 - every main finding points inside the reviewed files
+[PASS] S48 run=R13 - exit 2
+[PASS] S48 run=R13 - stderr names the outside path
+[PASS] S49 run=R14 - exit 2
+[PASS] S49 run=R14 - stderr says nothing to review, leaving out the binary as binary and the secret as secret
+[PASS] S49 run=R14 - the toy secret reaches neither stdout, stderr nor the run log
+[PASS] S50 run=R15 - exit 2
+[PASS] S50 run=R15 - stderr names the batches, the per-batch ceiling, the 15 s floor and a minimum --timeout
+[PASS] S50 run=R15 - the run log carries the same refusal
+[PASS] S51 run=R16 - exit 2
+[PASS] S51 run=R16 - stderr says nothing to review: no file under .magi/ or .git/ was taken for review
+[PASS] S51 run=R16 - a .magi/ file git lists is left out as ignored, and no .magi/ or .git/ path is read
+[PASS] S52 run=R17 - exit 0
+[PASS] S52 run=R17 - code_review.without_embedder is true
+[PASS] S52 run=R17 - code_review.trimmed names an unavailable index or an embedder that did not answer
+[PASS] S53 run=R18 - exit 0
+[PASS] S53 run=R18 - code_review.masked lists exactly the keyed file with cause secret and pattern anthropic-key, and masked_unlisted is 0
+[PASS] S53 run=R18 - code_review.skipped is empty and skipped_unlisted is 0: the keyed file was reviewed
+[PASS] S53 run=R18 - the toy key reaches neither stdout, stderr, the run log nor any request the relay forwarded, and a trio prompt carries the file's code with the key masked, and an embedding request went through the relay
+[PASS] S54 run=R19 - exit 2
+[PASS] S54 run=R19 - stderr says nothing to review, leaving out the private-key file as secret and nothing else
+[PASS] S54 run=R19 - no line of the private-key block, header and footer included, reaches stdout, stderr or the run log
+[PASS] S55 run=R18 - code_review.without_embedder is false: the embedder answered the review
+[PASS] S55 run=R18 - code_review.trimmed names no unavailable index and no embedder that did not answer
+[PASS] S55 run=R18 - the embedder was sent the file's doc comment alone, as a chunk, and a query of the batch
+[PASS] S56 run=R20 - exit 0
+[PASS] S56 run=R20 - the embedder was sent the reviewed commit's doc comment as a chunk, and the trio its code
+[PASS] S56 run=R20 - no request the relay forwarded carries the working tree's doc comment, and no embedded chunk is the parent commit's doc comment alone
+[PASS] S57 run=R21 - every review exits 0
+[PASS] S57 run=R21 - the last review sends the trio a validated history item on the reviewed file
+[PASS] S58 run=R22 - the setup reviews and the measured review all exit 0
+[PASS] S58 run=R22 - the measured review declares without_embedder true and its history layer names a degraded cause
+[PASS] S58 run=R22 - the measured review still delivers its findings list
 [OUT_OF_SCOPE] - cross-OS linkage and the published crate (REQ-S26, REQ-S27)
