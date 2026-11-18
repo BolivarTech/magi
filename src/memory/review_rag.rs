@@ -270,6 +270,13 @@ pub struct RecordStats {
     pub backlog: usize,
 }
 
+/// The dedup key of a containing unit: `"<file>:<first>-<last>"`, with an `old:` marker for an
+/// old-side unit. Returns the key; O(file). Never fails.
+fn companion_key(file: &str, old_side: bool, first: u32, last: u32) -> String {
+    let side = if old_side { "old:" } else { "" };
+    format!("{file}:{side}{first}-{last}")
+}
+
 /// `item` with its text escaped for its frame, so what is charged is what is written.
 fn escaped(item: ContextItem) -> ContextItem {
     ContextItem {
@@ -971,12 +978,9 @@ impl RagSource for StoreRag<'_> {
                 .into_iter()
                 .map(|unit| {
                     let (first, last) = unit.lines.unwrap_or_default();
-                    let side = if unit.old_side { "old:" } else { "" };
+                    let key = companion_key(&unit.file, unit.old_side, first, last);
                     let unit = escaped(unit);
-                    (
-                        format!("{}:{side}{first}-{last}", unit.file),
-                        item_cost(&unit),
-                    )
+                    (key, item_cost(&unit))
                 })
                 .collect(),
         )
@@ -1855,6 +1859,24 @@ mod tests {
     use magi_rs::review::history::{HistoryEntry, HistoryStatus};
     use magi_rs::review::rag::ContextKind;
     use magi_rs::review::source::WorktreeSource;
+
+    #[test]
+    fn a_file_named_like_an_old_side_key_is_its_own_companion() {
+        // [MAGI S6 MS3 loop25, R2a Melchior] The new-side unit of `a:old` and the old-side unit of
+        // `a`, same lines, shared one key: the planner charged one and `assemble` added two.
+        assert_ne!(
+            companion_key("a:old", false, 1, 2),
+            companion_key("a", true, 1, 2)
+        );
+        assert_eq!(
+            companion_key("a", true, 1, 2),
+            companion_key("a", true, 1, 2)
+        );
+        assert_ne!(
+            companion_key("a", false, 1, 2),
+            companion_key("a", true, 1, 2)
+        );
+    }
 
     /// [CP2 MS3 loop 8] The production budget, for the tests that are not about it.
     const BUDGET: Duration = Duration::from_secs(RECLASSIFY_BUDGET_SECS);
