@@ -2055,6 +2055,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unreadable_worktree_source_keeps_its_row_through_gc() {
+        // [MAGI S6 MS3 loop26, R2a Caspar] A working-tree source this review could not read left
+        // `doc_sources`, so the clean-up deleted the row of a file the tree still reaches (RV19).
+        let f = RagFixture::new(&[("README.md", "# A\nx\n")]).await;
+        let wt = src("README.md", "wt:aa");
+        f.docs
+            .reindex(
+                &[(wt.clone(), vec![chunk("README.md", "A", "x")])],
+                &f.embedder,
+            )
+            .await
+            .expect("indexed");
+        let mut prep = DocPrep::default();
+        prep.doc_index.unreadable = true;
+        assert_eq!(prep.gc_worktree(None), None, "a listing with a hole");
+        collect_garbage(
+            &f.docs,
+            None,
+            &|_: &str| true,
+            prep.gc_worktree(None).as_ref(),
+        )
+        .expect("gc");
+        assert!(f
+            .docs
+            .missing(std::slice::from_ref(&wt))
+            .expect("m")
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn a_query_from_another_model_with_the_same_dimension_is_not_searched() {
         // [MAGI S6 MS3 loop17, R1 Caspar] The identity check guarded only the reindex: a query
         // embedded by another model of the same dimension was scored against the index's vectors.
