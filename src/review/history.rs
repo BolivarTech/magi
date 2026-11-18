@@ -83,8 +83,7 @@ impl HistoryStatus {
 /// One remembered finding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {
-    /// The stable finding id, from the id function handed to [`entries_from_review`] (the
-    /// history store's keyed one in production).
+    /// The stable finding id (the keyed one handed to [`entries_from_review`]).
     pub id: String,
     /// The reported file, relative to the workspace.
     pub file: String,
@@ -501,9 +500,8 @@ pub fn reclassify_then_record(
 /// that holds the header, `a_key_block_whose_header_ends_the_title_and_body_opens_the_detail_is_not_stored`); the context
 /// read masks again when it serves an entry back
 /// (`a_history_entry_quoting_a_secret_reaches_the_context_masked`, `memory::review_rag`).
-/// The `id` is `finding_id(file, line)`: the caller's function, in production the history
-/// store's HMAC under a data-key subkey (this crate never holds the data key), so it is stable
-/// across reviews while file and line do not change and names neither at rest; a
+/// The `id` is `finding_id(file, line)` (in production the store's keyed HMAC; this crate holds
+/// no data key), stable while file and line do not change; a
 /// failure that moves to another line is another id. Declared limitation: two different
 /// findings on one unchanged `file:line` in two reviews share the id, and the first sighting
 /// wins (by design: the trio rewords a title on every run, so an id keyed on it would record the

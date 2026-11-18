@@ -74,8 +74,7 @@ const TAG_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-history/lookup-tag-key/v1"
 /// The domain prefix of a path tag.
 const PATH_TAG_DOMAIN: &[u8] = b"path\0";
 
-/// The history's own finding-id subkey label, apart from the path tag's (versioned: changing it
-/// gives every `file:line` a new id, so old rows are never matched again).
+/// The finding-id subkey label, apart from the path tag's (versioned: changing it orphans rows).
 const ID_SUBKEY_LABEL: &[u8] = b"magi-rs/code-review-history/id-key/v1";
 
 /// The domain prefix of a finding id.
@@ -211,19 +210,10 @@ impl ReviewHistoryStore {
         lookup_tags(&mut dek, TAG_SUBKEY_LABEL, PATH_TAG_DOMAIN, paths)
     }
 
-    /// The stored id of a finding on `file:line`: `HMAC(id subkey, "id\0" || line ":" file)`
-    /// under the history's own id subkey ([`ID_SUBKEY_LABEL`]), so the `id` column confirms no
-    /// guessed path or line without the passphrase. Deterministic per database, so the first
-    /// sighting of a `file:line` keeps its row across reviews. The line comes first: it holds no
-    /// `:`, so no two `(file, line)` pairs share an input. Never call while holding the connection
-    /// lock (R-V08). O(path length).
-    ///
-    /// # Arguments
-    /// * `file` - the reported path, relative to the workspace.
-    /// * `line` - the reported 1-based line.
-    ///
-    /// # Returns
-    /// The id as lowercase hex.
+    /// The id of a finding on `file:line`, hex `HMAC(id subkey, "id\0" || line ":" file)`: it
+    /// confirms no guessed path or line, and is deterministic per database (first sighting wins).
+    /// The line, holding no `:`, goes first so no two pairs share an input. Never call under the
+    /// connection lock (R-V08). O(path).
     pub fn finding_id(&self, file: &str, line: u32) -> String {
         let value = format!("{line}:{file}");
         let mut dek = self.dek.lock().unwrap_or_else(|p| p.into_inner());
