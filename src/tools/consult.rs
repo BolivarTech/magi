@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! Tool that wraps `magi_core::Magi` to run 3-perspective consensus queries. The agent routes
 //! here only for genuine multi-perspective decisions; trivial or factual lookups are answered

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! What a review reviews: its input kinds and how they resolve to files and a content source.
 //!

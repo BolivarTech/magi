@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-15
+# Date: 2026-11-18
 """Tests for the helpers the source-sync guards read the Rust tree through.
 
 [MAGI loop 26] the guards searched the whole file, so a constant that drifted

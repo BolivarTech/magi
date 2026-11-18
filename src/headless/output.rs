@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! Headless output formatting: text (stream) / rich JSON (buffered), truncation of large
 //! results, and redaction of secrets in error messages (REQ-H13, REQ-H14, REQ-H15c).

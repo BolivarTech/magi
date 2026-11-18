@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! The review pipeline (REQ-RV05, REQ-RV06, §5.0): one `consult code-review` per batch, in
 //! series, then one report.

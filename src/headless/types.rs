@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 // contract (MS1 ↔ MS2).
 //!
 //! DEFINED here, not referenced without definition — avoids the TDD-ordering build break (T6

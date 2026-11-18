@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! Encrypted store of remembered review findings (RV07(4), RV08, RV19).
 //!

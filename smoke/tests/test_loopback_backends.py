@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-15
+# Date: 2026-11-18
 """Unit tests for the loopback stand-ins the product is pointed at.
 
 [MAGI §6 MS2 loop 29, F1a1b-melchior] R6 points the product at a loopback

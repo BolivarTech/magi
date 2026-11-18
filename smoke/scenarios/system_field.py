@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-15
+# Date: 2026-11-18
 """S44-S46 -- what the headless commands do with the envelope ``system`` field.
 
 The suite proves each piece of the behaviour with doubles. What it cannot see is

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! Tool authorization policy per headless tier (REQ-H06/H07/H08/H09).
 //!

@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-15
+# Date: 2026-11-18
 """Reading the product's Rust source for the harness's sync guards.
 
 The harness carries copies of the product's constants and wording, and the

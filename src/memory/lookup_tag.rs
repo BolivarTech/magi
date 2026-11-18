@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! Keyed lookup tags (RV19): a column SQL must match but that would name the repository holds
 //! `HMAC-SHA-256(subkey, domain || value)` instead; each table derives its own subkey.

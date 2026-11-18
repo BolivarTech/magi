@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! Inferred-mode tier answered by `decide` first and by the principal LLM second (REQ-D12).
 //!

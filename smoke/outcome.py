@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-15
+# Date: 2026-11-18
 """The report's data contract: what a scenario concludes, and how it says so."""
 
 import dataclasses

@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! In-memory lexical index and the record of what a review showed (REQ-RV09, REQ-RV19).
 

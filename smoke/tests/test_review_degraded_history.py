@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-15
+# Date: 2026-11-18
 """S58 and R22: a review with seeded history and an unreachable embedder (RV07, RV-S8)."""
 
 import dataclasses

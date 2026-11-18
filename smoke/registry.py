@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.0
-# Date: 2026-11-15
+# Date: 2026-11-18
 """Scenario registration.
 
 Adding a scenario is a decorator and a function (REQ-S33). If adding one ever

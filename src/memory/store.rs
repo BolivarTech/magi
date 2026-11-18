@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.0
-// Date: 2026-11-15
+// Date: 2026-11-18
 
 //! Encrypted vector store: `memories` table, `VectorStore` trait, and
 //! `SqliteVectorStore` (REQ-01, REQ-03, REQ-04).
