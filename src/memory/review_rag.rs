@@ -2251,6 +2251,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_git_that_cannot_check_history_is_declared_once_across_batches() {
+        // [MAGI S6 MS3 loop26, R2a Melchior] A git failure folded into "not on HEAD's line" and
+        // was memoized: every entry of that commit went unserved for the review, undeclared.
+        const UNANSWERED: &str =
+            "history not served for some entries: git could not check them against HEAD";
+        struct Failing;
+        impl GitCommand for Failing {
+            fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                Err(ReviewError::Git(a.join(" ")))
+            }
+        }
+        /// Answers "not an ancestor" while every revision resolves: a definitive answer.
+        struct NotAncestor;
+        impl GitCommand for NotAncestor {
+            fn run_bytes(&self, a: &[&str]) -> Result<Vec<u8>, ReviewError> {
+                match a.first() {
+                    Some(&"rev-parse") => Ok(b"c\n".to_vec()),
+                    _ => Err(ReviewError::Git(a.join(" "))),
+                }
+            }
+        }
+        static FAILING: Failing = Failing;
+        static NOT_ANCESTOR: NotAncestor = NotAncestor;
+        let f = RagFixture::new(&[("a.rs", "fn a() {}\n")]).await;
+        f.history
+            .record(&[attended("h1", "a was off by one")])
+            .expect("record");
+        f.history
+            .update_status("h1", HistoryStatus::Attended)
+            .expect("status");
+        let f = &f;
+        let declared = |git: &'static dyn GitCommand| async move {
+            let mut rag = f.rag(true);
+            rag.history_git = Some(git);
+            let mut count = 0;
+            for _ in 0..2 {
+                let a = rag
+                    .context_for(&batch_on("a.rs", "fn a() {}"))
+                    .await
+                    .expect("context");
+                assert!(!a.items.iter().any(|i| i.kind == ContextKind::History));
+                count += a
+                    .trimmed
+                    .iter()
+                    .filter(|(k, l)| *k == ContextKind::History && l == UNANSWERED)
+                    .count();
+            }
+            count
+        };
+        assert_eq!(declared(&FAILING).await, 1, "declared once across batches");
+        assert_eq!(declared(&NOT_ANCESTOR).await, 0, "a definitive answer");
+    }
+
+    #[tokio::test]
     async fn a_batch_cut_by_the_definition_total_declares_that_cut_once_and_nothing_else() {
         // [MAGI S6 MS3 loop17, R2 Caspar/Melchior/Balthasar] Every name after the total was
         // declared "more than MAX_DEFINITIONS_PER_NAME definitions", one entry per name: false
