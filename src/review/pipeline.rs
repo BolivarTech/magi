@@ -1714,6 +1714,44 @@ fn distinct_units(units: Vec<ContextItem>, seen: &mut HashSet<DedupKey>) -> Vec<
     units
 }
 
+/// Most containing units a `TooLargeForBatch` message names (D2): enough to show the
+/// culprit, short enough for one terminal line.
+pub const MAX_NAMED_UNITS: usize = 3;
+
+/// Written after an old-side unit in that message (D3), so the two sides of a modified
+/// function do not read as one unit named twice.
+pub const OLD_SIDE_SUFFIX: &str = " (old side)";
+
+/// Builds the `what` of a `TooLargeForBatch` error: the batch number (from 1) and the
+/// costliest containing units that made it exceed the limit.
+///
+/// Names at most [`MAX_NAMED_UNITS`] units, from costliest to cheapest; equal costs keep the
+/// order of `units`. Each reads `{label} of {file}{side} ({tokens} tokens)`, the file written
+/// through `display_path`; the list ends with ` and {k} more` when `k` units were left out.
+/// With no units the message is only `batch {n} with its containing units`. The labels are
+/// raw: the `Display` of `ReviewError` sanitizes the whole `what`. Complexity O(u log u) for
+/// `u` units, from the ordering.
+///
+/// # Arguments
+///
+/// * `batch_index` - The batch's internal index (base 0); shown from 1.
+/// * `units` - The distinct units that would be sent, withheld ones already removed.
+///
+/// # Returns
+///
+/// The message text.
+///
+/// # Examples
+///
+/// ```text
+/// batch 1 with its containing units process of app.py (812 tokens), process of app.py (old side) (640 tokens)
+/// batch 1 with its containing units a of f.py (900 tokens), b of f.py (800 tokens), c of f.py (700 tokens) and 2 more
+/// ```
+pub fn units_over_limit(batch_index: usize, units: &[ContextItem]) -> String {
+    let _ = (batch_index, units);
+    String::new()
+}
+
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
 ///
 /// Each item passes [`context_egress`]: a one-line secret is masked and its file declared masked;
@@ -7972,6 +8010,269 @@ mod tests {
         let mut seen = HashSet::new();
         assert_eq!(distinct_units(vec![a.clone()], &mut seen), vec![a.clone()]);
         assert_eq!(distinct_units(vec![a.clone()], &mut seen), vec![a]);
+    }
+
+    /// A `file` unit `label`, new side unless `old`, whose text has `bytes` bytes.
+    fn sized(file: &str, label: &str, old: bool, bytes: usize) -> ContextItem {
+        let mut u = ctx(ContextKind::Unit, file, label, Some((1, 2)));
+        u.old_side = old;
+        u.text = "x".repeat(bytes);
+        u
+    }
+
+    #[test]
+    fn the_message_names_the_unit_with_its_file_and_tokens() {
+        // F-S7 / REQ-F05, D1.
+        let big = sized("f.py", "big", false, 4_000);
+        assert_eq!(
+            units_over_limit(0, std::slice::from_ref(&big)),
+            format!(
+                "batch 1 with its containing units big of f.py ({} tokens)",
+                item_cost(&big)
+            )
+        );
+    }
+
+    #[test]
+    fn each_unit_is_named_with_its_own_file() {
+        // REQ-F05 / D1 [CP2 loop 2]: the file of each named unit, not the batch's first one.
+        let a = sized("a.py", "alpha", false, 3_000);
+        let b = sized("lib/b.rs", "beta", false, 2_000);
+        assert_eq!(
+            units_over_limit(0, &[b.clone(), a.clone()]),
+            format!(
+                "batch 1 with its containing units alpha of a.py ({} tokens), beta of lib/b.rs ({} tokens)",
+                item_cost(&a),
+                item_cost(&b)
+            )
+        );
+    }
+
+    #[test]
+    fn the_message_names_the_three_costliest_and_counts_the_rest() {
+        // F-S9 / D2.
+        let us: Vec<_> = (0..5)
+            .map(|i| sized("f.py", &format!("u{i}"), false, 1_000 * (i + 1)))
+            .collect();
+        let c = |i: usize| item_cost(&us[i]);
+        assert_eq!(
+            units_over_limit(0, &us),
+            format!(
+                "batch 1 with its containing units u4 of f.py ({} tokens), u3 of f.py ({} tokens), \
+                 u2 of f.py ({} tokens) and 2 more",
+                c(4), c(3), c(2)
+            )
+        );
+    }
+
+    #[test]
+    fn exactly_three_units_need_no_tail_and_four_need_one() {
+        // F-S15.
+        let us: Vec<_> = (0..4)
+            .map(|i| sized("f.py", &format!("u{i}"), false, 1_000 * (4 - i)))
+            .collect();
+        let three = units_over_limit(0, &us[..3]);
+        assert!(!three.contains(" more"), "{three}");
+        assert!(units_over_limit(0, &us).ends_with(" and 1 more"));
+    }
+
+    #[test]
+    fn equal_costs_keep_the_order_of_the_batch() {
+        // F-S16.
+        let us = vec![
+            sized("f.py", "a", false, 3_000),
+            sized("f.py", "b", false, 2_000),
+            sized("f.py", "c", false, 1_000),
+            sized("f.py", "d", false, 1_000),
+        ];
+        let what = units_over_limit(0, &us);
+        assert!(
+            what.contains("c of f.py") && !what.contains("d of f.py"),
+            "{what}"
+        );
+        assert!(what.ends_with(" and 1 more"));
+    }
+
+    #[test]
+    fn an_old_side_unit_is_marked() {
+        // F-S13 / D3.
+        let new = sized("app.py", "process", false, 3_000);
+        let old = sized("app.py", "process", true, 2_000);
+        assert_eq!(
+            units_over_limit(0, &[old.clone(), new.clone()]),
+            format!(
+                "batch 1 with its containing units process of app.py ({} tokens), \
+                 process of app.py (old side) ({} tokens)",
+                item_cost(&new),
+                item_cost(&old)
+            )
+        );
+    }
+
+    #[test]
+    fn no_nameable_unit_leaves_the_bare_message() {
+        // F-S14: every unit withheld for a secret, none handed in.
+        assert_eq!(
+            units_over_limit(0, &[]),
+            "batch 1 with its containing units"
+        );
+    }
+
+    #[test]
+    fn the_batch_is_numbered_from_one() {
+        // REQ-F09.
+        assert!(units_over_limit(4, &[]).starts_with("batch 5 with"));
+    }
+
+    #[test]
+    fn the_file_is_written_as_display_path_writes_it() {
+        // REQ-F05 / §0.10 [CP2 loop 3]: the formatter writes the path through `display_path`, so
+        // a secret-shaped path becomes its placeholder in the `what` itself, before `Display`.
+        let file = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA", ".rs"); // allow-secret-scan
+        let u = sized(file, "unit", false, 10);
+        let what = units_over_limit(0, std::slice::from_ref(&u));
+        assert!(
+            what.contains(&format!("unit of {} (", display_path(file))),
+            "{what}"
+        );
+        assert!(!what.contains("AAAAAAAAAAAAAAAAAAAA"), "{what}");
+    }
+
+    #[test]
+    fn a_unit_label_reaches_the_message_escaped_and_masked() {
+        // F-S8 / §0.10: labels come from the reviewed code.
+        let key = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA"); // allow-secret-scan
+        for label in ["bell\u{7}name", key] {
+            let u = sized("f.py", label, false, 10);
+            let shown = ReviewError::TooLargeForBatch {
+                what: units_over_limit(0, &[u]),
+                tokens: 2,
+                limit: 1,
+            }
+            .to_string();
+            assert!(!shown.contains('\u{7}'), "{shown}");
+            assert!(!shown.contains("AAAAAAAAAAAAAAAAAAAA"), "{shown}");
+            assert!(
+                shown.ends_with("does not fit in one batch (2 tokens, limit 1)"),
+                "{shown}"
+            );
+        }
+    }
+
+    /// The `Display` of a review that failed with `TooLargeForBatch`, and its `tokens`.
+    fn too_large(r: &Result<ReviewOutcome, ReviewError>) -> (String, usize) {
+        match r {
+            Err(e @ ReviewError::TooLargeForBatch { tokens, .. }) => (e.to_string(), *tokens),
+            other => panic!("expected TooLargeForBatch, got {:?}", other.as_ref().err()),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_shared_unit_is_named_and_counted_once() {
+        // F-S10 / REQ-F05, F05b: a unit no batch can carry, repeated by two hunks.
+        let rag = shared(
+            2,
+            |room| vec![unit_costing("BIG", false, Some((1, 26)), room + 1_000)],
+            None,
+        );
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        let (msg, tokens) = too_large(&r);
+        let (room, cost) = rag.seen.lock().expect("lock")[0];
+        assert_eq!(msg.matches("f0 of f0.rs").count(), 1, "{msg}");
+        assert_eq!(
+            tokens,
+            rag_limit() - room + cost,
+            "the unit is counted once"
+        );
+        assert_eq!(
+            rag.context_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "rejected by the precheck, before any context is assembled"
+        );
+        assert_eq!(consult.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn both_checks_number_the_batch_from_one() {
+        // F-S12 / REQ-F09 / REQ-F05b, Review Focus 5: the precheck (the unit promised, 1 copy)
+        // and the second check (0 copies promised, so only `context_for` brings it). On both,
+        // `tokens` is the batch's code + heading + the unit: on the second it is
+        // `limit + over_fit`, which is that same sum [CP2 loop 2].
+        for copies in [1, 0] {
+            let rag = shared(
+                copies,
+                |room| vec![unit_costing("BIG", false, Some((1, 26)), room + 1_000)],
+                None,
+            );
+            let dir = workspace(1);
+            let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+            let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+            let (msg, tokens) = too_large(&r);
+            let (room, cost) = rag.seen.lock().expect("lock")[0];
+            assert!(
+                msg.starts_with("batch 1 with its containing units f0 of f0.rs ("),
+                "{copies}: {msg}"
+            );
+            assert_eq!(tokens, rag_limit() - room + cost, "{copies}: exact tokens");
+            let reached_context = rag.context_calls.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                reached_context,
+                1 - copies,
+                "{copies}: which check rejected"
+            );
+            assert_eq!(consult.calls(), 0);
+        }
+    }
+
+    /// A small `f0.rs` unit whose path is shaped like a key: `context_egress` withholds it.
+    fn withheld_unit() -> ContextItem {
+        let file = concat!("sk-ant-", "api03-", "AAAAAAAAAAAAAAAAAAAA", ".rs"); // allow-secret-scan
+        let mut u = ctx(ContextKind::Unit, file, "leaky_unit", Some((1, 26)));
+        u.text = "y".repeat(400);
+        u
+    }
+
+    #[tokio::test]
+    async fn a_withheld_unit_is_never_named_nor_counted() {
+        // F-S14 / REQ-F05 / §0.10 [CP2 loop 1]: the rejected batch's list is built from what
+        // would be sent; a unit withheld for a secret is neither named nor charged.
+        let rag = shared(
+            1,
+            |room| {
+                vec![
+                    unit_costing("BIG", false, Some((1, 26)), room + 1_000),
+                    withheld_unit(),
+                ]
+            },
+            None,
+        );
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        let (msg, tokens) = too_large(&r);
+        let (room, _) = rag.seen.lock().expect("lock")[0];
+        let clean = item_cost(&unit_costing("BIG", false, Some((1, 26)), room + 1_000));
+        assert!(
+            msg.starts_with("batch 1 with its containing units f0 of f0.rs ("),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("leaky_unit"),
+            "a withheld unit is named: {msg}"
+        );
+        assert!(!msg.contains("AAAAAAAAAAAAAAAAAAAA"), "{msg}");
+        assert!(
+            !msg.contains(" more"),
+            "a withheld unit is counted as unnamed: {msg}"
+        );
+        assert_eq!(
+            tokens,
+            rag_limit() - room + clean,
+            "a withheld unit costs nothing"
+        );
+        assert_eq!(consult.calls(), 0);
     }
 
     /// The prompt limit `review_with_rag` plans with (its pool: one model of 200 000 tokens).
