@@ -5288,6 +5288,158 @@ mod tests {
         }
     }
 
+    /// A top-level Python function `name` with `lines` body lines, each `    v_NNNN = N`.
+    fn python_function(name: &str, lines: usize) -> String {
+        let body: String = (0..lines)
+            .map(|i| format!("    v_{i:04} = {i}\n"))
+            .collect();
+        format!("def {name}():\n{body}")
+    }
+
+    /// What the review charges for `text` as the new-side containing unit `label` of `file`
+    /// starting at line `first` (the cost `StoreRag` gives the planner and the precheck).
+    fn unit_cost(file: &str, label: &str, text: &str, first: u32) -> usize {
+        let count = u32::try_from(text.lines().count()).expect("fits");
+        magi_rs::review::rag::item_cost(&magi_rs::review::rag::ContextItem {
+            kind: magi_rs::review::rag::ContextKind::Unit,
+            file: file.into(),
+            label: label.into(),
+            text: text.into(),
+            candidate: false,
+            lines: Some((first, first + count - 1)),
+            old_side: false,
+        })
+    }
+
+    /// Body lines for a function whose unit costs about `pct` percent of `limit`.
+    fn lines_for(limit: usize, pct: usize) -> usize {
+        let per_line = unit_cost("app.py", "f", &python_function("f", 1_000), 1) / 1_000;
+        limit * pct / 100 / per_line.max(1)
+    }
+
+    /// `text` with `extra` inserted after each 0-based line index of `after`.
+    fn insert_after(text: &str, after: &[usize], extra: &str) -> String {
+        let mut out = String::new();
+        for (i, line) in text.lines().enumerate() {
+            out.push_str(line);
+            out.push('\n');
+            if after.contains(&i) {
+                out.push_str(extra);
+            }
+        }
+        out
+    }
+
+    /// The prompt limit of a runner built with `pool`.
+    fn runner_limit(pool: &[(String, Option<usize>)]) -> usize {
+        magi_rs::review::batching::prompt_limit_tokens(&magi_rs::review::window::pool_window(pool))
+    }
+
+    #[tokio::test]
+    async fn a_function_touched_by_two_hunks_is_reviewed_not_refused() {
+        // F-S6 / REQ-F01 / PM-S-4: the reported shape. Two pure insertions inside one function,
+        // far enough apart to be two hunks; the function fits a batch once and not twice. Pure
+        // insertions, so there is no old-side unit.
+        let pool = vec![("m".to_string(), None)];
+        let limit = runner_limit(&pool);
+        let n = lines_for(limit, 60);
+        let v1 = python_function("process", n);
+        let v2 = insert_after(&v1, &[n / 4, 3 * n / 4], "    w = 0\n");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::write(ws.join("app.py"), &v1).expect("v1");
+        git_in(&ws, &["init", "-q"]);
+        git_in(&ws, &["add", "-A"]);
+        git_in(&ws, &["commit", "-q", "-m", "v1"]);
+        std::fs::write(ws.join("app.py"), &v2).expect("v2");
+        git_in(&ws, &["commit", "-q", "-am", "v2"]);
+        let diff = git_in(&ws, &["diff", "HEAD~1", "HEAD"]);
+        assert_eq!(
+            diff.matches("\n@@ ").count(),
+            2,
+            "fixture: two hunks\n{diff}"
+        );
+        let cost = unit_cost("app.py", "process", &v2, 1);
+        assert!(
+            2 * cost > limit && cost < limit * 3 / 4,
+            "fixture: once fits ({cost} of {limit})"
+        );
+        let consult = Arc::new(RecordingConsult::default());
+        let runner = production_runner_with(&ws, consult.clone(), pool);
+        let plan = runner.plan(&ReviewInput::Commit(None)).expect("plans");
+        assert_eq!(plan.batches, 1);
+        let run = runner
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
+            .await;
+        assert!(
+            !matches!(run, Err(ReviewError::TooLargeForBatch { .. })),
+            "{:?}",
+            run.as_ref().err()
+        );
+        let prompts = consult.0.lock().expect("lock").clone();
+        assert!(!prompts.is_empty(), "the trio is reached");
+        // `def process():` would also match git's hunk headers (funcname context); the second
+        // body line appears only in the unit.
+        assert_eq!(
+            prompts[0].matches("v_0000 = 0\n").count(),
+            1,
+            "the unit is sent once"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_batch_the_planner_packs_is_refused_by_the_precheck() {
+        // F-S11 / REQ-F07 / PM-S-2: the planner and the precheck agree across batches, with
+        // units shared by several hunks and a modified function (old and new sides). The
+        // precheck runs over every batch before any trio call.
+        let pool = vec![("m".to_string(), None)];
+        let limit = runner_limit(&pool);
+        let n = lines_for(limit, 30);
+        let (f1, f2, f3) = (
+            python_function("first", n),
+            python_function("second", n),
+            python_function("third", n),
+        );
+        let v1 = format!("{f1}\n\n{f2}\n\n{f3}");
+        let f1b = insert_after(&f1, &[n / 4, 3 * n / 4], "    w = 0\n");
+        let f2b = insert_after(&f2, &[n / 4, 3 * n / 4], "    w = 0\n");
+        let f3b = f3.replacen("    v_0005 = 5\n", "    v_0005 = 50\n", 1);
+        let v2 = format!("{f1b}\n\n{f2b}\n\n{f3b}");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = dunce::canonicalize(tmp.path()).expect("canonical");
+        std::fs::write(ws.join("app.py"), &v1).expect("v1");
+        git_in(&ws, &["init", "-q"]);
+        git_in(&ws, &["add", "-A"]);
+        git_in(&ws, &["commit", "-q", "-m", "v1"]);
+        std::fs::write(ws.join("app.py"), &v2).expect("v2");
+        git_in(&ws, &["commit", "-q", "-am", "v2"]);
+        let diff = git_in(&ws, &["diff", "HEAD~1", "HEAD"]);
+        assert_eq!(
+            diff.matches("\n@@ ").count(),
+            5,
+            "fixture: five hunks\n{diff}"
+        );
+        let consult = Arc::new(RecordingConsult::default());
+        let runner = production_runner_with(&ws, consult.clone(), pool);
+        let plan = runner.plan(&ReviewInput::Commit(None)).expect("plans");
+        assert_eq!(
+            plan.batches, 2,
+            "fixture: the modified function opens a second batch"
+        );
+        let run = runner
+            .run(plan, ReviewBudget::Unbounded, &CancellationToken::new())
+            .await;
+        assert!(
+            !matches!(run, Err(ReviewError::TooLargeForBatch { .. })),
+            "{:?}",
+            run.as_ref().err()
+        );
+        assert!(
+            !consult.0.lock().expect("lock").is_empty(),
+            "the trio is reached"
+        );
+    }
+
     /// Runs git in `dir` with a local identity and no autocrlf.
     fn git_in(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")

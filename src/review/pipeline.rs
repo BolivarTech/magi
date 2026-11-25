@@ -10,7 +10,7 @@
 //! the whole review showed, consolidates, runs the false-positive gate and applies the agreement
 //! weight, in that order.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf, Prefix, MAIN_SEPARATOR_STR};
 use std::time::{Duration, Instant};
@@ -1690,6 +1690,29 @@ fn unit_identity<'a>(items: impl Iterator<Item = &'a ContextItem>) -> Vec<(Strin
     let mut ids: Vec<(String, String)> = items.map(|i| (i.file.clone(), i.label.clone())).collect();
     ids.sort_unstable();
     ids
+}
+
+/// Keeps the first unit of each distinct key, in order: what the pre-check charges for a batch.
+///
+/// The key is [`dedup_key`](crate::review::rag::dedup_key), the one `assemble` deduplicates by,
+/// so the pre-check never charges a unit the prompt will carry once. An item without `lines` has
+/// no key and is never merged (the `assemble` rule). `seen` is owned by the caller and cleared
+/// between batches, so one allocation serves a whole review. Complexity O(u) for `u` units.
+///
+/// # Arguments
+///
+/// * `units` - The units the source promised for one batch, possibly repeated.
+/// * `seen` - The keys already kept; empty on entry, filled on exit.
+///
+/// # Returns
+///
+/// The distinct units, in their original order.
+pub fn distinct_units(
+    units: Vec<ContextItem>,
+    seen: &mut HashSet<(String, (u32, u32), bool)>,
+) -> Vec<ContextItem> {
+    let _ = (units, seen);
+    todo!()
 }
 
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
@@ -7893,6 +7916,242 @@ mod tests {
         let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
         assert!(matches!(r, Err(ReviewError::TooLargeForBatch { .. })));
         assert_eq!(rag.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn distinct_units_keeps_the_first_of_each_key_in_order() {
+        let mut a = ctx(ContextKind::Unit, "f0.rs", "f0", Some((1, 26)));
+        a.text = "first".into();
+        let mut a_again = a.clone();
+        a_again.text = "second".into();
+        let b = ctx(ContextKind::Unit, "f1.rs", "f1", Some((1, 5)));
+        let mut seen = HashSet::new();
+        let out = distinct_units(vec![a.clone(), b.clone(), a_again], &mut seen);
+        assert_eq!(out, vec![a, b]);
+    }
+
+    #[test]
+    fn distinct_units_keeps_old_and_new_sides_on_the_same_lines() {
+        let new = ctx(ContextKind::Unit, "f0.rs", "f0", Some((1, 26)));
+        let mut old = new.clone();
+        old.old_side = true;
+        let mut seen = HashSet::new();
+        assert_eq!(
+            distinct_units(vec![new.clone(), old.clone()], &mut seen),
+            vec![new, old]
+        );
+    }
+
+    #[test]
+    fn distinct_units_never_merges_items_without_lines() {
+        let a = ctx(ContextKind::Unit, "f0.rs", "f0", None);
+        let mut seen = HashSet::new();
+        assert_eq!(
+            distinct_units(vec![a.clone(), a.clone()], &mut seen),
+            vec![a.clone(), a]
+        );
+    }
+
+    #[test]
+    fn distinct_units_starts_empty_on_every_call() {
+        // The set is reused across a review's batches: a unit seen in one batch
+        // still belongs to the next.
+        let a = ctx(ContextKind::Unit, "f0.rs", "f0", Some((1, 26)));
+        let mut seen = HashSet::new();
+        assert_eq!(distinct_units(vec![a.clone()], &mut seen), vec![a.clone()]);
+        assert_eq!(distinct_units(vec![a.clone()], &mut seen), vec![a]);
+    }
+
+    /// The prompt limit `review_with_rag` plans with (its pool: one model of 200 000 tokens).
+    fn rag_limit() -> usize {
+        prompt_limit_tokens(&pool_window(&[("m".to_string(), Some(200_000))]))
+    }
+
+    /// A `f0.rs` unit at lines 1-26 whose `item_cost` is at most `target`, as close as the
+    /// text allows, carrying `mark` so a prompt can be searched for it.
+    fn unit_costing(
+        mark: &str,
+        old_side: bool,
+        lines: Option<(u32, u32)>,
+        target: usize,
+    ) -> ContextItem {
+        let mut u = ctx(ContextKind::Unit, "f0.rs", "f0", lines);
+        u.old_side = old_side;
+        let mut n = target.saturating_mul(crate::review::window::BYTES_PER_TOKEN);
+        loop {
+            u.text = format!("{mark} {}", "x".repeat(n));
+            if item_cost(&u) <= target || n == 0 {
+                return u;
+            }
+            n = n.saturating_sub(crate::review::window::BYTES_PER_TOKEN);
+        }
+    }
+
+    /// A source whose `units_for` answers `copies` of the unit `make` builds for the batch's
+    /// room, and whose `context_for` answers that unit once with `assembled_text` (or the same
+    /// text); records `(room, cost)` so a test can check its own precondition.
+    struct SharedUnit {
+        copies: usize,
+        make: fn(usize) -> Vec<ContextItem>,
+        assembled_text: Option<&'static str>,
+        seen: std::sync::Mutex<Vec<(usize, usize)>>,
+        context_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl SharedUnit {
+        fn room(b: &ReviewBatch) -> usize {
+            rag_limit()
+                .saturating_sub(b.tokens)
+                .saturating_sub(estimate_tokens(CONTEXT_HEADING))
+        }
+    }
+    #[async_trait::async_trait]
+    impl RagSource for SharedUnit {
+        async fn context_for(&self, b: &ReviewBatch) -> Result<Assembled, ReviewError> {
+            self.context_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut units = (self.make)(Self::room(b));
+            for u in &mut units {
+                if let Some(t) = self.assembled_text {
+                    u.text = t.into();
+                }
+            }
+            Ok(assembled(units))
+        }
+        fn units_for(&self, b: &ReviewBatch) -> Result<Vec<ContextItem>, ReviewError> {
+            let units = (self.make)(Self::room(b));
+            let cost = units.iter().map(item_cost).sum();
+            self.seen.lock().expect("lock").push((Self::room(b), cost));
+            Ok(units
+                .iter()
+                .cycle()
+                .take(units.len() * self.copies)
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn shared(
+        copies: usize,
+        make: fn(usize) -> Vec<ContextItem>,
+        assembled_text: Option<&'static str>,
+    ) -> SharedUnit {
+        SharedUnit {
+            copies,
+            make,
+            assembled_text,
+            seen: Default::default(),
+            context_calls: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_unit_shared_by_two_hunks_is_charged_once_in_the_precheck() {
+        // F-S1 / REQ-F01: the unit fits once and not twice; the precheck charged it per hunk.
+        let rag = shared(
+            2,
+            |room| {
+                vec![unit_costing(
+                    "SHARED_UNIT_MARK",
+                    false,
+                    Some((1, 26)),
+                    room * 2 / 3,
+                )]
+            },
+            None,
+        );
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        let (room, cost) = rag.seen.lock().expect("lock")[0];
+        assert!(
+            cost <= room && 2 * cost > room,
+            "fixture: once fits, twice does not ({cost} of {room})"
+        );
+        r.expect("a unit shared by two hunks fits once");
+        assert_eq!(consult.calls(), 1);
+        let prompt = consult.prompts.lock().expect("lock")[0].clone();
+        assert_eq!(prompt.matches("SHARED_UNIT_MARK").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_promised_units_are_still_reused() {
+        // F-S2 / REQ-F04: with repeats the promised identity never matched, so the assembled
+        // text was sent instead of the promised one.
+        let rag = shared(
+            2,
+            |_| {
+                vec![{
+                    let mut u = ctx(ContextKind::Unit, "f0.rs", "f0", Some((1, 26)));
+                    u.text = "PROMISED_TEXT".into();
+                    u
+                }]
+            },
+            Some("ASSEMBLED_TEXT"),
+        );
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let out = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect"))
+            .await
+            .expect("runs");
+        let prompt = consult.prompts.lock().expect("lock")[0].clone();
+        assert_eq!(prompt.matches("PROMISED_TEXT").count(), 1, "{prompt}");
+        assert!(!prompt.contains("ASSEMBLED_TEXT"));
+        assert!(out.summary.undelivered_units.is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_and_new_sides_of_one_unit_are_both_charged() {
+        // F-S4 / REQ-F03: two sides, same numbers, two units. Green in Red by design (no
+        // deduplication yet); its red is proven by mutation (a key without the side).
+        let rag = shared(
+            1,
+            |room| {
+                vec![
+                    unit_costing("NEW_SIDE", false, Some((1, 26)), room * 2 / 3),
+                    unit_costing("OLD_SIDE", true, Some((1, 26)), room * 2 / 3),
+                ]
+            },
+            None,
+        );
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        assert!(
+            matches!(r, Err(ReviewError::TooLargeForBatch { .. })),
+            "{:?}",
+            r.as_ref().err()
+        );
+        assert_eq!(
+            rag.context_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "rejected by the precheck, before any context is assembled"
+        );
+        assert_eq!(consult.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn items_without_lines_are_never_merged_by_the_precheck() {
+        // F-S5 / REQ-F02: same rule as `assemble`. Green in Red by design; red by mutation (a
+        // `(0, 0)` key for an item without lines).
+        let rag = shared(
+            2,
+            |room| vec![unit_costing("NO_LINES", false, None, room * 2 / 3)],
+            None,
+        );
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        assert!(
+            matches!(r, Err(ReviewError::TooLargeForBatch { .. })),
+            "{:?}",
+            r.as_ref().err()
+        );
+        assert_eq!(
+            rag.context_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "rejected by the precheck, before any context is assembled"
+        );
+        assert_eq!(consult.calls(), 0);
     }
 
     #[test]
