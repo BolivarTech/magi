@@ -34,7 +34,7 @@ use super::input::{
     ensure_diff_current, renamed_from, resolve_input, ReviewFile, ReviewInput, SourceKind,
 };
 use super::languages::LanguageRegistry;
-use super::rag::{item_cost, Assembled, ContextItem, ContextKind};
+use super::rag::{dedup_key, item_cost, Assembled, ContextItem, ContextKind, DedupKey};
 use super::report::{name, BatchMetrics, ReviewSummary, TrimmedItem};
 use super::secrets::{display_path, find_secret, holds_key_block, mask_secrets, masked_pattern};
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
@@ -1694,7 +1694,7 @@ fn unit_identity<'a>(items: impl Iterator<Item = &'a ContextItem>) -> Vec<(Strin
 
 /// Keeps the first unit of each distinct key, in order: what the pre-check charges for a batch.
 ///
-/// The key is [`dedup_key`](crate::review::rag::dedup_key), the one `assemble` deduplicates by,
+/// The key is [`dedup_key`], the one `assemble` deduplicates by,
 /// so the pre-check never charges a unit the prompt will carry once. An item without `lines` has
 /// no key and is never merged (the `assemble` rule). `seen` is owned by the caller and cleared
 /// between batches, so one allocation serves a whole review. Complexity O(u) for `u` units.
@@ -1707,12 +1707,11 @@ fn unit_identity<'a>(items: impl Iterator<Item = &'a ContextItem>) -> Vec<(Strin
 /// # Returns
 ///
 /// The distinct units, in their original order.
-pub fn distinct_units(
-    units: Vec<ContextItem>,
-    seen: &mut HashSet<(String, (u32, u32), bool)>,
-) -> Vec<ContextItem> {
-    let _ = (units, seen);
-    todo!()
+fn distinct_units(units: Vec<ContextItem>, seen: &mut HashSet<DedupKey>) -> Vec<ContextItem> {
+    seen.clear();
+    let mut units = units;
+    units.retain(|u| dedup_key(u).is_none_or(|k| seen.insert(k)));
+    units
 }
 
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
@@ -1738,7 +1737,18 @@ pub fn distinct_units(
 /// declared as skipped `secret`; a reviewed file with such a path never reaches a batch (the
 /// filter skips it first, `a_path_shaped_like_a_key_is_never_sent`), so "skipped" never names a
 /// file whose code is sent. A promised unit `context_for` does not bring is declared as trimmed
-/// (`a_promised_unit_the_context_lacks_is_declared`). The budget is checked before any endpoint call by the runner
+/// (`a_promised_unit_the_context_lacks_is_declared`).
+///
+/// The promised units of each batch are deduplicated first ([`distinct_units`]), with the key
+/// [`assemble`](super::rag::assemble) uses, because the planner and `assemble` already charge
+/// each distinct unit once: a unit several hunks share is charged, compared for reuse and sent
+/// once. An item without `lines` is never merged (the `assemble` rule); the planner keys it as
+/// `(0, 0)` instead, which production never reaches, since every containing unit carries its
+/// lines. The deduplication lives here, not in [`RagSource::units_for`], because the pipeline
+/// does not rely on the source for it. Hence (REQ-F07): a batch the planner packed with
+/// `tokens + companion_tokens <= limit - heading` is never refused here, when each companion
+/// costs its unit's `item_cost` and every unit carries `lines`. The sum charged is taken after
+/// [`context_egress`]: a withheld unit costs nothing. The budget is checked before any endpoint call by the runner
 /// (`precheck_budget`, the caller's contract documented on [`RagSource::index_ms`]); the second
 /// check in `run_review` covers what preparation spent (`a_preparation_that_overran_its_reserve_runs_on_what_is_left_never_refused`).
 ///
@@ -1768,9 +1778,11 @@ async fn prepare_contexts(
     // `context_for` brings the same units (the `units_for` contract), not computed twice.
     // MAGI FIX (MS3 §6 loop12): each batch's promised units are kept with their identity (file,
     // label), and reused only when `context_for` brings the same ones, not merely as many.
+    // MAGI FIX (v0.25.1): a unit shared by several hunks was charged once per hunk.
     let mut pre_units: Vec<PromisedUnits> = Vec::with_capacity(batches.len());
+    let mut seen: HashSet<DedupKey> = HashSet::new();
     for batch in batches {
-        let promised = rag.units_for(batch)?;
+        let promised = distinct_units(rag.units_for(batch)?, &mut seen);
         let identity = unit_identity(promised.iter());
         let egress: Vec<ContextEgress> = promised.into_iter().map(context_egress).collect();
         let units: usize = egress

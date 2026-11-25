@@ -208,9 +208,15 @@ pub fn item_cost(item: &ContextItem) -> usize {
         .saturating_add(CONTEXT_ITEM_FRAME_TOKENS)
 }
 
+/// The deduplication key of a context item: `(file, lines, old_side)`.
+///
+/// Named so the pipeline's pre-check and [`assemble`] share one shape of the key, never a copy of
+/// the tuple.
+pub(crate) type DedupKey = (String, (u32, u32), bool);
+
 /// The key [`assemble`] deduplicates a unit, definition or caller by: `(file, lines, side)`; an
 /// item without `lines` has none and is never deduplicated.
-fn dedup_key(item: &ContextItem) -> Option<(String, (u32, u32), bool)> {
+pub(crate) fn dedup_key(item: &ContextItem) -> Option<DedupKey> {
     item.lines
         .map(|lines| (item.file.clone(), lines, item.old_side))
 }
