@@ -811,7 +811,7 @@ fn indented_prose(text: &str) -> String {
 
 /// The 1-based number a reader sees for a 0-based batch index: the one base every output uses,
 /// the same as the `[batch k]` labels of the consolidated summaries.
-fn shown(batch: usize) -> usize {
+pub(crate) fn shown(batch: usize) -> usize {
     batch.saturating_add(1)
 }
 

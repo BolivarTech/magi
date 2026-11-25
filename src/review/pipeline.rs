@@ -35,7 +35,7 @@ use super::input::{
 };
 use super::languages::LanguageRegistry;
 use super::rag::{dedup_key, item_cost, Assembled, ContextItem, ContextKind, DedupKey};
-use super::report::{name, BatchMetrics, ReviewSummary, TrimmedItem};
+use super::report::{name, shown, BatchMetrics, ReviewSummary, TrimmedItem};
 use super::secrets::{display_path, find_secret, holds_key_block, mask_secrets, masked_pattern};
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
 use super::validate::validate_batch;
@@ -1716,11 +1716,11 @@ fn distinct_units(units: Vec<ContextItem>, seen: &mut HashSet<DedupKey>) -> Vec<
 
 /// Most containing units a `TooLargeForBatch` message names (D2): enough to show the
 /// culprit, short enough for one terminal line.
-pub const MAX_NAMED_UNITS: usize = 3;
+const MAX_NAMED_UNITS: usize = 3;
 
 /// Written after an old-side unit in that message (D3), so the two sides of a modified
 /// function do not read as one unit named twice.
-pub const OLD_SIDE_SUFFIX: &str = " (old side)";
+const OLD_SIDE_SUFFIX: &str = " (old side)";
 
 /// Builds the `what` of a `TooLargeForBatch` error: the batch number (from 1) and the
 /// costliest containing units that made it exceed the limit.
@@ -1747,9 +1747,38 @@ pub const OLD_SIDE_SUFFIX: &str = " (old side)";
 /// batch 1 with its containing units process of app.py (812 tokens), process of app.py (old side) (640 tokens)
 /// batch 1 with its containing units a of f.py (900 tokens), b of f.py (800 tokens), c of f.py (700 tokens) and 2 more
 /// ```
-pub fn units_over_limit(batch_index: usize, units: &[ContextItem]) -> String {
-    let _ = (batch_index, units);
-    String::new()
+fn units_over_limit(batch_index: usize, units: &[ContextItem]) -> String {
+    let mut message = format!("batch {} with its containing units", shown(batch_index));
+    if units.is_empty() {
+        return message;
+    }
+
+    let mut costs: Vec<(usize, &ContextItem)> =
+        units.iter().map(|unit| (item_cost(unit), unit)).collect();
+    costs.sort_by_key(|(cost, _)| std::cmp::Reverse(*cost));
+
+    let named_count = MAX_NAMED_UNITS.min(costs.len());
+    let mut entries = Vec::with_capacity(named_count);
+    for (cost, unit) in costs.iter().take(named_count) {
+        let side = if unit.old_side { OLD_SIDE_SUFFIX } else { "" };
+        entries.push(format!(
+            "{} of {}{} ({} tokens)",
+            unit.label,
+            display_path(&unit.file),
+            side,
+            cost
+        ));
+    }
+
+    message.push(' ');
+    message.push_str(&entries.join(", "));
+
+    let remaining = costs.len().saturating_sub(MAX_NAMED_UNITS);
+    if remaining > 0 {
+        message.push_str(&format!(" and {} more", remaining));
+    }
+
+    message
 }
 
 /// The context of every batch, assembled before the first trio call (§5.0 stage 3).
@@ -1830,17 +1859,25 @@ async fn prepare_contexts(
                 ContextEgress::Withhold(_) => 0,
             })
             .sum();
-        pre_units.push((egress, identity));
         let code = batch
             .tokens
             .saturating_add(estimate_tokens(CONTEXT_HEADING));
         if code.saturating_add(units) > limit {
+            // MAGI FIX (v0.25.1): the error named no unit and numbered batches from 0.
+            let sent: Vec<ContextItem> = egress
+                .into_iter()
+                .filter_map(|e| match e {
+                    ContextEgress::Send(item, _) => Some(item),
+                    ContextEgress::Withhold(_) => None,
+                })
+                .collect();
             return Err(ReviewError::TooLargeForBatch {
-                what: format!("batch {} with its containing units", batch.index),
+                what: units_over_limit(batch.index, &sent),
                 tokens: code.saturating_add(units),
                 limit,
             });
         }
+        pre_units.push((egress, identity));
     }
     let mut contexts = Vec::with_capacity(batches.len());
     for (batch, (pre, promised)) in batches.iter().zip(pre_units) {
@@ -1920,8 +1957,14 @@ async fn prepare_contexts(
         // charge: a growth that still fits drops nothing optional.
         let over_fit = pay_for_growth(&mut kept, fit, summary);
         if over_fit > 0 {
+            // MAGI FIX (v0.25.1): the error named no unit and numbered batches from 0.
+            let sent: Vec<ContextItem> = kept
+                .into_iter()
+                .map(|(item, _)| item)
+                .filter(|item| item.kind == ContextKind::Unit)
+                .collect();
             return Err(ReviewError::TooLargeForBatch {
-                what: format!("batch {} with its containing units", batch.index),
+                what: units_over_limit(batch.index, &sent),
                 tokens: limit.saturating_add(over_fit),
                 limit,
             });
