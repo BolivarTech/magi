@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
+## [0.25.1] - 2026-11-25
+
+### Fixed
+
+- **A range with several hunks inside one function is reviewed instead of refused.** The check that runs before a review spends anything charged each containing unit once for every hunk inside it, so a function edited in two places cost twice. A batch the planner had sized within the limit was then refused with `too_large_for_batch`, and on a branch with many such edits the whole review stopped. Each distinct unit now counts once, as the planner and the prompt already count it. A unit read from the old side of a file and its new-side version are still two units, and a batch that really does not fit still ends the review before any model call.
+- **`too_large_for_batch` names the units behind it.** The message lists up to three of the batch's containing units, costliest first. Each comes with its file, ` (old side)` when it was read from removed lines, and its tokens, and the list says how many more there are: `batch 2 with its containing units process of app.py (900 tokens), process of app.py (old side) (850 tokens) does not fit in one batch (…)`. Batches are numbered from 1, as in the rest of the report; the error used to number them from 0. The error code and the `does not fit in one batch ({tokens} tokens, limit {limit})` ending are unchanged.
+
+### Security
+
+- **`url` 2.5.9.** The lockfile moves `url` from 2.5.8 to 2.5.9 for RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs.
+
 ## [0.25.0] - 2026-11-18
 
 ### Added
