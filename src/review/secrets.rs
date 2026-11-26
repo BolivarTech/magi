@@ -1117,10 +1117,9 @@ pub const MAX_JSON_DEPTH: usize = 128;
 /// only) still sees a key that holds a secret. Complexity: O(bytes of `value`) times the cost of
 /// `holds`.
 ///
-/// It recurses once per nesting level and has no depth guard of its own. A value parsed from
-/// text by `serde_json` (`magi decide` reads its input with `serde_json::from_slice`) is at most
-/// 128 levels deep, the crate's default recursion limit, which nothing in this crate disables;
-/// the states built in process are a few levels deep.
+/// It recurses once per nesting level, down to [`MAX_JSON_DEPTH`] containers. A value nested
+/// deeper (only one built in process can be: `serde_json` refuses to parse one) answers `true`
+/// without being read further, so a caller that refuses or withholds on `true` fails closed.
 ///
 /// # Arguments
 /// * `value` - The JSON value to scan.
@@ -1142,13 +1141,23 @@ pub const MAX_JSON_DEPTH: usize = 128;
 // MAGI FIX (MS3 §6 loop3): the keys were not read, so the residual check after masking (which
 // masks values only) could not see a key holding a secret.
 pub fn any_string(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool) -> bool {
+    any_string_at(value, holds, 0)
+}
+
+/// [`any_string`] on a `value` nested `depth` containers deep: `true` past [`MAX_JSON_DEPTH`],
+/// so a value too deep to read is flagged, never walked further. O(bytes of `value`).
+fn any_string_at(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool, depth: usize) -> bool {
     use serde_json::Value;
+    if depth > MAX_JSON_DEPTH {
+        return true;
+    }
+    let deeper = depth + 1;
     match value {
         Value::String(text) => holds(text),
-        Value::Array(items) => items.iter().any(|item| any_string(item, holds)),
+        Value::Array(items) => items.iter().any(|item| any_string_at(item, holds, deeper)),
         Value::Object(fields) => fields
             .iter()
-            .any(|(key, item)| holds(key) || any_string(item, holds)),
+            .any(|(key, item)| holds(key) || any_string_at(item, holds, deeper)),
         Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
 }
@@ -1161,8 +1170,9 @@ pub fn any_string(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool) -> bo
 /// booleans and null are kept. Complexity: O(bytes of `value`) plus the cost of [`mask_secrets`]
 /// per string.
 ///
-/// Like [`any_string`], it recurses once per nesting level without a depth guard, bounded by the
-/// 128-level default recursion limit of `serde_json` for parsed input.
+/// Like [`any_string`], it recurses at most [`MAX_JSON_DEPTH`] containers deep. What lies deeper
+/// is kept as it is, unmasked; [`any_string`] answers `true` for that value, so every caller,
+/// which scans the masked value with it, refuses or withholds it.
 ///
 /// # Arguments
 /// * `value` - The JSON value to mask; consumed.
@@ -1182,14 +1192,29 @@ pub fn any_string(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool) -> bo
 /// assert_eq!(masked["n"], 3);
 /// ```
 pub fn masked_strings(value: serde_json::Value) -> serde_json::Value {
+    masked_strings_at(value, 0)
+}
+
+/// [`masked_strings`] on a `value` nested `depth` containers deep. Past [`MAX_JSON_DEPTH`] the
+/// value is returned as it is, which [`any_string`] then flags whole. O(bytes of `value`).
+fn masked_strings_at(value: serde_json::Value, depth: usize) -> serde_json::Value {
     use serde_json::Value;
+    if depth > MAX_JSON_DEPTH {
+        return value;
+    }
+    let deeper = depth + 1;
     match value {
         Value::String(text) => Value::String(mask_secrets(&text)),
-        Value::Array(items) => Value::Array(items.into_iter().map(masked_strings).collect()),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| masked_strings_at(item, deeper))
+                .collect(),
+        ),
         Value::Object(fields) => Value::Object(
             fields
                 .into_iter()
-                .map(|(k, v)| (k, masked_strings(v)))
+                .map(|(k, v)| (k, masked_strings_at(v, deeper)))
                 .collect(),
         ),
         other => other,
