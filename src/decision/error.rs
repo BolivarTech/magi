@@ -620,6 +620,67 @@ mod tests {
         }
     }
 
+    /// A trace of a 401 on `cloud`, then a transport failure on `nimble`.
+    fn refused_then_failed(cloud: &str) -> Trace {
+        let mut trace = refused_on(cloud);
+        trace.attempts.push(Attempt {
+            model: "nimble".into(),
+            outcome: AttemptOutcome::Failed {
+                status: None,
+                cause: Cause::Transport,
+                detail: None,
+            },
+            usage: Usage::default(),
+        });
+        trace
+    }
+
+    /// REQ-F14: a chain that went past a refused `:cloud` model names `ollama signin`, whichever
+    /// attempt came last; so does an explicit model that ended the same way.
+    #[test]
+    fn an_exhausted_chain_after_a_refused_cloud_model_names_ollama_signin() {
+        let exhausted = DecisionError::ChainExhausted {
+            trace: refused_then_failed("clef:cloud"),
+        }
+        .to_string();
+        assert_eq!(
+            exhausted,
+            "no decision model answered: chain exhausted (2 attempts); \
+             for an Ollama `:cloud` model, run `ollama signin`"
+        );
+        let unavailable = DecisionError::ModelUnavailable {
+            model: "clef:cloud".into(),
+            trace: refused_on("clef:cloud"),
+        }
+        .to_string();
+        assert_eq!(
+            unavailable,
+            "model 'clef:cloud' gave no usable decision; \
+             for an Ollama `:cloud` model, run `ollama signin`"
+        );
+    }
+
+    /// REQ-F14: no hint without a 401 on a `:cloud` model: a refused local model, or a cloud
+    /// model that failed for another cause.
+    #[test]
+    fn an_exhausted_chain_without_a_refused_cloud_model_has_no_hint() {
+        let mut timed_out = refused_on("clef:cloud");
+        if let Some(AttemptOutcome::Failed { cause, status, .. }) =
+            timed_out.attempts.first_mut().map(|a| &mut a.outcome)
+        {
+            *cause = Cause::Timeout;
+            *status = None;
+        }
+        for trace in [refused_then_failed("clef-flash"), timed_out] {
+            let n = trace.attempts.len();
+            let msg = DecisionError::ChainExhausted { trace }.to_string();
+            assert_eq!(
+                msg,
+                format!("no decision model answered: chain exhausted ({n} attempts)")
+            );
+        }
+    }
+
     #[test]
     fn an_attempt_serializes_flat_with_its_outcome_and_without_usage() {
         let a = Attempt {
