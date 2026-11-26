@@ -1108,7 +1108,7 @@ const MASK_FAILED: &str = "<redacted: masking failed>";
 /// The deepest nesting [`any_string`] and [`masked_strings`] descend into: the default recursion
 /// limit of `serde_json`'s parser (128), so no value parsed from text reaches it, while a value
 /// built in process cannot make either walk deeper than this.
-pub const MAX_JSON_DEPTH: usize = 128;
+pub const MAX_SCAN_DEPTH: usize = 128;
 
 /// Whether `holds` is true of any string of a JSON `value`, an object's keys included.
 ///
@@ -1117,7 +1117,7 @@ pub const MAX_JSON_DEPTH: usize = 128;
 /// only) still sees a key that holds a secret. Complexity: O(bytes of `value`) times the cost of
 /// `holds`.
 ///
-/// It recurses once per nesting level, down to [`MAX_JSON_DEPTH`] containers. A value nested
+/// It recurses once per nesting level, down to [`MAX_SCAN_DEPTH`] containers. A value nested
 /// deeper (only one built in process can be: `serde_json` refuses to parse one) answers `true`
 /// without being read further, so a caller that refuses or withholds on `true` fails closed.
 ///
@@ -1144,11 +1144,11 @@ pub fn any_string(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool) -> bo
     any_string_at(value, holds, 0)
 }
 
-/// [`any_string`] on a `value` nested `depth` containers deep: `true` past [`MAX_JSON_DEPTH`],
+/// [`any_string`] on a `value` nested `depth` containers deep: `true` past [`MAX_SCAN_DEPTH`],
 /// so a value too deep to read is flagged, never walked further. O(bytes of `value`).
 fn any_string_at(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool, depth: usize) -> bool {
     use serde_json::Value;
-    if depth > MAX_JSON_DEPTH {
+    if depth > MAX_SCAN_DEPTH {
         return true;
     }
     let deeper = depth + 1;
@@ -1170,7 +1170,7 @@ fn any_string_at(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool, depth:
 /// booleans and null are kept. Complexity: O(bytes of `value`) plus the cost of [`mask_secrets`]
 /// per string.
 ///
-/// Like [`any_string`], it recurses at most [`MAX_JSON_DEPTH`] containers deep. What lies deeper
+/// Like [`any_string`], it recurses at most [`MAX_SCAN_DEPTH`] containers deep. What lies deeper
 /// is kept as it is, unmasked; [`any_string`] answers `true` for that value, so every caller,
 /// which scans the masked value with it, refuses or withholds it.
 ///
@@ -1195,11 +1195,11 @@ pub fn masked_strings(value: serde_json::Value) -> serde_json::Value {
     masked_strings_at(value, 0)
 }
 
-/// [`masked_strings`] on a `value` nested `depth` containers deep. Past [`MAX_JSON_DEPTH`] the
+/// [`masked_strings`] on a `value` nested `depth` containers deep. Past [`MAX_SCAN_DEPTH`] the
 /// value is returned as it is, which [`any_string`] then flags whole. O(bytes of `value`).
 fn masked_strings_at(value: serde_json::Value, depth: usize) -> serde_json::Value {
     use serde_json::Value;
-    if depth > MAX_JSON_DEPTH {
+    if depth > MAX_SCAN_DEPTH {
         return value;
     }
     let deeper = depth + 1;
@@ -1229,7 +1229,7 @@ fn masked_strings_at(value: serde_json::Value, depth: usize) -> serde_json::Valu
 /// The separator is a line break, never nothing: no token pattern and no key-block header spans
 /// a line break, so the join creates no match across two strings and adds no false positive.
 /// The same holds the other way, as a declared limit: a token or a header split across two
-/// strings is not recognized. A value nested past [`MAX_JSON_DEPTH`] answers `true` (fail
+/// strings is not recognized. A value nested past [`MAX_SCAN_DEPTH`] answers `true` (fail
 /// closed, through [`any_string`]). O(bytes of `value`) to join, then O(n · p) per strip view.
 ///
 /// # Arguments
@@ -3719,18 +3719,18 @@ mod tests {
         value
     }
 
-    /// Mutation-verified: without the depth bound a value deeper than [`MAX_JSON_DEPTH`] is
+    /// Mutation-verified: without the depth bound a value deeper than [`MAX_SCAN_DEPTH`] is
     /// walked to its clean leaf and answered `false`. Past the bound it is flagged (fail closed).
     #[test]
     fn any_string_flags_a_value_nested_past_the_depth_bound() {
         let never = |_: &str| false;
         assert!(any_string(&deep_value(200, "plain"), &never));
-        assert!(any_string(&deep_value(MAX_JSON_DEPTH + 1, "plain"), &never));
-        assert!(!any_string(&deep_value(MAX_JSON_DEPTH, "plain"), &never));
-        assert!(any_string(&deep_value(MAX_JSON_DEPTH, "x"), &|t| t == "x"));
+        assert!(any_string(&deep_value(MAX_SCAN_DEPTH + 1, "plain"), &never));
+        assert!(!any_string(&deep_value(MAX_SCAN_DEPTH, "plain"), &never));
+        assert!(any_string(&deep_value(MAX_SCAN_DEPTH, "x"), &|t| t == "x"));
     }
 
-    /// Mutation-verified: `masked_strings` leaves what lies past [`MAX_JSON_DEPTH`] as it is,
+    /// Mutation-verified: `masked_strings` leaves what lies past [`MAX_SCAN_DEPTH`] as it is,
     /// and [`any_string`] then flags that value, so nothing deeper leaves unread.
     #[test]
     fn masked_strings_leaves_a_value_past_the_depth_bound_as_it_is() {
@@ -3739,7 +3739,7 @@ mod tests {
         let masked = masked_strings(deep.clone());
         assert_eq!(masked, deep);
         assert!(any_string(&masked, &leaks_secret));
-        let shallow = masked_strings(deep_value(MAX_JSON_DEPTH, &token));
+        let shallow = masked_strings(deep_value(MAX_SCAN_DEPTH, &token));
         assert!(
             !shallow.to_string().contains(&token),
             "within the bound it is masked"

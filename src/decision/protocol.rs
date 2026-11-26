@@ -1128,7 +1128,7 @@ mod tests {
         assert!(reason.contains("secret"), "{reason}");
     }
 
-    /// Mutation-verified: a state nested past `MAX_JSON_DEPTH` (built in process, so no parser
+    /// Mutation-verified: a state nested past `MAX_SCAN_DEPTH` (built in process, so no parser
     /// limit applies) is refused, never walked to its end or sent.
     #[test]
     fn a_state_nested_past_the_depth_bound_is_refused() {
