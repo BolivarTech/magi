@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::decision::config::KeepAlive;
 use crate::decision::error::{DecisionError, Usage};
-use crate::review::secrets::{any_string, find_secret, holds_key_block, masked_strings};
+use crate::review::secrets::{any_string, holds_key_block, leaks_secret, masked_strings};
 
 /// Questions of a request, keyed by name; the map order is the wire order.
 pub type Questions = BTreeMap<String, Question>;
@@ -189,8 +189,9 @@ impl DecisionRequest {
     /// refused before masking, since a key body matches no pattern, and a state that still holds
     /// a secret after masking (keys are never masked) is refused too. The questions travel with
     /// the state and are never masked, so any of their strings or keys that holds a secret or a
-    /// private-key block refuses the request. A size limit applied to
-    /// the state must measure [`DecisionRequest::state`], the masked state that is sent.
+    /// private-key block refuses the request. Both residual checks ask [`leaks_secret`], the
+    /// review's one egress predicate. A size limit applied to the state must measure
+    /// [`DecisionRequest::state`], the masked state that is sent.
     ///
     /// Complexity: O(questions) plus O(size of the state) for the checks and the masking.
     ///
@@ -208,16 +209,14 @@ impl DecisionRequest {
         validate(&state, &questions)?;
         let wire_questions =
             serde_json::to_value(&questions).map_err(|_| invalid(QUESTIONS_UNSERIALIZABLE))?;
-        if any_string(&wire_questions, &|text| {
-            holds_key_block(text) || find_secret(text).is_some()
-        }) {
+        if any_string(&wire_questions, &leaks_secret) {
             return Err(invalid(QUESTIONS_SECRET_REFUSED));
         }
         if any_string(&state, &holds_key_block) {
             return Err(invalid(KEY_BLOCK_REFUSED));
         }
         let state = masked_strings(state);
-        if any_string(&state, &|text| find_secret(text).is_some()) {
+        if any_string(&state, &leaks_secret) {
             return Err(invalid(RESIDUAL_SECRET_REFUSED));
         }
         Ok(Self {
