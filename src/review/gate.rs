@@ -1477,6 +1477,66 @@ mod tests {
         assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    /// REQ-F13b: a `:cloud` model whose 401 stops the gate, because no later model is eligible,
+    /// still leaves its own WARN entry naming it, once for the review; a 401 on a model that is
+    /// not `:cloud` names no model.
+    #[tokio::test]
+    async fn a_refused_cloud_model_that_stops_the_gate_logs_one_warn_naming_it() {
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Models(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        struct ModelField<'a>(&'a mut Option<String>);
+        impl tracing::field::Visit for ModelField<'_> {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "model" {
+                    *self.0 = Some(value.to_string());
+                }
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Models {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if e.metadata().target() != GATE_LOG_TARGET
+                    || *e.metadata().level() != tracing::Level::WARN
+                {
+                    return;
+                }
+                let mut model = None;
+                e.record(&mut ModelField(&mut model));
+                if let (Some(model), Ok(mut seen)) = (model, self.0.lock()) {
+                    seen.push(model);
+                }
+            }
+        }
+        let models = Models::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(models.clone()));
+        for (chain, want) in [
+            (specs(&["x:cloud"]), vec!["x:cloud"]),
+            (specs(&["y"]), vec![]),
+        ] {
+            models.0.lock().expect("models").clear();
+            let mut c = MockDecisionClient::new();
+            c.expect_decide().returning(|_| unauthorized());
+            let mut g = Gate::new(&c, chain, 61_000);
+            for _ in 0..2 {
+                let v = g
+                    .judge(
+                        &finding(Severity::Warning, Some(1)),
+                        Some("x\nx\nx\n"),
+                        None,
+                    )
+                    .await;
+                assert_eq!(v.cause, Some("unauthorized"));
+            }
+            assert_eq!(*models.0.lock().expect("models"), want);
+        }
+    }
+
     fn answer(model: &str, choice: &str, confidence: f64) -> Result<Decision, DecisionError> {
         let other = if choice == "real_defect" {
             "false_positive"
