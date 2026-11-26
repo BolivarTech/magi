@@ -1045,9 +1045,13 @@ impl<'a> Gate<'a> {
             // most chain length x MAX_GATE_QUESTIONS_PER_FINDING times per finding (9 with the
             // default chain), and the +/-40-line window is built once per pair; both are O(bytes)
             // microseconds against a model call of seconds (p95 2.9 s, E7).
-            // `new` only fails on a malformed state or question set; both are built here.
+            // `new` fails on a malformed state or question set, both built here, and refuses a
+            // state or questions holding a secret. That refusal is the only failure left, and its
+            // honest cause is `secret`. It is unreachable today, so no test drives it: `sendable`
+            // already refused a key block and ran `leaks_secret` on the masked state, masking a
+            // masked state is the identity, and the gate's questions are fixed text.
             let Ok(request) = DecisionRequest::new(state.clone(), gate_questions()) else {
-                return Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED);
+                return Outcome::unfiltered(CAUSE_SECRET);
             };
             let request = request.with_model(spec.model.clone()).with_timeout(cap);
             called = true;
