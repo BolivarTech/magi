@@ -612,8 +612,8 @@ pub struct Gate<'a> {
     call_timeout: Duration,
     rejected: BTreeSet<String>,
     /// `:cloud` models that refused the credentials (HTTP 401/403) in this review: a signed-out
-    /// Ollama daemon refuses only its cloud models, so the walk goes on with the next model and
-    /// never asks these again.
+    /// Ollama daemon refuses only its cloud models, so the walk goes on with the next model still
+    /// eligible and never asks these again; with none left, the gate stops as `unauthorized`.
     refused: BTreeSet<String>,
     stopped: Option<&'static str>,
     per_model: BTreeMap<String, usize>,
@@ -1021,7 +1021,7 @@ impl<'a> Gate<'a> {
         let mut all_transport = true;
         // MAGI FIX (S6 loop 4): a reference count, not a copy of the chain, per question.
         let chain = Arc::clone(&self.chain);
-        for spec in chain.iter() {
+        for (index, spec) in chain.iter().enumerate() {
             if self.rejected.contains(&spec.model) {
                 note_skip(skipped, &spec.model);
                 continue;
@@ -1113,11 +1113,17 @@ impl<'a> Gate<'a> {
                 }
                 Err(DecisionError::Unauthorized { .. })
                     if is_ollama_cloud_model(&spec.model)
-                        && chain.last().is_some_and(|last| last.model != spec.model) =>
+                        && chain.iter().skip(index + 1).any(|later| {
+                            !self.rejected.contains(&later.model)
+                                && !self.refused.contains(&later.model)
+                        }) =>
                 {
                     // A signed-out Ollama daemon refuses its cloud models and still serves the
-                    // local ones, so the walk goes on; any other 401 stops the gate below.
-                    all_transport = false;
+                    // local ones, so the walk goes on while a later model is still eligible; any
+                    // other 401, or one with no model left to ask, stops the gate below. The
+                    // refusal is not an answer: `all_transport` is left as it was, so a chain
+                    // whose other models fail for transport says `transport` on this finding and
+                    // on every later one alike.
                     self.refused.insert(spec.model.clone());
                     tracing::event!(
                         target: GATE_LOG_TARGET,
