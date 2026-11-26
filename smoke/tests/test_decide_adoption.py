@@ -67,6 +67,19 @@ class ScaffoldJudgingTests(unittest.TestCase):
         text = _SCAFFOLD_DECISION.replace('"nimble"', '"tev1"')
         self.assertIn("tev1", decide.scaffold_adoption_problem(text))
 
+    def test_a_fallback_threshold_other_than_the_adopted_one_is_reported(self) -> None:
+        from smoke.scenarios import decide
+        head, _, tail = _SCAFFOLD_DECISION.partition("[[decision.fallback]]")
+        text = head + "[[decision.fallback]]" + tail.replace("0.85", "0.75")
+        self.assertIn("0.75", decide.scaffold_adoption_problem(text))
+
+    def test_a_fallback_without_a_threshold_is_reported(self) -> None:
+        from smoke.scenarios import decide
+        text = _SCAFFOLD_DECISION.replace('model = "nimble"\nmin_confidence = 0.85\n',
+                                          'model = "nimble"\n')
+        self.assertNotEqual(text, _SCAFFOLD_DECISION, "fixture: the threshold is gone")
+        self.assertIn("None", decide.scaffold_adoption_problem(text))
+
     def test_text_that_does_not_parse_is_reported(self) -> None:
         from smoke.scenarios import decide
         self.assertNotEqual("", decide.scaffold_adoption_problem("[decision\n"))
