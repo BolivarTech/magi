@@ -653,6 +653,20 @@ mod tests {
         );
     }
 
+    /// REQ-F14 (mutation-verified): the hint follows the one rule of the other messages, a
+    /// refused `:cloud` model anywhere in the trace, so a chain that rotated past it to a
+    /// refused local model still names `ollama signin`.
+    #[test]
+    fn the_unauthorized_message_names_ollama_signin_after_an_earlier_refused_cloud_model() {
+        let mut trace = refused_on("x:cloud");
+        trace.attempts.extend(refused_on("nimble").attempts);
+        let msg = DecisionError::Unauthorized { status: 401, trace }.to_string();
+        assert!(
+            msg.ends_with("for an Ollama `:cloud` model, run `ollama signin` instead"),
+            "{msg}"
+        );
+    }
+
     /// REQ-F14 / F-S20: on any other model, or with no attempt, only the key is named.
     #[test]
     fn the_unauthorized_message_names_only_the_key_when_the_last_model_is_not_cloud() {
