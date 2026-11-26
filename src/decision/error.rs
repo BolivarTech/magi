@@ -552,11 +552,28 @@ mod tests {
         );
     }
 
+    /// A trace whose only attempt is a 401 on `model`.
+    fn refused_on(model: &str) -> Trace {
+        Trace {
+            attempts: vec![Attempt {
+                model: model.into(),
+                outcome: AttemptOutcome::Failed {
+                    status: Some(401),
+                    cause: Cause::Unauthorized,
+                    detail: None,
+                },
+                usage: Usage::default(),
+            }],
+            usage: Usage::default(),
+        }
+    }
+
+    /// REQ-F14 / F-S20: the hint names `ollama signin` when the last attempt was a cloud model.
     #[test]
     fn the_unauthorized_message_names_ollama_signin_for_cloud_models() {
         let msg = DecisionError::Unauthorized {
             status: 401,
-            trace: Trace::default(),
+            trace: refused_on("clef:cloud"),
         }
         .to_string();
         assert!(
@@ -564,6 +581,20 @@ mod tests {
                 && msg.contains("for an Ollama `:cloud` model, run `ollama signin` instead"),
             "{msg}"
         );
+    }
+
+    /// REQ-F14 / F-S20: on any other model, or with no attempt, only the key is named.
+    #[test]
+    fn the_unauthorized_message_names_only_the_key_when_the_last_model_is_not_cloud() {
+        for trace in [refused_on("nimble"), Trace::default()] {
+            let msg = DecisionError::Unauthorized { status: 401, trace }.to_string();
+            assert_eq!(
+                msg,
+                "the decision endpoint refused the request credentials (HTTP 401); set \
+                 DECISION_API_KEY in the environment or with \
+                 `magi-rs vault set DECISION_API_KEY`"
+            );
+        }
     }
 
     #[test]
