@@ -3643,6 +3643,29 @@ mod tests {
         assert!(any_string(&masked_strings(parsed), &|t| t == "x"));
     }
 
+    /// The exact boundary of `serde_json`'s parser, which [`MAX_SCAN_DEPTH`] is coupled to.
+    /// Its recursion limit of 128 refuses the 128th nested container, so the deepest array it
+    /// parses holds 127 (measured): one under [`MAX_SCAN_DEPTH`], read whole by `any_string`
+    /// (never flagged as too deep) and masked by `masked_strings`. A `serde_json` change that
+    /// moved its limit would turn this red, and [`MAX_SCAN_DEPTH`] would need a look.
+    #[test]
+    fn serde_json_parses_exactly_up_to_the_scan_depth_bound() {
+        let deepest = MAX_SCAN_DEPTH - 1;
+        let parsed: serde_json::Value = serde_json::from_str(&nested_array(deepest))
+            .expect("the deepest array serde_json accepts parses");
+        assert!(!any_string(&parsed, &|_| false), "read whole, not too deep");
+        let token = format!("ghp_{}", "A".repeat(36)); // allow-secret-scan
+        let with_token = nested_array(deepest).replace("\"x\"", &format!("\"{token}\""));
+        let parsed: serde_json::Value = serde_json::from_str(&with_token).expect("parses");
+        assert!(!masked_strings(parsed).to_string().contains(&token));
+        let err = serde_json::from_str::<serde_json::Value>(&nested_array(deepest + 1))
+            .expect_err("one level more is refused");
+        assert!(
+            err.to_string().contains("recursion limit exceeded"),
+            "{err}"
+        );
+    }
+
     /// A PEM private-key header and one body line, for the split-block tests.
     fn split_key_block() -> (String, &'static str) {
         let d = "-----";
