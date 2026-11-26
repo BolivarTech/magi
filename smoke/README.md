@@ -275,9 +275,10 @@ and has cloud quota left. Signed out, or with the quota spent, its second assert
 `CANNOT_TEST`, never `PASS`, and a run with any `CANNOT_TEST` emits no certificate, so the
 default path is never certified by a run that could not reach it. The cause strings come from
 the product: a 401 or 403 is `unauthorized`, and a 429 is `rate_limited` (`src/decision/error.rs`).
-A 400 from the cloud head stays `FAIL`: for the product it means the request has the wrong shape.
-The certifying environment runs Ollama 0.40.5 or later, which serves `clef:cloud`, so a 400 there
-is a defect; on an older daemon the `FAIL` is the correct outcome, and a loud one.
+A first hop that ends `rejected` (an HTTP 400) stays `FAIL` in the harness, even though the product
+itself moves on to the next model: the certifying environment runs Ollama 0.40.5 or later, which
+serves `clef:cloud`, so a rejected cloud head there means the shipped default does not work. On an
+older daemon the `FAIL` is the intended outcome, and a loud one.
 
 The threshold is read from the parsed file, so a commented-out line does not count. D14 seeds
 its own scratch workspace and keeps the text `init` wrote, so it judges what a new user gets,
