@@ -1,6 +1,6 @@
 # Typed decisions: `magi-rs decide`
 
-`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated. With the default `clef-flash`, 95 % of requests took about 3 seconds once the model was loaded (measured on an RTX 5060 Ti with 16 GB; other hardware will differ).
+`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated. The default model is `clef:cloud`, which runs in Ollama's cloud. With the local `clef-flash`, the default before 0.25.1, 95 % of requests took about 3 seconds once the model was loaded (measured on an RTX 5060 Ti with 16 GB; other hardware will differ).
 
 The models speak the System One protocol: you send a `state` (text or JSON) and a set of questions, and each question has one of three types. Every question, whatever its type, needs `instructions`: a short, non-empty description of what to decide.
 
@@ -24,20 +24,21 @@ Models used by the scaffold that `magi init` writes:
 
 | Model | Provider | Role |
 |---|---|---|
-| `clef-flash` | Ollama | primary (10.9 GB, Apache-2.0) |
+| `clef:cloud` | Ollama (cloud) | primary |
 | `nimble` | Ollama | fallback |
+| `clef-flash` | Ollama | local alternative to `clef:cloud` (10.9 GB, Apache-2.0) |
 | `typesafe/jev-1.13` | OpenRouter | primary in the commented example |
 | `togethercomputer/tev1-4b-experimental` | OpenRouter | fallback in the example |
 | `upstage/solar-decide` | OpenRouter | fallback in the example |
 
-The Ollama models have to be pulled once:
+`clef:cloud` needs Ollama 0.40.5 or later and `ollama signin`. It spends the Ollama account's quota, and every decision state goes to ollama.com, including the internal decisions (the mode of a consult and the memory contradiction check). The local models have to be pulled once:
 
 ```bash
-ollama pull clef-flash
 ollama pull nimble
+ollama pull clef-flash   # only to keep decisions local
 ```
 
-`clef-flash` needs Ollama 0.35.1 or later. It loaded in 16.5 s on an idle machine and 49.4 s on a busy one, so it needs a `timeout_secs` of at least 66 s; the default of 120 leaves room. Inside one consult the chain can take about 135 s in the worst case: the 120 s timeout of `clef-flash` plus the 14.3 s cold load of `nimble`. All of these figures were measured on an RTX 5060 Ti with 16 GB and will differ on other hardware.
+To keep every decision on the machine, set `model = "clef-flash"` in `[decision]`. `clef-flash` needs Ollama 0.35.1 or later. Under Ollama 0.40.18 it failed to load on a 4 GB GPU, because Ollama tried to reserve about 18 GB on the device. It loaded in 16.5 s on an idle machine and 49.4 s on a busy one, so it needs a `timeout_secs` of at least 66 s; the default of 120 leaves room. Inside one consult the chain can take about 135 s in the worst case: the 120 s timeout of `clef-flash` plus the 14.3 s cold load of `nimble`. All of these figures were measured on an RTX 5060 Ti with 16 GB and will differ on other hardware.
 
 Without them, `magi-rs decide` fails with an error that names the missing model, and the chain moves on to the next one. Fallbacks always live on the same endpoint as `[decision]`; there is no `base_url` per fallback.
 
@@ -139,7 +140,7 @@ With a threshold set, a model whose answer falls below it is skipped and the nex
 
 Some models return slightly different numbers when the same request is repeated. A threshold set very close to a model's usual value can therefore accept in one call and rotate in the next, so leave a margin.
 
-`magi init` writes `min_confidence = 0.75` on `clef-flash` and on `nimble`, active. The 0.75 comes from the maintainer's calibration on the maintainer's own prompts, which may not look like yours; measure on your data before relying on it. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
+`magi init` writes `min_confidence = 0.75` on `clef:cloud` and on `nimble`, active. The 0.75 comes from the maintainer's calibration of `clef-flash` and `nimble` on the maintainer's own prompts and was not measured again for `clef:cloud`, which may not look like yours; measure on your data before relying on it. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
 
 `tev1:0.8b` is not in the default chain: in the calibration it answered "yes" to almost every contradiction check, including pairs that did not contradict, and a wrong "yes" retires a memory that is still true.
 

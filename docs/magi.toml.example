@@ -60,18 +60,19 @@ model = "claude-sonnet-4-6"
 # key, OPENAI_API_KEY, as long as its endpoint has the root base_url's origin (scheme, host and
 # port), and sends no key on any other origin.
 # Primary decision model. Required in this section.
-model        = "clef-flash"
+model        = "clef:cloud"
+# model      = "clef-flash"  # local alternative, needs ollama pull clef-flash
 # Per-attempt timeout in seconds (covers a local cold load). Optional, default 120.
-# `clef-flash` loaded in 16.5 s on an idle machine and 49.4 s on a busy one (RTX 5060 Ti, 16 GB),
-# so it needs at least 66 s here. Inside one consult the chain can take about 135 s: this timeout
-# for `clef-flash` plus the 14.3 s cold load of `nimble`. Numbers from other hardware will differ.
+# `clef:cloud` runs in Ollama's cloud: it needs Ollama 0.40.5 or later and `ollama signin`,
+# spends the Ollama account's quota, and sends each decision state to ollama.com. The fallback
+# `nimble` runs locally; its cold load took 14.3 s (RTX 5060 Ti, 16 GB). Other hardware will differ.
 timeout_secs = 120
 # Ollama only. Optional: absent = not sent (server default). "10m", "2h", or -1 (keep loaded).
 # keep_alive = "10m"
 # Approval of the agent's `decide` tool. Optional, default true.
 auto_approve = true
 # Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight
-# to the main model. 61000 fits the request-size cap measured with the local `clef-flash` model. With a hosted decision
+# to the main model. 61000 fits Ollama's request-body cap (measured with the local `clef-flash`). With a hosted decision
 # model such as typesafe/jev-1.13, raise it or delete the line (built-in default 128000).
 max_state_bytes = 61000
 # Below this confidence the answer is discarded and the next model in the chain is tried. When the
