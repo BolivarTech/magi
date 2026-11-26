@@ -2503,7 +2503,7 @@ mod tests {
     }
 
     #[test]
-    fn the_scaffold_comment_states_the_measured_cold_load_budget() {
+    fn the_scaffold_comment_states_the_cloud_egress_and_the_fallback_cold_load() {
         let text = render_default_magi_toml();
         assert!(
             text.contains("each decision state to ollama.com"),
@@ -2563,8 +2563,8 @@ mod tests {
             "the file says how to switch the threshold off"
         );
         assert!(
-            !render_default_magi_toml().contains("request-body cap"),
-            "the state limit is no longer presented as the daemon's body cap"
+            render_default_magi_toml().contains("bounds what leaves for ollama.com"),
+            "the file says the state limit bounds what leaves for ollama.com"
         );
     }
 
@@ -2597,7 +2597,7 @@ mod tests {
     }
 
     #[test]
-    fn the_scaffolded_toml_loads_with_the_local_state_limit() {
+    fn the_scaffolded_toml_loads_with_the_calibrated_state_limit() {
         let cfg = crate::config::MagiConfig::from_toml_str(&render_default_magi_toml())
             .expect("the scaffold loads");
         assert_eq!(cfg.effective_decision().max_state_bytes, Some(61_000));
