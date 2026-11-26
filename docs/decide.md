@@ -234,10 +234,25 @@ Every use of `decide` sends text to the endpoint in `[decision]`:
 
 - `magi-rs decide` and `/decide` send the `state` you give, the questions and the model name.
 - Mode inference sends the content of the consult, up to `[decision].max_state_bytes`.
-- The contradiction check sends pairs of memories. The main model already received them.
+- The contradiction check sends pairs of memories.
 - The `decide` tool sends the `state` the agent builds.
 
 Before anything is sent, the string values of the state are masked with the code review's secret detector. Object keys are not masked. A state that holds a private-key block, or a secret that is still there after masking, is refused and never sent. Questions are never masked, so a request is refused when a question name, an instruction or a criteria text matches a secret pattern. With the default `clef:cloud` the states go to ollama.com. Set `model = "clef-flash"` to keep decisions on your machine. With another hosted provider, the text goes to it, as prompts go to your main model's provider. The `state` is not written to the log or repeated in the output. Setting `[memory].distill_enabled = false` turns off both memory judges.
+
+## When a request is refused
+
+Some requests fail with `invalid_input` before anything is sent. The message quotes none of the offending text. It happens when:
+
+- a top-level field name of the input, or the explicit `model`, matches a secret pattern.
+- a question name, an instruction or a criteria text matches a secret pattern or holds a private-key block. Questions are never masked, because renaming one would break the mapping of its answer.
+- the `state` holds a private-key block anywhere, in a value or in an object key.
+- something in the `state` still looks like a secret after masking. Masking covers state values only, so a secret in an object key ends up here, as does a token split by a zero-width character or a tab.
+
+The fix is to rename or remove the text the message points at. The detector can be wrong in the other direction too: an identifier shaped like a credential (a long `sk-` or `ghp_` style name) is refused even when it is harmless, and the only remedy is to rename it.
+
+An internal decision whose state is refused does not fail. Mode inference and the memory contradiction check fall back to the main model, with one run-log entry, and the main model receives the consult or the memories with the same masking applied: one-line secrets masked, and a text that holds a private-key block replaced whole by `<redacted: private-key-block>`.
+
+The detector has limits. It scans each string on its own, so a secret split across two strings of the state is not recognized. Neither is one split by a newline or a space. It matches known prefixes and shapes, the same ones the code review uses, so a credential with no recognizable shape leaves as written.
 
 ## Costs
 
