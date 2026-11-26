@@ -1592,7 +1592,15 @@ pub fn outward_text(text: &str) -> String {
 /// assert_eq!(outward_prompt_text("line one\nline two"), "line one\nline two");
 /// ```
 pub fn outward_prompt_text(text: &str) -> String {
-    text.to_string()
+    let masked = match mask_through_views(text, true) {
+        ViewMask::KeyBlock => return KEY_BLOCK_WITHHELD.to_string(),
+        ViewMask::Clean => text.to_string(),
+        ViewMask::Masked(m) => m.text,
+    };
+    if leaks_secret(&masked) {
+        return MASK_FAILED.to_string();
+    }
+    masked
 }
 
 /// `text` with the one-line secrets of every strip view masked in place

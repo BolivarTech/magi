@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use magi_core::schema::Mode;
 use magi_rs::magi::mode::{normalize_label, ModeClassifier};
 use magi_rs::magi::CLASSIFY_TIMEOUT_SECS;
+use magi_rs::review::secrets::outward_prompt_text;
 
 use crate::agent::messages::Message;
 use crate::agent::provider::Provider;
@@ -305,6 +306,9 @@ impl ModeClassifier for ProviderClassifier {
         self.notices.once(NOTICE_CLASSIFY_COST, &cost);
         self.raise(cost_alarm);
 
+        // The consult goes to the main model, a cloud one by default, and is also where a
+        // refused or skipped `decide` request lands: mask it as the code review masks.
+        let content = outward_prompt_text(content);
         let prompt = format!(
             "Classify the delimited content into exactly one of these labels: \
              code-review, design, analysis. Respond with ONLY the label.\n\
