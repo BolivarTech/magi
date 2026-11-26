@@ -29,5 +29,6 @@ pub mod protocol;
 
 pub use client::{DecisionClient, DecisionSettings, SystemOneClient};
 pub use config::{DecisionConfigError, DecisionFallback, DecisionSection, KeepAlive, ModelSpec};
+pub(crate) use error::is_ollama_cloud_model;
 pub use error::{Attempt, AttemptOutcome, Cause, Decision, DecisionError, ErrorKind, Trace, Usage};
 pub use protocol::{Answer, DecisionRequest, NoulCriteria, Question, Questions};

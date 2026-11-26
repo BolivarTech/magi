@@ -22,8 +22,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::decision::{
-    Answer, AttemptOutcome, Cause, Decision, DecisionClient, DecisionError, DecisionRequest,
-    ModelSpec, Question, Questions,
+    is_ollama_cloud_model, Answer, AttemptOutcome, Cause, Decision, DecisionClient, DecisionError,
+    DecisionRequest, ModelSpec, Question, Questions,
 };
 
 use super::config::DEFAULT_CALL_TIMEOUT_SECS;
@@ -611,6 +611,10 @@ pub struct Gate<'a> {
     max_state_bytes: usize,
     call_timeout: Duration,
     rejected: BTreeSet<String>,
+    /// `:cloud` models that refused the credentials (HTTP 401/403) in this review: a signed-out
+    /// Ollama daemon refuses only its cloud models, so the walk goes on with the next model and
+    /// never asks these again.
+    refused: BTreeSet<String>,
     stopped: Option<&'static str>,
     per_model: BTreeMap<String, usize>,
     questions: usize,
@@ -652,6 +656,7 @@ impl<'a> Gate<'a> {
             max_state_bytes,
             call_timeout: Duration::from_secs(DEFAULT_CALL_TIMEOUT_SECS),
             rejected: BTreeSet::new(),
+            refused: BTreeSet::new(),
             stopped: None,
             per_model: BTreeMap::new(),
             questions: 0,
@@ -1021,6 +1026,9 @@ impl<'a> Gate<'a> {
                 note_skip(skipped, &spec.model);
                 continue;
             }
+            if self.refused.contains(&spec.model) {
+                continue;
+            }
             let left = match deadline {
                 Some(d) => {
                     let left = d.saturating_duration_since(Instant::now());
@@ -1102,6 +1110,21 @@ impl<'a> Gate<'a> {
                         status: Some(status),
                         ..Outcome::unfiltered(CAUSE_CHAIN_EXHAUSTED)
                     };
+                }
+                Err(DecisionError::Unauthorized { .. })
+                    if is_ollama_cloud_model(&spec.model)
+                        && chain.last().is_some_and(|last| last.model != spec.model) =>
+                {
+                    // A signed-out Ollama daemon refuses its cloud models and still serves the
+                    // local ones, so the walk goes on; any other 401 stops the gate below.
+                    all_transport = false;
+                    self.refused.insert(spec.model.clone());
+                    tracing::event!(
+                        target: GATE_LOG_TARGET,
+                        tracing::Level::WARN,
+                        model = spec.model.as_str(),
+                        "a cloud gate model refused the credentials; the next model judges"
+                    );
                 }
                 Err(DecisionError::Unauthorized { .. }) => {
                     return self.stop(CAUSE_UNAUTHORIZED);
