@@ -421,6 +421,18 @@ max_state_bytes = 100
         .is_err());
     }
 
+    /// Mutation-verified: a secret-shaped `keep_alive` text is a load error that quotes
+    /// nothing of it (it would reach the decision endpoint).
+    #[test]
+    fn a_secret_in_keep_alive_is_rejected_without_quoting_it() {
+        let token = "ghp_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"; // allow-secret-scan
+        let s = section(&format!("model = \"m\"\nkeep_alive = \"{token}\"\n")).expect("parses");
+        let err = s.validate().expect_err("a secret keep_alive is refused");
+        let msg = err.to_string();
+        assert!(!msg.contains(token), "{msg}");
+        assert!(msg.contains("[decision].keep_alive"), "{msg}");
+    }
+
     #[test]
     fn a_repeated_model_error_names_the_model() {
         let s = section("model = \"nimble\"\n[[fallback]]\nmodel = \"nimble\"\n").expect("parses");

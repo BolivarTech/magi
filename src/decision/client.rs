@@ -790,6 +790,70 @@ mod tests {
         present.assert_async().await;
     }
 
+    /// A secret-shaped token for the wire-boundary tests.
+    const WIRE_TOKEN: &str = "ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"; // allow-secret-scan
+
+    /// Asserts `result` is an `InvalidInput` whose message does not quote [`WIRE_TOKEN`].
+    fn assert_refused_without_quoting(result: &Result<Decision, DecisionError>) {
+        match result {
+            Err(e @ DecisionError::InvalidInput { .. }) => {
+                assert!(!e.to_string().contains(WIRE_TOKEN), "{e}");
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// Mutation-verified: a secret-shaped `keep_alive` text is refused before any request
+    /// leaves, and the refusal quotes nothing of it.
+    #[tokio::test]
+    async fn a_secret_in_keep_alive_is_refused_before_any_request() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/v1/systemone")
+            .with_status(200)
+            .with_body(OK_BODY)
+            .expect(0)
+            .create_async()
+            .await;
+        let mut s = settings(&server.url(), &["nimble"]);
+        s.keep_alive = Some(KeepAlive::Text(WIRE_TOKEN.into()));
+        assert_refused_without_quoting(&decide(s, &request()).await);
+        m.assert_async().await;
+    }
+
+    /// Mutation-verified: a secret-shaped model set through `with_model` is refused before any
+    /// request leaves, and the refusal quotes nothing of it.
+    #[tokio::test]
+    async fn a_secret_in_the_explicit_model_is_refused_before_any_request() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/v1/systemone")
+            .with_status(200)
+            .with_body(OK_BODY)
+            .expect(0)
+            .create_async()
+            .await;
+        let req = request().with_model(WIRE_TOKEN);
+        assert_refused_without_quoting(&decide(settings(&server.url(), &["nimble"]), &req).await);
+        m.assert_async().await;
+    }
+
+    /// A secret-shaped model later in the configured chain refuses the call before the first,
+    /// clean model is tried: no request leaves at all.
+    #[tokio::test]
+    async fn a_secret_model_anywhere_in_the_chain_is_refused_before_any_request() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/v1/systemone")
+            .with_status(500)
+            .expect(0)
+            .create_async()
+            .await;
+        let s = settings(&server.url(), &["nimble", WIRE_TOKEN]);
+        assert_refused_without_quoting(&decide(s, &request()).await);
+        m.assert_async().await;
+    }
+
     #[tokio::test]
     async fn each_failing_status_maps_to_its_cause() {
         let long_then_marker = format!(
