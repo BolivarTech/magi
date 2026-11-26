@@ -1696,16 +1696,19 @@ pub fn withheld_whole(outward: &str) -> bool {
 }
 
 /// Each of `texts` as it may be embedded in one model prompt that carries them in this order
-/// ([`outward_prompt_text`] on each), with one rule across them: once a text is withheld for a
-/// private-key block, every later text is withheld too ([`KEY_BLOCK_WITHHELD`]), since it may
-/// hold the body of a block whose header ended the earlier one (a key body matches no pattern of
-/// its own). A text before the block keeps its content. O(n · s) over all texts.
+/// ([`outward_prompt_text`] on each), with one rule across them: when the texts joined by line
+/// breaks hold a private-key block ([`views_hold_key_block`]), every text is withheld
+/// ([`KEY_BLOCK_WITHHELD`]), before and after the block alike. A key body matches no pattern of
+/// its own, so any text of the prompt may hold the body of a block whose header or footer sits
+/// in another, in either order. The joined text holds every block one text holds. O(n · s) over
+/// all texts.
 ///
 /// # Arguments
 /// * `texts` - Untrusted texts, in the order the prompt embeds them.
 ///
 /// # Returns
-/// One outward text per input text, in the same order.
+/// One outward text per input text, in the same order (all [`KEY_BLOCK_WITHHELD`] when the
+/// texts hold a key block).
 ///
 /// # Examples
 ///
@@ -1717,19 +1720,10 @@ pub fn withheld_whole(outward: &str) -> bool {
 /// assert_eq!(out, [KEY_BLOCK_WITHHELD, KEY_BLOCK_WITHHELD, KEY_BLOCK_WITHHELD]);
 /// ```
 pub fn outward_prompt_texts(texts: &[&str]) -> Vec<String> {
-    let mut after_block = false;
-    texts
-        .iter()
-        .map(|text| {
-            let out = if after_block {
-                KEY_BLOCK_WITHHELD.to_string()
-            } else {
-                outward_prompt_text(text)
-            };
-            after_block |= out == KEY_BLOCK_WITHHELD;
-            out
-        })
-        .collect()
+    if views_hold_key_block(&texts.join("\n")) {
+        return vec![KEY_BLOCK_WITHHELD.to_string(); texts.len()];
+    }
+    texts.iter().map(|text| outward_prompt_text(text)).collect()
 }
 
 /// `text` with the one-line secrets of every strip view masked in place

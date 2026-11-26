@@ -22,9 +22,9 @@ use crate::memory::store::Memory;
 ///
 /// Bounded prompts only; API keys are never logged or serialised (REQ-21). Every memory text
 /// goes through [`outward_prompt_texts`] before it is embedded in a prompt: one-line secrets are
-/// masked, and a text is withheld whole in two cases. One is a text holding a private-key block;
-/// every memory after it in the same prompt is withheld too, since it may carry that block's
-/// body. The other is a text whose masking still leaves something the egress check flags. The main model is a cloud
+/// masked, and a text is withheld whole in two cases. One is a prompt whose memories, joined,
+/// hold a private-key block: every memory of it is withheld, since any of them may carry that
+/// block's body. The other is a text whose masking still leaves something the egress check flags. The main model is a cloud
 /// one by default, and this judge is also the fallback of the `decide` contradiction judge.
 /// Provider errors are propagated as typed [`MemoryError`] so the distiller's
 /// CP2-Z non-fatal handler catches them without panic.
@@ -91,7 +91,8 @@ impl DistillJudge for LlmDistillJudge {
     }
 
     async fn contradicts(&self, a: &str, b: &str) -> Result<bool, MemoryError> {
-        // One outward text per input text, in order; B is withheld after a block in A.
+        // One outward text per input text, in order; both are withheld when the pair holds a
+        // key block.
         let mut pair = outward_prompt_texts(&[a, b]).into_iter();
         let (a, b) = (
             pair.next().unwrap_or_default(),
