@@ -10,13 +10,16 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use magi_rs::review::secrets::{outward_prompt_texts, KEY_BLOCK_WITHHELD};
+use magi_rs::review::secrets::{outward_prompt_texts, withheld_whole, KEY_BLOCK_WITHHELD};
 
 use crate::agent::messages::Message;
 use crate::agent::provider::Provider;
 use crate::memory::error::MemoryError;
 use crate::memory::profile::DistillJudge;
 use crate::memory::store::Memory;
+
+/// Target of this module's run-log entries.
+const LOG_TARGET: &str = "magi_rs::memory::judge";
 
 /// [`DistillJudge`] backed by the configured chat provider (REQ-17, agnostic).
 ///
@@ -26,7 +29,9 @@ use crate::memory::store::Memory;
 /// hold a private-key block: every memory of it is withheld, since any of them may carry that
 /// block's body. The other is a text whose masking still leaves something the egress check
 /// flags. The main model is a cloud one by default, and this judge is also the fallback of the
-/// `decide` contradiction judge.
+/// `decide` contradiction judge. A placeholder is never judged: a pair with a text withheld
+/// whole is kept without a call, and a preference prompt whose texts are all withheld is not
+/// sent; each skip writes one run-log entry, with no content.
 /// Provider errors are propagated as typed [`MemoryError`] so the distiller's
 /// CP2-Z non-fatal handler catches them without panic.
 pub struct LlmDistillJudge {
@@ -48,7 +53,16 @@ impl DistillJudge for LlmDistillJudge {
         }
 
         let texts = episodic.iter().map(|m| m.text.as_str()).collect::<Vec<_>>();
-        let texts = outward_prompt_texts(&texts).join("\n");
+        let texts = outward_prompt_texts(&texts);
+        if texts.iter().all(|text| withheld_whole(text)) {
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::INFO,
+                "preference distillation skipped: every memory text was withheld for a secret"
+            );
+            return Ok(vec![]);
+        }
+        let texts = texts.join("\n");
 
         let prompt = format!(
             "From the following user turns, list durable user preferences, one per line, \
@@ -100,6 +114,15 @@ impl DistillJudge for LlmDistillJudge {
                 .unwrap_or_else(|| KEY_BLOCK_WITHHELD.to_string())
         };
         let (a, b) = (next(), next());
+        if withheld_whole(&a) || withheld_whole(&b) {
+            // Nothing left to judge: the conservative answer keeps both memories.
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::INFO,
+                "contradiction check skipped: a memory text was withheld for a secret"
+            );
+            return Ok(false);
+        }
         let prompt = format!(
             "Does statement B contradict or supersede statement A about the same subject? \
              Answer only yes or no.\nA: {a}\nB: {b}"
