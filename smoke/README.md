@@ -261,7 +261,7 @@ invocation), and the body OpenRouter returns for an unknown model, which belongs
 
 ### The adoption scenario (v0.24.0)
 
-D14 adds two assertions: the scaffold names its decision model (`clef:cloud` since v0.25.1,
+D14 adds two assertions: the scaffold names its decision model (`clef:cloud` since v0.26.0,
 `clef-flash` before) with its threshold active, and
 `magi decide` answers the three-type example request with it. As of v0.24.0 the harness
 promised 43 scenarios and 127 assertions; it now declares 58 and 174 (`smoke/registry.py`).

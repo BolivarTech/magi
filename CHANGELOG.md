@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 While the version is `0.x`, the **minor** position signals significant or breaking
 changes and the **patch** position signals backward-compatible fixes.
 
-## [0.25.1] - 2026-11-26
+## [0.26.0] - 2026-11-26
+
+**Upgrading from 0.25:** the default decision model now runs in Ollama's cloud, so decision states, including the two internal ones, go to ollama.com with their secrets masked first. To keep decisions on the machine, set `model = "clef-flash"` in `[decision]` and run `ollama pull clef-flash`. This is why the release is a minor version and not a patch.
 
 ### Changed
 

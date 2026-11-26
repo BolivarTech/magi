@@ -1,6 +1,6 @@
 # Typed decisions: `magi-rs decide`
 
-`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated. The default model is `clef:cloud`, which runs in Ollama's cloud. With the local `clef-flash`, the default before 0.25.1, 95 % of requests took about 3 seconds once the model was loaded (measured on an RTX 5060 Ti with 16 GB; other hardware will differ).
+`magi-rs decide` asks a small decision model a closed question and returns the answer together with the probability of every option. The call is one forward pass. No text is generated. The default model is `clef:cloud`, which runs in Ollama's cloud. With the local `clef-flash`, the default before 0.26.0, 95 % of requests took about 3 seconds once the model was loaded (measured on an RTX 5060 Ti with 16 GB; other hardware will differ).
 
 The models speak the System One protocol: you send a `state` (text or JSON) and a set of questions, and each question has one of three types. Every question, whatever its type, needs `instructions`: a short, non-empty description of what to decide.
 
