@@ -231,13 +231,23 @@ impl ModeClassifier for DecideModeClassifier {
 /// Captures every event of the fallback target.
 #[cfg(test)]
 pub(crate) fn fallback_lines<F: std::future::Future<Output = ()>>(f: F) -> Vec<String> {
+    target_lines(magi_rs::decision::internal::FALLBACK_LOG_TARGET, f)
+}
+
+/// Runs `f` on a fresh current-thread runtime and returns every event of `target` it emitted,
+/// rendered as the run log renders it.
+#[cfg(test)]
+pub(crate) fn target_lines<F: std::future::Future<Output = ()>>(
+    target: &'static str,
+    f: F,
+) -> Vec<String> {
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::layer::SubscriberExt;
-    struct Capture(Arc<Mutex<Vec<String>>>);
+    struct Capture(&'static str, Arc<Mutex<Vec<String>>>);
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
         fn on_event(&self, e: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-            if e.metadata().target() == magi_rs::decision::internal::FALLBACK_LOG_TARGET {
-                if let Ok(mut v) = self.0.lock() {
+            if e.metadata().target() == self.0 {
+                if let Ok(mut v) = self.1.lock() {
                     v.push(magi_rs::logging::render::render_event(e));
                 }
             }
@@ -245,7 +255,7 @@ pub(crate) fn fallback_lines<F: std::future::Future<Output = ()>>(f: F) -> Vec<S
     }
     let lines = Arc::new(Mutex::new(Vec::new()));
     let _g = tracing::subscriber::set_default(
-        tracing_subscriber::registry().with(Capture(Arc::clone(&lines))),
+        tracing_subscriber::registry().with(Capture(target, Arc::clone(&lines))),
     );
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

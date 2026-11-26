@@ -784,4 +784,29 @@ mod tests {
             .clone();
         assert!(prompts.is_empty(), "no classification call: {prompts:?}");
     }
+
+    /// Mutation-verified: a consult withheld whole leaves one run-log entry saying mode
+    /// inference was skipped, and that entry carries nothing of the consult.
+    #[test]
+    fn a_consult_withheld_whole_logs_that_mode_inference_was_skipped() {
+        let d = "-----";
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        let content = format!("{d}BEGIN RSA PRIVATE KEY{d}\n{body}\n{d}END RSA PRIVATE KEY{d}");
+        let lines =
+            crate::agent::decide_classifier::target_lines("magi_rs::agent::mode_classifier", {
+                let content = content.clone();
+                async move {
+                    let classifier = ProviderClassifier::new(
+                        Arc::new(PromptRecorder::default()),
+                        Arc::new(RecordingNoticeSink::default()),
+                        test_auditor(),
+                    );
+                    assert_eq!(classifier.classify(&content).await, None);
+                }
+            });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = lines.first().map(String::as_str).unwrap_or_default();
+        assert!(line.contains("mode inference skipped"), "{line}");
+        assert!(!line.contains(body) && !line.contains("BEGIN"), "{line}");
+    }
 }
