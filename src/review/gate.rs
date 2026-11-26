@@ -3184,6 +3184,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_403_on_the_cloud_head_makes_the_gate_judge_with_the_local_model() {
+        // REQ-F13b end to end over the production client: a 403 is a refusal like a 401 (the
+        // client maps both to `Unauthorized`), so the gate leaves the `:cloud` head out for the
+        // rest of the review and judges every finding with the local model; the head is asked
+        // once. Mutation-verified: mapping only 401 to `Unauthorized` in the client turns this red.
+        let mut server = mockito::Server::new_async().await;
+        let head = served(&mut server, "clef:cloud", 403, "{}".into(), 1).await;
+        let body = json!({"model": "clef-flash", "answers": {GATE_QUESTION_NAME: {
+            "type": "choice", "choice": "real_defect",
+            "probabilities": {"real_defect": 0.95, "false_positive": 0.05}}}})
+        .to_string();
+        let fallback = served(&mut server, "clef-flash", 200, body, 2).await;
+        let client = served_gate_client(&server.url());
+        let mut g = Gate::new(&client, chain(), 61_000);
+        for line in [1, 2] {
+            let v = g
+                .judge(
+                    &finding(Severity::Warning, Some(line)),
+                    Some("x\nx\nx\n"),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                (v.state, v.model.as_deref(), v.cause),
+                (GateState::Kept, Some("clef-flash"), None),
+                "finding at line {line}"
+            );
+        }
+        assert_eq!(
+            g.stopped(),
+            None,
+            "a refused cloud head does not stop the gate"
+        );
+        head.assert_async().await;
+        fallback.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn a_413_or_422_stops_the_finding_on_its_status_and_is_never_remembered() {
         // [MAGI S6 loop 8, C2-c3] the memory keys on `DecisionError::Rejected { status }`, never
         // on the serialized `rejected` token a 413/422 shares with a 400: the head is asked
