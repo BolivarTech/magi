@@ -132,8 +132,40 @@ pub(crate) fn is_ollama_cloud_model(model: &str) -> bool {
     model.ends_with(OLLAMA_CLOUD_SUFFIX)
 }
 
-/// Hint the [`DecisionError::Unauthorized`] message appends after an Ollama cloud model.
-const CLOUD_SIGNIN_HINT: &str = "; for an Ollama `:cloud` model, run `ollama signin` instead";
+/// Hint the decision error messages append after a refused Ollama cloud model.
+const CLOUD_SIGNIN_HINT: &str = "; for an Ollama `:cloud` model, run `ollama signin`";
+/// What the [`DecisionError::Unauthorized`] message adds after [`CLOUD_SIGNIN_HINT`]: there the
+/// hint is the alternative to setting a key.
+const CLOUD_SIGNIN_INSTEAD: &str = " instead";
+
+/// The sign-in hint for a chain whose `trace` holds a 401 on an Ollama cloud model, else `""`.
+///
+/// The [`DecisionError::ChainExhausted`] and [`DecisionError::ModelUnavailable`] messages end
+/// with it: a signed-out daemon refuses only `:cloud` models, so a chain can rotate past that
+/// refusal and end on another cause. Complexity: O(attempts).
+///
+/// # Arguments
+/// * `trace` - the attempts of the call.
+///
+/// # Returns
+/// [`CLOUD_SIGNIN_HINT`] or the empty string.
+fn refused_cloud_hint(trace: &Trace) -> &'static str {
+    let refused = trace.attempts.iter().any(|attempt| {
+        is_ollama_cloud_model(&attempt.model)
+            && matches!(
+                attempt.outcome,
+                AttemptOutcome::Failed {
+                    cause: Cause::Unauthorized,
+                    ..
+                }
+            )
+    });
+    if refused {
+        CLOUD_SIGNIN_HINT
+    } else {
+        ""
+    }
+}
 
 /// The message of [`DecisionError::Unauthorized`] (REQ-F14).
 ///
@@ -155,7 +187,11 @@ fn unauthorized_message(status: u16, trace: &Trace) -> String {
     format!(
         "the decision endpoint refused the request credentials (HTTP {status}); set DECISION_API_KEY \
          in the environment or with `magi-rs vault set DECISION_API_KEY`{}",
-        if cloud { CLOUD_SIGNIN_HINT } else { "" }
+        if cloud {
+            format!("{CLOUD_SIGNIN_HINT}{CLOUD_SIGNIN_INSTEAD}")
+        } else {
+            String::new()
+        }
     )
 }
 
@@ -299,16 +335,22 @@ pub enum DecisionError {
         /// Name of the missing entry.
         entry: &'static str,
     },
-    /// An explicitly requested model gave no usable decision.
-    #[error("model '{model}' gave no usable decision")]
+    /// An explicitly requested model gave no usable decision; after a 401 on an Ollama `:cloud`
+    /// model, the message also names `ollama signin` (REQ-F14).
+    #[error("model '{model}' gave no usable decision{}", refused_cloud_hint(trace))]
     ModelUnavailable {
         /// The requested model.
         model: String,
         /// Attempts so far.
         trace: Trace,
     },
-    /// Every model of the chain failed or fell below its threshold.
-    #[error("no decision model answered: chain exhausted ({} attempts)", trace.attempts.len())]
+    /// Every model of the chain failed or fell below its threshold; after a 401 on an Ollama
+    /// `:cloud` model, the message also names `ollama signin` (REQ-F14).
+    #[error(
+        "no decision model answered: chain exhausted ({} attempts){}",
+        trace.attempts.len(),
+        refused_cloud_hint(trace)
+    )]
     ChainExhausted {
         /// Attempts made.
         trace: Trace,
