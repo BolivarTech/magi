@@ -1070,6 +1070,25 @@ mod tests {
         assert!(reason.contains("questions"), "{reason}");
     }
 
+    /// REQ-F12 (mutation-verified): the egress scan runs before validation, so a malformed
+    /// question whose name holds a secret is refused with the fixed reason; the validation
+    /// reason, which quotes the name, is never built from it.
+    #[test]
+    fn a_malformed_question_with_a_secret_name_is_refused_before_validation_quotes_it() {
+        let questions: Questions = serde_json::from_value(json!({SECRET_TOKEN: {
+            "type": "choice", "instructions": "Which kind?"}}))
+        .expect("map");
+        let err = DecisionRequest::new(json!({"ticket": "plain"}), questions)
+            .expect_err("a malformed question is refused");
+        assert!(!err.to_string().contains(SECRET_TOKEN), "{err}");
+        match err {
+            DecisionError::InvalidInput { reason } => {
+                assert_eq!(reason, QUESTIONS_SECRET_REFUSED);
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
     /// REQ-F12: a private-key block in a criteria value refuses the request too.
     #[test]
     fn questions_with_a_private_key_block_in_a_criteria_value_are_refused() {
