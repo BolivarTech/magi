@@ -117,6 +117,21 @@ impl Cause {
     }
 }
 
+/// Suffix of the tag of an Ollama model served from Ollama's cloud (`clef:cloud`); such a model
+/// needs `ollama signin` on the daemon, a local one does not.
+pub(crate) const OLLAMA_CLOUD_SUFFIX: &str = ":cloud";
+
+/// Whether `model` names an Ollama cloud model, by its [`OLLAMA_CLOUD_SUFFIX`].
+///
+/// # Arguments
+/// * `model` - a model name of the chain.
+///
+/// # Returns
+/// `true` when the name ends with `:cloud`.
+pub(crate) fn is_ollama_cloud_model(model: &str) -> bool {
+    model.ends_with(OLLAMA_CLOUD_SUFFIX)
+}
+
 /// Token consumption of one attempt or of a whole chain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
 pub struct Usage {

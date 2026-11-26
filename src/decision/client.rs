@@ -8,7 +8,7 @@
 use crate::decision::config::{KeepAlive, ModelSpec};
 use crate::decision::endpoint::{not_found_hint, systemone_url};
 use crate::decision::error::{
-    Attempt, AttemptOutcome, Cause, Decision, DecisionError, Trace, Usage,
+    is_ollama_cloud_model, Attempt, AttemptOutcome, Cause, Decision, DecisionError, Trace, Usage,
 };
 use crate::decision::protocol::{
     lowest_confidence, parse_response, salvage_usage, DecisionRequest, ParsedResponse,
@@ -380,6 +380,42 @@ fn elapsed_ms(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Whether the chain moves on to the next model after `cause` on `model` (REQ-F13).
+///
+/// [`Cause::rotates`] for every cause, except that a [`Cause::Unauthorized`] on an Ollama cloud
+/// model also rotates: a daemon without `ollama signin` refuses only its `:cloud` models and
+/// still serves the local ones. On any other model a 401 or 403 means a credential every model
+/// of the endpoint would refuse, so the call ends there.
+///
+/// # Arguments
+/// * `cause` - why the attempt failed.
+/// * `model` - the model of the attempt.
+///
+/// # Returns
+/// `true` when the next model of the chain is tried.
+fn rotates_for(cause: Cause, model: &str) -> bool {
+    cause.rotates() || (cause == Cause::Unauthorized && is_ollama_cloud_model(model))
+}
+
+/// The status of the last attempt of `trace` when it failed as [`Cause::Unauthorized`].
+///
+/// # Arguments
+/// * `trace` - the attempts of one call.
+///
+/// # Returns
+/// The HTTP status of that attempt (0 if none was recorded), or `None` when the last attempt
+/// is missing or ended otherwise.
+fn last_unauthorized_status(trace: &Trace) -> Option<u16> {
+    match trace.attempts.last().map(|attempt| &attempt.outcome) {
+        Some(AttemptOutcome::Failed {
+            cause: Cause::Unauthorized,
+            status,
+            ..
+        }) => Some(status.unwrap_or_default()),
+        _ => None,
+    }
+}
+
 impl SystemOneClient {
     /// The models to try: the explicit one alone (with the threshold of the declared model of that
     /// name, if any) or the whole configured chain.
@@ -457,7 +493,9 @@ impl SystemOneClient {
 impl DecisionClient for SystemOneClient {
     /// Walks the chain in order (or tries only the explicit model). An answer whose lowest
     /// confidence is under that model's `min_confidence` is recorded and the chain rotates; a
-    /// rejected answer is never returned (REQ-D20). An HTTP 400 rotates too; a chain in which
+    /// rejected answer is never returned (REQ-D20). A 401 or 403 on an Ollama `:cloud` model
+    /// rotates, and a chain whose last attempt was one ends as [`DecisionError::Unauthorized`]
+    /// (REQ-F13, see `rotates_for`). An HTTP 400 rotates too; a chain in which
     /// every attempt was a 400 ends as [`DecisionError::Rejected`] with status 400 and the last
     /// provider's message (DE01); any other ending is [`DecisionError::ChainExhausted`] (or
     /// [`DecisionError::ModelUnavailable`] for an explicit model).
@@ -520,7 +558,7 @@ impl DecisionClient for SystemOneClient {
                         usage: failure.usage,
                     };
                     self.record(&mut trace, attempt, latency_ms);
-                    if !failure.cause.rotates() {
+                    if !rotates_for(failure.cause, &spec.model) {
                         // The only causes that do not rotate end the call with their own error.
                         self.log_close(None, &trace, started);
                         let status = failure.status.unwrap_or_default();
@@ -538,6 +576,10 @@ impl DecisionClient for SystemOneClient {
             }
         }
         self.log_close(None, &trace, started);
+        // A chain that ended on a refused cloud model is a credential problem (REQ-F13).
+        if let Some(status) = last_unauthorized_status(&trace) {
+            return Err(DecisionError::Unauthorized { status, trace });
+        }
         // A chain entirely in 400 is still an invalid request, with the last message.
         if let Some(provider_message) = last_bad_request.filter(|_| only_bad_requests) {
             return Err(DecisionError::Rejected {
