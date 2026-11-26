@@ -8486,6 +8486,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn both_sides_of_one_unit_are_sent_when_they_fit_together() {
+        // F-S4, reverse half / REQ-F03: same numbers, two sides, and room for both. The
+        // precheck must not reject, and neither side may be merged away.
+        let rag = shared(
+            1,
+            |room| {
+                vec![
+                    unit_costing("NEW_SIDE", false, Some((1, 26)), room * 2 / 5),
+                    unit_costing("OLD_SIDE", true, Some((1, 26)), room * 2 / 5),
+                ]
+            },
+            None,
+        );
+        let dir = workspace(1);
+        let consult = FakeConsult::new(vec![Ok(real_report(empty()).await)]);
+        let r = review_with_rag(dir.path(), &rag, &consult, &gate_always("real_defect")).await;
+        let (room, cost) = rag.seen.lock().expect("lock")[0];
+        assert!(
+            cost <= room && 2 * cost > room,
+            "fixture: both sides together fit ({cost} of {room})"
+        );
+        r.expect("both sides fit in the batch");
+        assert_eq!(consult.calls(), 1);
+        let prompt = consult.prompts.lock().expect("lock")[0].clone();
+        assert_eq!(prompt.matches("NEW_SIDE").count(), 1, "{prompt}");
+        assert_eq!(prompt.matches("OLD_SIDE").count(), 1, "{prompt}");
+    }
+
+    #[tokio::test]
     async fn items_without_lines_are_never_merged_by_the_precheck() {
         // F-S5 / REQ-F02: same rule as `assemble`. Green in Red by design; red by mutation (a
         // `(0, 0)` key for an item without lines).
