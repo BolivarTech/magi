@@ -1252,6 +1252,26 @@ mod tests {
         );
     }
 
+    /// REQ-F13: a 403 on a `:cloud` model is a refusal like a 401, so it rotates the same way
+    /// and a local model of the chain answers.
+    #[tokio::test]
+    async fn a_forbidden_cloud_model_rotates_to_the_next_model() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "clef:cloud", 403, "{}".to_string()).await;
+        mock_model(&mut server, "nimble", 200, OK_BODY.to_string()).await;
+        let d = decide(
+            settings(&server.url(), &["clef:cloud", "nimble"]),
+            &request(),
+        )
+        .await
+        .expect("nimble answers");
+        assert_eq!(d.model, "nimble");
+        assert_eq!(
+            outcomes(&d.trace),
+            vec!["clef:cloud:unauthorized", "nimble:answered"]
+        );
+    }
+
     /// REQ-F13: a cloud model alone (explicit), or a chain of cloud models all refused, ends as
     /// `Unauthorized`, not as an exhausted chain.
     #[tokio::test]
