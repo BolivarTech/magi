@@ -44,6 +44,15 @@ const STATE_REQUEST_FIELD: &str = "request";
 /// Content whose serialized state, once masked (REQ-F12), exceeds the configured
 /// `[decision].max_state_bytes` goes straight to the fallback: a decision over truncated text
 /// looks as sure as one over the whole text (D-PM-1).
+///
+/// The limit is checked twice. The raw state is measured first, so content already over the
+/// limit costs one serialization and is never masked: masking costs CPU in proportion to the
+/// content, and the consult content has no size bound of its own. A state within the limit is
+/// then masked and measured again, since a mask can be longer than the secret it replaces.
+/// Declared cost: a raw state over the limit whose masking would have shrunk it under the limit
+/// also goes to the LLM. That is the conservative direction: nothing leaves for `decide` that
+/// was not measured.
+///
 /// Every fallback leaves one run-log entry and nothing on any screen.
 pub struct DecideModeClassifier {
     /// Decision client, or `None` when it could not be built.
@@ -140,6 +149,17 @@ pub(crate) fn last_attempt_detail(error: &DecisionError) -> Option<&str> {
     }
 }
 
+/// Serialized size of a JSON value, in bytes, as the limit counts it. O(size of the value).
+///
+/// # Arguments
+/// * `value` - The state to measure.
+///
+/// # Returns
+/// Its serialized length, or `usize::MAX` when it cannot be serialized (over any limit).
+fn serialized_len(value: &serde_json::Value) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |v| v.len())
+}
+
 /// The mode chosen by the first `choice` answer of a decision.
 ///
 /// # Arguments
@@ -167,6 +187,11 @@ impl ModeClassifier for DecideModeClassifier {
                 .await;
         };
         let state = json!({ STATE_REQUEST_FIELD: content });
+        // Raw pre-check: masking costs CPU in proportion to the content, so a state already over
+        // the limit is never masked (a mask may only grow it past the post-mask check below).
+        if serialized_len(&state) > self.max_state_bytes {
+            return self.fall_back(content, FallbackCause::TooLarge, None).await;
+        }
         let request = match DecisionRequest::new(state, mode_questions()) {
             Ok(request) => request,
             Err(e) => {
@@ -176,8 +201,7 @@ impl ModeClassifier for DecideModeClassifier {
             }
         };
         // The limit bounds what is sent: the state `new` already masked (REQ-F12).
-        let state_bytes = serde_json::to_vec(request.state()).map_or(usize::MAX, |v| v.len());
-        if state_bytes > self.max_state_bytes {
+        if serialized_len(request.state()) > self.max_state_bytes {
             return self.fall_back(content, FallbackCause::TooLarge, None).await;
         }
         match client.decide(&request).await {
