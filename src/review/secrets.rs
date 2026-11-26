@@ -2620,6 +2620,33 @@ mod tests {
         assert!(!leaks_secret("fn f() {}\n"));
     }
 
+    /// The question, field-name and model refusals of `decide` ask `leaks_secret` alone, so it
+    /// must answer true for every private-key block form the detector knows: PEM, OpenPGP,
+    /// SSH2 and a header spelled without its spaces, plus every key-block entry of the shared
+    /// corpus.
+    #[test]
+    fn leaks_secret_holds_every_private_key_block_form() {
+        let (b, k) = (PEM_BEGIN, PEM_PRIVATE_KEY);
+        let forms = [
+            format!("{b}RSA {k}\nMIIBOgIBAAJBAK\n"),
+            format!("{PGP_PRIVATE_KEY}\nlQOYBF\n"),
+            format!("{SSH2_PLAIN_PRIVATE_KEY}\nAAAAB3NzaC1yc2E\n"),
+            format!("{b}RSA {k}\nMIIBOg\n").replace("BEGIN RSA", "BEGINRSA"),
+        ];
+        let corpus_blocks: Vec<String> = withheld_corpus()
+            .into_iter()
+            .filter(|t| holds_key_block(t))
+            .collect();
+        assert!(
+            !corpus_blocks.is_empty(),
+            "fixture: the corpus holds key blocks"
+        );
+        for text in forms.iter().chain(&corpus_blocks) {
+            assert!(holds_key_block(text), "fixture: a key block {text:?}");
+            assert!(leaks_secret(text), "{text:?}");
+        }
+    }
+
     #[test]
     fn a_token_glued_across_a_hidden_char_to_a_word_char_is_masked() {
         // [MAGI S6 MS3 loop20, R6a2 Melchior] the left boundary was read on a strip view's bytes:
