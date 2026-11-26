@@ -1722,8 +1722,9 @@ const MAX_NAMED_UNITS: usize = 3;
 /// function do not read as one unit named twice.
 const OLD_SIDE_SUFFIX: &str = " (old side)";
 
-/// Most characters of a unit label that message writes (REQ-F15): 80 keeps each named unit
-/// within one terminal line. A label comes from the reviewed code and has no length bound.
+/// Most characters of a unit label that message writes (REQ-F15). A label comes from the
+/// reviewed code and has no length bound. The 80 characters are counted before the message's
+/// control characters are escaped, so a label that holds some can print wider than 80 columns.
 const MAX_UNIT_LABEL_CHARS: usize = 80;
 
 /// Written after a label cut to [`MAX_UNIT_LABEL_CHARS`].
@@ -1734,7 +1735,9 @@ const LABEL_CUT_MARK: &str = "...";
 ///
 /// The masking comes first so the cut cannot split a secret-shaped token into a prefix the
 /// masking would no longer recognize. The cut counts characters, never bytes, so it always
-/// lands on a character boundary. Complexity O(n) for a label of n bytes.
+/// lands on a character boundary, and it counts them before escaping: the `Display` of the
+/// error escapes control characters afterwards, which can lengthen the printed label.
+/// Complexity O(n) for a label of n bytes.
 ///
 /// # Arguments
 ///

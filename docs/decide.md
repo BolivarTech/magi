@@ -31,7 +31,7 @@ Models used by the scaffold that `magi init` writes:
 | `togethercomputer/tev1-4b-experimental` | OpenRouter | fallback in the example |
 | `upstage/solar-decide` | OpenRouter | fallback in the example |
 
-`clef:cloud` needs Ollama 0.40.5 or later and `ollama signin`. It spends the Ollama account's quota, and every decision state goes to ollama.com, including the internal decisions (the mode of a consult and the memory contradiction check). Without `ollama signin` the daemon refuses `clef:cloud` with HTTP 401 and the chain moves on to `nimble`, which the daemon serves locally. A 401 on a model that is not a `:cloud` one still stops the chain. When the last model tried is refused, the call fails with `missing_key`, and the message names `ollama signin` only if that model is a `:cloud` one. Before any request is sent, every string value in the state goes through the same secret detector as a code review, so an API key, a token or a password in a URL leaves as `<redacted: ...>`; object keys are not changed. The local models have to be pulled once:
+`clef:cloud` needs Ollama 0.40.5 or later and `ollama signin`. It spends the Ollama account's quota, and every decision state goes to ollama.com, including the internal decisions (the mode of a consult and the memory contradiction check). Without `ollama signin` the daemon refuses `clef:cloud` with HTTP 401 and the chain moves on to `nimble`, which the daemon serves locally. A 401 on a model that is not a `:cloud` one still stops the chain. When the last model tried is refused, the call fails with `missing_key`, and the message names `ollama signin` only if that model is a `:cloud` one. A chain that went past a refused `:cloud` model and then ended for another reason names `ollama signin` too. Before any request is sent, every string value in the state goes through the same secret detector as a code review, so an API key, a token or a password in a URL leaves as `<redacted: ...>`; object keys are not changed. The local models have to be pulled once:
 
 ```bash
 ollama pull nimble
@@ -109,7 +109,7 @@ Keys never go in `magi.toml`.
 }
 ```
 
-`state` may be a string, an object or an array, and it is forwarded as it is. An optional `"model"` replaces the primary model for that run; only that model is tried, with no fallbacks. Fields the protocol does not define are rejected. A question without `instructions`, or with only blank space in them, is rejected before any model is called, with an error that names the question.
+`state` may be a string, an object or an array. Its string values are masked with the code review's secret detector before it is sent; object keys are not. A state that holds a private-key block, or a secret that survives masking, is refused, and so are questions that hold a secret, since questions are never masked (see "What leaves your machine"). An optional `"model"` replaces the primary model for that run; only that model is tried, with no fallbacks. Fields the protocol does not define are rejected. A question without `instructions`, or with only blank space in them, is rejected before any model is called, with an error that names the question.
 
 To reuse the same questions with a changing state, put just the question map in a file and pass it with `-q`; the request then carries only `state` and, optionally, `model`. Sending `questions` in both places is an error.
 
@@ -119,7 +119,7 @@ Ollama enforces its own limits, and `magi-rs` passes its rejection back to you:
 
 - 1 to 64 questions per request;
 - 2 to 26 options per `choice`;
-- a request body of at most 64 KiB.
+- with a local model, a request body of at most 64 KiB (measured with `clef-flash` in v0.24.0; `clef:cloud` accepted states of 131 087 bytes without a rejection on 2026-11-26).
 
 An HTTP 400 means this model refused the request, so the chain moves on to the next model: the refusal often belongs to the model (an unsupported model format, a cloud model on an older daemon, a context window too small for the state). A request that every model refuses ends as `invalid_input`, with the last provider's message and the whole chain. HTTP 413 and 422 are reported as `invalid_input` right away and the chain does not move on, because every model on the endpoint would reject them the same way. Locally, `magi-rs` refuses a request with no questions, a question without `instructions`, a `choice` or `score` without `criteria`, or fewer than 2 options or levels.
 
@@ -159,7 +159,7 @@ Two choices that used to cost a main-model call go to the decision models first:
 - If the chain cannot answer (endpoint down, timeout, invalid answer, or every model under its threshold), the main model answers instead. Nothing is shown in the TUI or on the terminal.
 - Each fallback is logged, one entry per occurrence, never merged, with its cause: one of the attempt causes below, or `too_large`, `low_confidence`, `client_unavailable` or `skipped_after_failure`.
 - In one memory-distillation pass, once an attempt fails at the transport level, the remaining pairs of that pass go straight to the main model. The next pass tries `decide` again.
-- Mode inference sends at most `[decision].max_state_bytes` of the consult: 128 000 bytes by default, sized for the 64 000-token window of `typesafe/jev-1.13` (about 4 bytes per token of English text), and 61 000 in the file `magi init` writes, the request size the local `clef-flash` accepted in the calibration. Raise it, or delete the line, when the decision model is hosted. Ollama rejects a request body over 64 KiB before loading the model, so with Ollama a larger limit only means the main model answers instead. Larger content goes straight to the main model without calling `decide`, and the content is never truncated.
+- Mode inference sends at most `[decision].max_state_bytes` of the consult: 128 000 bytes by default, sized for the 64 000-token window of `typesafe/jev-1.13` (about 4 bytes per token of English text), and 61 000 in the file `magi init` writes. That 61 000 bounds the consults the threshold was calibrated on, and what leaves for ollama.com with the default `clef:cloud`. A local Ollama daemon refused request bodies over 64 KiB for `clef-flash` before loading it, so with a local model a larger limit only means the main model answers instead. Larger content goes straight to the main model without calling `decide`, and the content is never truncated.
 - Explicit calls (`magi-rs decide`, `/decide`, the tool) never fall back to the main model. It could only invent the probabilities.
 
 ## Output
@@ -234,10 +234,10 @@ Every use of `decide` sends text to the endpoint in `[decision]`:
 
 - `magi-rs decide` and `/decide` send the `state` you give, the questions and the model name.
 - Mode inference sends the content of the consult, up to `[decision].max_state_bytes`.
-- The contradiction check sends pairs of memories exactly as stored, without redaction. The main model already received them the same way.
+- The contradiction check sends pairs of memories. The main model already received them.
 - The `decide` tool sends the `state` the agent builds.
 
-With the default local Ollama nothing leaves the machine. With a hosted provider, that text goes to it, as prompts go to your main model's provider. The `state` is not written to the log or repeated in the output. Setting `[memory].distill_enabled = false` turns off both memory judges.
+Before anything is sent, the string values of the state are masked with the code review's secret detector. Object keys are not masked. A state that holds a private-key block, or a secret that is still there after masking, is refused and never sent; so are questions that hold a secret, because questions are never masked. With the default `clef:cloud` the states go to ollama.com. Set `model = "clef-flash"` to keep decisions on your machine. With another hosted provider, the text goes to it, as prompts go to your main model's provider. The `state` is not written to the log or repeated in the output. Setting `[memory].distill_enabled = false` turns off both memory judges.
 
 ## Costs
 

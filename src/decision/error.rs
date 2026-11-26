@@ -123,6 +123,11 @@ pub(crate) const OLLAMA_CLOUD_SUFFIX: &str = ":cloud";
 
 /// Whether `model` names an Ollama cloud model, by its [`OLLAMA_CLOUD_SUFFIX`].
 ///
+/// It tests the name only: case-sensitive, and blind to the provider. A model of another
+/// provider whose name ends in `:cloud` is taken for one, which costs at most one extra refused
+/// call on the same endpoint when a chain rotates past its 401, plus a sign-in hint that does not
+/// apply; no key is sent anywhere new.
+///
 /// # Arguments
 /// * `model` - a model name of the chain.
 ///

@@ -64,8 +64,9 @@ model        = "clef:cloud"
 # model      = "clef-flash"  # local alternative, needs ollama pull clef-flash
 # Per-attempt timeout in seconds (covers a local cold load). Optional, default 120.
 # `clef:cloud` runs in Ollama's cloud: it needs Ollama 0.40.5 or later and `ollama signin`,
-# spends the Ollama account's quota, and sends each decision state to ollama.com. The fallback
-# `nimble` runs locally; its cold load took 14.3 s (RTX 5060 Ti, 16 GB). Other hardware will differ.
+# spends the Ollama account's quota, and sends each decision state to ollama.com, its secrets
+# masked first. The fallback `nimble` runs locally; its cold load took 14.3 s (RTX 5060 Ti,
+# 16 GB). Other hardware will differ.
 timeout_secs = 120
 # Ollama only. Optional: absent = not sent (server default). "10m", "2h", or -1 (keep loaded).
 # keep_alive = "10m"

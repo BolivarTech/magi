@@ -80,8 +80,10 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// Largest serialized mode-inference `state`, in UTF-8 bytes, sent to `decide` when
 /// `[decision].max_state_bytes` is absent (D-PM-1). Sized for `typesafe/jev-1.13`, whose window
 /// is 64 000 tokens: at roughly 4 bytes per token of English text, 128 000 bytes stay well inside
-/// it. Ollama rejects any request body over 64 KiB before loading the model, so with Ollama a
-/// larger state just falls back to the main model at no cost.
+/// it. A local Ollama daemon refused request bodies over 64 KiB for the local `clef-flash`
+/// before loading it (measured in v0.24.0), so with a local model a larger state just falls back
+/// to the main model at no cost; `clef:cloud` accepted states up to 131 087 bytes with no
+/// rejection (measured 2026-11-26).
 pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 128_000;
 /// State limit the scaffold writes, active. It is not a limit of the daemon: a size probe of
 /// `clef:cloud` on 2026-11-26 accepted states up to 131 087 bytes without a rejection. 61 000 is
@@ -139,8 +141,10 @@ pub const DEFAULT_CODE_REVIEW_FALLBACKS: [(&str, f64); 2] =
 /// HTTP timeout of each gate call, in seconds; sized like `[decision]` to cover a cold load.
 pub const DEFAULT_CODE_REVIEW_TIMEOUT_SECS: u64 =
     magi_rs::review::config::DEFAULT_CALL_TIMEOUT_SECS;
-/// Largest serialized gate `state`, in bytes: the request-size cap measured with the local
-/// `clef-flash` model. A larger state is never truncated: the finding passes unjudged.
+/// Largest serialized gate `state`, in bytes. It was measured as the request-body cap of the
+/// local `clef-flash` model and is kept for the gate's whole chain, whose local fallbacks still
+/// need it (`clef:cloud` accepted decision states up to 131 087 bytes on 2026-11-26). A larger
+/// state is never truncated: the finding passes unjudged.
 pub const DEFAULT_CODE_REVIEW_MAX_STATE_BYTES: usize = 61_000;
 /// Whether the agent's `code-review` tool runs without asking: a review costs one consult per
 /// batch, so it asks by default, like `consult`.
@@ -920,9 +924,11 @@ pub fn render_default_magi_toml() -> String {
     out.push_str(concat!(
         "# `clef:cloud` runs in Ollama's cloud: it needs Ollama 0.40.5 or later and `ollama signin`,
 ",
-        "# spends the Ollama account's quota, and sends each decision state to ollama.com. The fallback
+        "# spends the Ollama account's quota, and sends each decision state to ollama.com, its secrets
 ",
-        "# `nimble` runs locally; its cold load took 14.3 s (RTX 5060 Ti, 16 GB). Other hardware will differ.
+        "# masked first. The fallback `nimble` runs locally; its cold load took 14.3 s (RTX 5060 Ti,
+",
+        "# 16 GB). Other hardware will differ.
 ",
     ));
     writeln!(out, "timeout_secs = {}", DEFAULT_DECISION_TIMEOUT_SECS).unwrap();
@@ -2539,12 +2545,12 @@ mod tests {
     }
 
     #[test]
-    fn the_scaffold_writes_an_active_state_limit_sized_for_the_local_model() {
+    fn the_scaffold_writes_an_active_state_limit_within_the_calibrated_sizes() {
         let d = scaffold_decision();
         assert_eq!(
             d.get("max_state_bytes").and_then(toml::Value::as_integer),
             Some(61_000),
-            "the scaffold limit is active and fits the local Ollama request-body cap"
+            "the scaffold limit is active and bounds the states the threshold was calibrated on"
         );
         let text = render_default_magi_toml();
         let comment_names_the_hosted_default = text
