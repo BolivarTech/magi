@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::decision::config::KeepAlive;
 use crate::decision::error::{DecisionError, Usage};
-use crate::review::secrets::mask_secrets;
+use crate::review::secrets::{find_secret, holds_key_block, mask_secrets};
 
 /// Questions of a request, keyed by name; the map order is the wire order.
 pub type Questions = BTreeMap<String, Question>;
@@ -77,6 +77,11 @@ const INPUT_FIELDS: [&str; 3] = [STATE_FIELD, QUESTIONS_FIELD, MODEL_FIELD];
 /// Problem reported for a question without usable `instructions`.
 const INSTRUCTIONS_REQUIRED: &str =
     "`instructions` is required (a non-empty description of what to decide)";
+/// Problem reported for a state holding a private-key block; quotes nothing of the state.
+const KEY_BLOCK_REFUSED: &str = "the state holds a private-key block and is never sent";
+/// Problem reported for a state that still holds a secret after masking; quotes nothing of it.
+const RESIDUAL_SECRET_REFUSED: &str =
+    "the state still holds a secret after masking and is never sent";
 
 /// Builds the error every validation failure of this module returns.
 fn invalid(reason: impl Into<String>) -> DecisionError {
@@ -179,6 +184,18 @@ fn mask_state_strings(state: &mut Value) {
     }
 }
 
+/// Whether `holds` is true of any string of `state`, object keys included.
+fn state_holds(state: &Value, holds: &dyn Fn(&str) -> bool) -> bool {
+    match state {
+        Value::String(text) => holds(text),
+        Value::Array(items) => items.iter().any(|item| state_holds(item, holds)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, item)| holds(key) || state_holds(item, holds)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
 /// A validated request: state, questions and per-invocation overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRequest {
@@ -194,10 +211,13 @@ impl DecisionRequest {
     ///
     /// Every path that sends a decision (the CLI and TUI `decide`, the `decide` tool and the
     /// internal adapters) builds its request here, so no state leaves the process with a
-    /// secret-shaped token in a string value; see `mask_state_strings`. A size limit applied to
+    /// secret-shaped token in a string value; see `mask_state_strings`. It fails closed like the
+    /// review gate: a state any string (value or key) of which holds a private-key block is
+    /// refused before masking, since a key body matches no pattern, and a state that still holds
+    /// a secret after masking (keys are never masked) is refused too. A size limit applied to
     /// the state must measure [`DecisionRequest::state`], the masked state that is sent.
     ///
-    /// Complexity: O(questions) plus O(size of the state) for the masking.
+    /// Complexity: O(questions) plus O(size of the state) for the checks and the masking.
     ///
     /// # Arguments
     /// * `state` - a string, object or array; its string values are masked, the rest is kept.
@@ -207,10 +227,17 @@ impl DecisionRequest {
     /// The validated request, without model or timeout override.
     ///
     /// # Errors
-    /// [`DecisionError::InvalidInput`] naming the problem.
+    /// [`DecisionError::InvalidInput`] naming the problem; for a refused state, a fixed reason
+    /// that quotes nothing of it.
     pub fn new(mut state: Value, questions: Questions) -> Result<Self, DecisionError> {
         validate(&state, &questions)?;
+        if state_holds(&state, &holds_key_block) {
+            return Err(invalid(KEY_BLOCK_REFUSED));
+        }
         mask_state_strings(&mut state);
+        if state_holds(&state, &|text| find_secret(text).is_some()) {
+            return Err(invalid(RESIDUAL_SECRET_REFUSED));
+        }
         Ok(Self {
             state,
             questions,
