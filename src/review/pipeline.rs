@@ -1722,15 +1722,47 @@ const MAX_NAMED_UNITS: usize = 3;
 /// function do not read as one unit named twice.
 const OLD_SIDE_SUFFIX: &str = " (old side)";
 
+/// Most characters of a unit label that message writes (REQ-F15): 80 keeps each named unit
+/// within one terminal line. A label comes from the reviewed code and has no length bound.
+const MAX_UNIT_LABEL_CHARS: usize = 80;
+
+/// Written after a label cut to [`MAX_UNIT_LABEL_CHARS`].
+const LABEL_CUT_MARK: &str = "...";
+
+/// A unit label as that message writes it: its secrets masked, then at most
+/// [`MAX_UNIT_LABEL_CHARS`] characters followed by [`LABEL_CUT_MARK`] when it was longer.
+///
+/// The masking comes first so the cut cannot split a secret-shaped token into a prefix the
+/// masking would no longer recognize. The cut counts characters, never bytes, so it always
+/// lands on a character boundary. Complexity O(n) for a label of n bytes.
+///
+/// # Arguments
+///
+/// * `label` - The raw unit label.
+///
+/// # Returns
+///
+/// The bounded label.
+fn bounded_label(label: &str) -> String {
+    let masked = mask_secrets(label);
+    let mut chars = masked.chars();
+    let mut bounded: String = chars.by_ref().take(MAX_UNIT_LABEL_CHARS).collect();
+    if chars.next().is_some() {
+        bounded.push_str(LABEL_CUT_MARK);
+    }
+    bounded
+}
+
 /// Builds the `what` of a `TooLargeForBatch` error: the batch number (from 1) and the
 /// costliest containing units that made it exceed the limit.
 ///
 /// Names at most [`MAX_NAMED_UNITS`] units, from costliest to cheapest; equal costs keep the
 /// order of `units`. Each reads `{label} of {file}{side} ({tokens} tokens)`, the file written
 /// through `display_path`; the list ends with ` and {k} more` when `k` units were left out.
-/// With no units the message is only `batch {n} with its containing units`. The labels are
-/// raw: the `Display` of `ReviewError` sanitizes the whole `what`. Complexity O(u log u) for
-/// `u` units, from the ordering.
+/// With no units the message is only `batch {n} with its containing units`. Each label is
+/// masked and bounded to [`MAX_UNIT_LABEL_CHARS`] characters by `bounded_label` (REQ-F15);
+/// the `Display` of `ReviewError` still sanitizes the whole `what`. Complexity O(u log u) for
+/// `u` units, from the ordering, plus O(bytes) of the named labels.
 ///
 /// # Arguments
 ///
@@ -1763,7 +1795,7 @@ fn units_over_limit(batch_index: usize, units: &[ContextItem]) -> String {
         let side = if unit.old_side { OLD_SIDE_SUFFIX } else { "" };
         entries.push(format!(
             "{} of {}{} ({} tokens)",
-            unit.label,
+            bounded_label(&unit.label),
             display_path(&unit.file),
             side,
             cost
