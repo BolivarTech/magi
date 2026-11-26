@@ -1225,12 +1225,7 @@ mod tests {
             let v = g
                 .judge(
                     &finding(Severity::Warning, Some(1)),
-                    Some(
-                        "x
-x
-x
-",
-                    ),
+                    Some("x\nx\nx\n"),
                     None,
                 )
                 .await;
@@ -1260,17 +1255,196 @@ x
         let v = g
             .judge(
                 &finding(Severity::Warning, Some(1)),
-                Some(
-                    "x
-x
-x
-",
-                ),
+                Some("x\nx\nx\n"),
                 None,
             )
             .await;
         assert_eq!(v.cause, Some("unauthorized"));
         assert_eq!(g.stopped(), Some("unauthorized"));
+    }
+
+    /// A chain of `models`, none with a threshold.
+    fn specs(models: &[&str]) -> Vec<ModelSpec> {
+        models
+            .iter()
+            .map(|model| ModelSpec {
+                model: (*model).into(),
+                min_confidence: None,
+            })
+            .collect()
+    }
+
+    fn unauthorized() -> Result<Decision, DecisionError> {
+        Err(DecisionError::Unauthorized {
+            status: 401,
+            trace: Trace::default(),
+        })
+    }
+
+    /// REQ-F13b (mutation-verified): the walk goes on past a refused `:cloud` model only when a
+    /// later model is still eligible. Here the chain has a later entry, `y`, but a 400 earlier in
+    /// the review took it out, so the 401 on `x:cloud` stops the gate.
+    #[tokio::test]
+    async fn a_refused_cloud_model_with_no_later_eligible_model_stops_the_gate() {
+        let cloud_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&cloud_calls);
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().returning(move |r| {
+            let model = r.model().unwrap_or("").to_string();
+            if model != "x:cloud" {
+                bad_request(&model)
+            } else if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                answer(&model, "real_defect", 0.1) // under its threshold: the walk goes on
+            } else {
+                unauthorized()
+            }
+        });
+        let mut chain = specs(&["x:cloud", "y"]);
+        if let Some(head) = chain.first_mut() {
+            head.min_confidence = Some(0.40);
+        }
+        let mut g = Gate::new(&c, chain, 61_000);
+        let first = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
+            .await;
+        assert_eq!(
+            first.skipped,
+            vec!["y".to_string()],
+            "fixture: y answered 400"
+        );
+        assert_eq!(g.stopped(), None, "fixture: nothing stopped the gate yet");
+        let second = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
+            .await;
+        assert_eq!(second.cause, Some("unauthorized"));
+        assert_eq!(g.stopped(), Some("unauthorized"));
+    }
+
+    /// REQ-F13b (mutation-verified): a refused `:cloud` head is not an answer, so a chain whose
+    /// other models all fail for transport gives `transport` on the finding that met the 401 and
+    /// on every later one alike.
+    #[tokio::test]
+    async fn a_refused_cloud_head_before_transport_failures_gives_one_cause_throughout() {
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().returning(|r| {
+            let model = r.model().unwrap_or("").to_string();
+            if model.ends_with(":cloud") {
+                unauthorized()
+            } else {
+                timed_out(&model)
+            }
+        });
+        let mut g = Gate::new(&c, specs(&["x:cloud", "y"]), 61_000)
+            .with_call_timeout(std::time::Duration::from_secs(120));
+        let mut causes = Vec::new();
+        for _ in 0..2 {
+            let v = g
+                .judge(
+                    &finding(Severity::Warning, Some(1)),
+                    Some("x\nx\nx\n"),
+                    None,
+                )
+                .await;
+            causes.push(v.cause);
+        }
+        assert_eq!(causes, vec![Some("transport"), Some("transport")]);
+        assert_eq!(g.stopped(), None);
+    }
+
+    /// REQ-F13b boundary (mutation-verified): after a refused `:cloud` head, a 401 on a model that
+    /// is not `:cloud`, in the middle of the chain, stops the gate; the model after it is never
+    /// asked and later findings make no call.
+    #[tokio::test]
+    async fn a_local_401_after_a_refused_cloud_head_stops_the_gate() {
+        let calls = Arc::new(std::sync::Mutex::new(BTreeMap::<String, usize>::new()));
+        let seen = Arc::clone(&calls);
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().returning(move |r| {
+            let model = r.model().unwrap_or("").to_string();
+            *seen
+                .lock()
+                .expect("calls")
+                .entry(model.clone())
+                .or_default() += 1;
+            if model == "z" {
+                answer(&model, "real_defect", 0.9)
+            } else {
+                unauthorized()
+            }
+        });
+        let mut g = Gate::new(&c, specs(&["x:cloud", "mid", "z"]), 61_000);
+        let first = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
+            .await;
+        assert_eq!(first.cause, Some("unauthorized"));
+        assert_eq!(g.stopped(), Some("unauthorized"));
+        let later = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
+            .await;
+        assert_eq!(later.cause, Some("unauthorized"));
+        let calls = calls.lock().expect("calls");
+        assert_eq!(calls.get("x:cloud"), Some(&1));
+        assert_eq!(calls.get("mid"), Some(&1));
+        assert_eq!(calls.get("z"), None, "the gate stopped before z");
+    }
+
+    /// REQ-F13b (mutation-verified): each refused `:cloud` model leaves one WARN entry in the run
+    /// log, once for the whole review however many findings follow.
+    #[tokio::test]
+    async fn each_refused_cloud_model_logs_one_warn_for_the_review() {
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Count(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Count {
+            fn on_event(
+                &self,
+                e: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if e.metadata().target() == GATE_LOG_TARGET
+                    && *e.metadata().level() == tracing::Level::WARN
+                {
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+        let count = Count::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(count.clone()));
+        let calls = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let c = signed_out_daemon(Arc::clone(&calls));
+        let mut g = Gate::new(&c, specs(&["a:cloud", "b:cloud", "local"]), 61_000);
+        for _ in 0..3 {
+            let v = g
+                .judge(
+                    &finding(Severity::Warning, Some(1)),
+                    Some("x\nx\nx\n"),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                v.state,
+                GateState::Kept,
+                "fixture: the local model judged it"
+            );
+        }
+        assert_eq!(count.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     fn answer(model: &str, choice: &str, confidence: f64) -> Result<Decision, DecisionError> {
