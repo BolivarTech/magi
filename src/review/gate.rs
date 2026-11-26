@@ -28,7 +28,10 @@ use crate::decision::{
 
 use super::config::DEFAULT_CALL_TIMEOUT_SECS;
 use super::consolidate::ConsolidatedFinding;
-use super::secrets::{any_string, holds_key_block, leaks_secret, masked_strings, REDACTED_OPEN};
+use super::secrets::{
+    any_string, holds_key_block, joined_strings_hold_key_block, leaks_secret, masked_strings,
+    REDACTED_OPEN,
+};
 
 /// Name of the gate's only question.
 pub const GATE_QUESTION_NAME: &str = "gate";
@@ -966,21 +969,23 @@ impl<'a> Gate<'a> {
     /// `state` as it may be sent, or why it cannot be. The code was already checked for a
     /// private-key block overlapping the window before the window was cut ([`Self::decide`],
     /// `window_overlaps_key_block`), so here a string holding one is the finding's own text
-    /// (`a_state_whose_own_text_quotes_a_key_block_is_never_sent`). Such a string
-    /// withholds it (`secret`: RV22's exception, a key body has no pattern of its own); otherwise
+    /// (`a_state_whose_own_text_quotes_a_key_block_is_never_sent`). The strings and keys are read
+    /// joined ([`joined_strings_hold_key_block`]), so a header in one string and its body in
+    /// another withhold the state too (`secret`: RV22's exception, a key body has no pattern of
+    /// its own); otherwise
     /// every one-line secret of every string is masked ([`masked_strings`]), and the masked state
     /// is withheld when it is over `max_state_bytes` (`state too large`) or masking left what the
     /// one egress predicate ([`leaks_secret`]) withholds
     /// (`secret`). O(bytes of the state).
     ///
-    /// Declared limit (RV22): the check is per string, so key-body lines quoted in a detail
-    /// without their header in that same string are not recognized here; the filter's file-level
-    /// rule (a file holding a block is left out) and the window check above come first.
+    /// Declared limit (RV22): key-body lines quoted with no header anywhere in the state are not
+    /// recognized here, nor a header split across two strings; the filter's file-level rule (a
+    /// file holding a block is left out) and the window check above come first.
     ///
     /// # Errors
     /// The cause the state is withheld for.
     fn sendable(&self, state: Value) -> Result<Value, &'static str> {
-        if any_string(&state, &holds_key_block) {
+        if joined_strings_hold_key_block(&state) {
             return Err(CAUSE_SECRET);
         }
         let state = masked_strings(state);

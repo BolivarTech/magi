@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use magi_rs::review::secrets::outward_prompt_text;
+use magi_rs::review::secrets::outward_prompt_texts;
 
 use crate::agent::messages::Message;
 use crate::agent::provider::Provider;
@@ -21,8 +21,9 @@ use crate::memory::store::Memory;
 /// [`DistillJudge`] backed by the configured chat provider (REQ-17, agnostic).
 ///
 /// Bounded prompts only; API keys are never logged or serialised (REQ-21). Every memory text
-/// goes through [`outward_prompt_text`] before it is embedded in a prompt: one-line secrets are
-/// masked and a text holding a private-key block is withheld whole. The main model is a cloud
+/// goes through [`outward_prompt_texts`] before it is embedded in a prompt: one-line secrets are
+/// masked and a text holding a private-key block is withheld whole, with every memory after it
+/// in the same prompt, which may carry that block's body. The main model is a cloud
 /// one by default, and this judge is also the fallback of the `decide` contradiction judge.
 /// Provider errors are propagated as typed [`MemoryError`] so the distiller's
 /// CP2-Z non-fatal handler catches them without panic.
@@ -44,11 +45,8 @@ impl DistillJudge for LlmDistillJudge {
             return Ok(vec![]);
         }
 
-        let texts = episodic
-            .iter()
-            .map(|m| outward_prompt_text(&m.text))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let texts = episodic.iter().map(|m| m.text.as_str()).collect::<Vec<_>>();
+        let texts = outward_prompt_texts(&texts).join("\n");
 
         let prompt = format!(
             "From the following user turns, list durable user preferences, one per line, \
@@ -92,7 +90,12 @@ impl DistillJudge for LlmDistillJudge {
     }
 
     async fn contradicts(&self, a: &str, b: &str) -> Result<bool, MemoryError> {
-        let (a, b) = (outward_prompt_text(a), outward_prompt_text(b));
+        // One outward text per input text, in order; B is withheld after a block in A.
+        let mut pair = outward_prompt_texts(&[a, b]).into_iter();
+        let (a, b) = (
+            pair.next().unwrap_or_default(),
+            pair.next().unwrap_or_default(),
+        );
         let prompt = format!(
             "Does statement B contradict or supersede statement A about the same subject? \
              Answer only yes or no.\nA: {a}\nB: {b}"

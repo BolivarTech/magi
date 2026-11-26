@@ -11,7 +11,9 @@ use serde_json::Value;
 
 use crate::decision::config::KeepAlive;
 use crate::decision::error::{DecisionError, Usage};
-use crate::review::secrets::{any_string, holds_key_block, leaks_secret, masked_strings};
+use crate::review::secrets::{
+    any_string, joined_strings_hold_key_block, leaks_secret, masked_strings,
+};
 
 /// Questions of a request, keyed by name; the map order is the wire order.
 pub type Questions = BTreeMap<String, Question>;
@@ -195,9 +197,11 @@ impl DecisionRequest {
     /// Every path that sends a decision (the CLI and TUI `decide`, the `decide` tool and the
     /// internal adapters) builds its request here, so no state leaves the process with a
     /// secret-shaped token in a string value; see [`masked_strings`]. It fails closed like the
-    /// review gate: a state any string (value or key) of which holds a private-key block is
-    /// refused before masking, since a key body matches no pattern, and a state that still holds
-    /// a secret after masking (keys are never masked) is refused too. The questions travel with
+    /// review gate: a state whose strings (values and keys, read joined by
+    /// [`joined_strings_hold_key_block`], so a header and its body in two fields count) hold a
+    /// private-key block is refused before masking, since a key body matches no pattern, and a
+    /// state nested past the depth bound is refused the same way. A state that still holds
+    /// a secret after masking (keys are never masked) is refused as well. The questions travel with
     /// the state and are never masked, so any of their strings or keys that holds a secret or a
     /// private-key block refuses the request. Both residual checks ask [`leaks_secret`], the
     /// review's one egress predicate. A size limit applied to the state must measure
@@ -223,7 +227,7 @@ impl DecisionRequest {
         if any_string(&wire_questions, &leaks_secret) {
             return Err(invalid(QUESTIONS_SECRET_REFUSED));
         }
-        if any_string(&state, &holds_key_block) {
+        if joined_strings_hold_key_block(&state) {
             return Err(invalid(KEY_BLOCK_REFUSED));
         }
         validate(&state, &questions)?;

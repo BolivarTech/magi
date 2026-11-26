@@ -1221,10 +1221,42 @@ fn masked_strings_at(value: serde_json::Value, depth: usize) -> serde_json::Valu
     }
 }
 
-/// Whether the strings of a JSON `value`, read as one text, hold a private-key block.
+/// Whether the strings of a JSON `value`, read as one text, hold a private-key block
+/// ([`views_hold_key_block`]).
+///
+/// Every string value and every key is joined in traversal order, each followed by `"\n"`, so a
+/// block whose header sits in one string and whose body sits in another is read as one block.
+/// The separator is a line break, never nothing: no token pattern and no key-block header spans
+/// a line break, so the join creates no match across two strings and adds no false positive.
+/// The same holds the other way, as a declared limit: a token or a header split across two
+/// strings is not recognized. A value nested past [`MAX_JSON_DEPTH`] answers `true` (fail
+/// closed, through [`any_string`]). O(bytes of `value`) to join, then O(n · p) per strip view.
+///
+/// # Arguments
+/// * `value` - A JSON value about to leave the process.
+///
+/// # Returns
+/// `true` when the value must be refused or withheld whole.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::joined_strings_hold_key_block;
+/// use serde_json::json;
+///
+/// let header = concat!("-----", "BEGIN RSA PRIVATE KEY-----");
+/// assert!(joined_strings_hold_key_block(&json!({"title": header, "detail": "MIIE"})));
+/// assert!(!joined_strings_hold_key_block(&json!({"title": "plain", "detail": "text"})));
+/// ```
 pub fn joined_strings_hold_key_block(value: &serde_json::Value) -> bool {
-    let _ = value;
-    false
+    let joined = std::cell::RefCell::new(String::new());
+    let too_deep = any_string(value, &|text| {
+        let mut joined = joined.borrow_mut();
+        joined.push_str(text);
+        joined.push('\n');
+        false
+    });
+    too_deep || views_hold_key_block(&joined.into_inner())
 }
 
 /// The name of the first pattern (in text order) whose mask, `<redacted: <name>>`, appears in
@@ -1639,9 +1671,41 @@ pub fn outward_prompt_text(text: &str) -> String {
     masked
 }
 
-/// Each of `texts` as it may be embedded in one model prompt.
+/// Each of `texts` as it may be embedded in one model prompt that carries them in this order
+/// ([`outward_prompt_text`] on each), with one rule across them: once a text is withheld for a
+/// private-key block, every later text is withheld too ([`KEY_BLOCK_WITHHELD`]), since it may
+/// hold the body of a block whose header ended the earlier one (a key body matches no pattern of
+/// its own). A text before the block keeps its content. O(n · s) over all texts.
+///
+/// # Arguments
+/// * `texts` - Untrusted texts, in the order the prompt embeds them.
+///
+/// # Returns
+/// One outward text per input text, in the same order.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::{outward_prompt_texts, KEY_BLOCK_WITHHELD};
+///
+/// let header = concat!("-----", "BEGIN RSA PRIVATE KEY-----");
+/// let out = outward_prompt_texts(&["plain", header, "MIIE"]);
+/// assert_eq!(out, ["plain", KEY_BLOCK_WITHHELD, KEY_BLOCK_WITHHELD]);
+/// ```
 pub fn outward_prompt_texts(texts: &[&str]) -> Vec<String> {
-    texts.iter().map(|text| outward_prompt_text(text)).collect()
+    let mut after_block = false;
+    texts
+        .iter()
+        .map(|text| {
+            let out = if after_block {
+                KEY_BLOCK_WITHHELD.to_string()
+            } else {
+                outward_prompt_text(text)
+            };
+            after_block |= out == KEY_BLOCK_WITHHELD;
+            out
+        })
+        .collect()
 }
 
 /// `text` with the one-line secrets of every strip view masked in place
