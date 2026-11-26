@@ -752,22 +752,27 @@ mod tests {
         assert!(prompt.contains("review this\nlet t = "), "{prompt:?}");
     }
 
-    /// A consult holding a private-key block is withheld whole from the classification prompt.
+    /// A consult withheld whole (here for a private-key block) is not classified: no prompt
+    /// reaches the main model, and the result is the "no inference" the timeout path returns.
+    /// Mutation-verified: classifying the placeholder turns this red (one call, `analysis`).
     #[tokio::test]
-    async fn a_private_key_block_in_the_consult_never_reaches_the_classification_prompt() {
+    async fn a_consult_withheld_whole_is_never_sent_for_classification() {
         let d = "-----";
         let body = "MIIEowIBAAKCAQEAbodyline";
         let content =
             format!("intro\n{d}BEGIN RSA PRIVATE KEY{d}\n{body}\n{d}END RSA PRIVATE KEY{d}\noutro");
-        let prompt = prompt_sent_for(&content).await;
-        assert!(!prompt.contains(body), "{prompt:?}");
-        assert!(
-            !prompt.contains("intro"),
-            "the text is withheld whole: {prompt:?}"
+        let recorder = Arc::new(PromptRecorder::default());
+        let classifier = ProviderClassifier::new(
+            recorder.clone(),
+            Arc::new(RecordingNoticeSink::default()),
+            test_auditor(),
         );
-        assert!(
-            prompt.contains(magi_rs::review::secrets::KEY_BLOCK_WITHHELD),
-            "{prompt:?}"
-        );
+        assert_eq!(classifier.classify(&content).await, None);
+        let prompts = recorder
+            .prompts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        assert!(prompts.is_empty(), "no classification call: {prompts:?}");
     }
 }

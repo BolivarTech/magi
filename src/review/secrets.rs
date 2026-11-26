@@ -1671,6 +1671,13 @@ pub fn outward_prompt_text(text: &str) -> String {
     masked
 }
 
+/// Whether `outward` is one of the two placeholders [`outward_prompt_text`] answers for a text
+/// it withholds whole.
+pub fn withheld_whole(outward: &str) -> bool {
+    let _ = outward;
+    false
+}
+
 /// Each of `texts` as it may be embedded in one model prompt that carries them in this order
 /// ([`outward_prompt_text`] on each), with one rule across them: once a text is withheld for a
 /// private-key block, every later text is withheld too ([`KEY_BLOCK_WITHHELD`]), since it may
@@ -3648,6 +3655,22 @@ mod tests {
         let clean = serde_json::json!({"title": "plain", "detail": ["also plain", 3]});
         assert!(!joined_strings_hold_key_block(&clean));
         assert!(joined_strings_hold_key_block(&deep_value(200, "plain")));
+    }
+
+    /// Mutation-verified: the two placeholders of a text withheld whole are recognized, and a
+    /// text with a masked token, which keeps its content, is not one of them.
+    #[test]
+    fn a_text_withheld_whole_is_told_apart_from_a_masked_one() {
+        let (header, body) = split_key_block();
+        assert!(withheld_whole(&outward_prompt_text(&format!(
+            "{header}\n{body}"
+        ))));
+        assert!(withheld_whole(MASK_FAILED));
+        let token = format!("ghp_{}", "A".repeat(36)); // allow-secret-scan
+        assert!(!withheld_whole(&outward_prompt_text(&format!(
+            "use {token}"
+        ))));
+        assert!(!withheld_whole("plain"));
     }
 
     /// Mutation-verified: a text after one withheld for a key block is withheld too, since it
