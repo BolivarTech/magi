@@ -1270,6 +1270,21 @@ mod tests {
         assert!(reason.contains("questions"), "{reason}");
     }
 
+    /// A key block whose header sits in one question string and whose body sits in another is
+    /// refused: `leaks_secret` flags a bare header line, so the string holding the header alone
+    /// refuses the questions, wherever the body is. Passes by design (the check predates it);
+    /// mutation-verified by breaking both header readers of `leaks_secret` (the PEM pattern of
+    /// `find_secret` and the `holds_key_block` term): either alone still refuses it.
+    #[test]
+    fn questions_with_a_key_header_and_its_body_in_two_strings_are_refused() {
+        let d = "-----";
+        let reason = questions_reason(json!({
+            "first": {"type": "noul", "instructions": format!("{d}BEGIN RSA PRIVATE KEY{d}")},
+            "second": {"type": "noul", "instructions": "MIIEowIBAAKCAQEAbodyline"},
+        }));
+        assert_eq!(reason, QUESTIONS_SECRET_REFUSED);
+    }
+
     /// REQ-F12: the measured internal questions (the fixture the adapters ship) pass the check.
     #[test]
     fn the_internal_questions_of_the_fixture_are_accepted() {
