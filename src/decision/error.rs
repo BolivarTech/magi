@@ -536,6 +536,20 @@ mod tests {
     }
 
     #[test]
+    fn the_unauthorized_message_names_ollama_signin_for_cloud_models() {
+        let msg = DecisionError::Unauthorized {
+            status: 401,
+            trace: Trace::default(),
+        }
+        .to_string();
+        assert!(
+            msg.contains("set DECISION_API_KEY")
+                && msg.contains("for an Ollama `:cloud` model, run `ollama signin` instead"),
+            "{msg}"
+        );
+    }
+
+    #[test]
     fn an_attempt_serializes_flat_with_its_outcome_and_without_usage() {
         let a = Attempt {
             model: "tev1".into(),
