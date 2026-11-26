@@ -24,8 +24,9 @@ use crate::memory::store::Memory;
 /// goes through [`outward_prompt_texts`] before it is embedded in a prompt: one-line secrets are
 /// masked, and a text is withheld whole in two cases. One is a prompt whose memories, joined,
 /// hold a private-key block: every memory of it is withheld, since any of them may carry that
-/// block's body. The other is a text whose masking still leaves something the egress check flags. The main model is a cloud
-/// one by default, and this judge is also the fallback of the `decide` contradiction judge.
+/// block's body. The other is a text whose masking still leaves something the egress check
+/// flags. The main model is a cloud one by default, and this judge is also the fallback of the
+/// `decide` contradiction judge.
 /// Provider errors are propagated as typed [`MemoryError`] so the distiller's
 /// CP2-Z non-fatal handler catches them without panic.
 pub struct LlmDistillJudge {

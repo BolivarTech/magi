@@ -58,7 +58,7 @@ Everything lives in the `[decision]` section of `.magi/magi.toml`; see `docs/mag
 | `model` | `[[decision.fallback]]` | none (required in each entry) | A fallback model, tried in order. |
 | `min_confidence` | `[[decision.fallback]]` | no threshold | Confidence floor for that fallback. |
 
-Unknown keys are a load error, and so is an `api_key` in the file. A model may appear only once in the chain. `[[decision.fallback]]` entries are optional.
+Unknown keys are a load error, and so is an `api_key` in the file. A model may appear only once in the chain. A model name, primary or fallback, that matches a secret pattern is a load error too, with the fixed message `a [decision] model name matches a secret pattern; rename it`, which quotes nothing of the name. `[[decision.fallback]]` entries are optional.
 
 ### A `magi.toml` from an earlier version
 

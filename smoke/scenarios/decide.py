@@ -1336,8 +1336,8 @@ def the_scaffold_adopts_clef_cloud(run):
 
     The workspace keeps the text ``magi init`` wrote, so the second assertion
     runs the chain a new user gets. A missing local Ollama, a model that was
-    never pulled, a daemon without ``ollama signin`` or a spent cloud quota is
-    ``CANNOT_TEST``: it is the environment, not the product.
+    never pulled, a daemon without ``ollama signin``, a spent cloud quota or a
+    server error from the cloud head is ``CANNOT_TEST``: it is the environment, not the product.
 
     Args:
         run: Always ``None``.
@@ -1371,8 +1371,8 @@ def _adopted_answer_finding(attempt):
 
     Returns:
         Finding: ``CANNOT_TEST`` without a capture or when the first hop shows
-        the backend or the model is missing or the account is signed out or
-        out of quota; otherwise PASS or FAIL.
+        the backend or the model is missing, the account is signed out or out
+        of quota, or the cloud head answered a server error; otherwise PASS or FAIL.
     """
     envelope = _envelope_of(attempt)
     if envelope is None:
