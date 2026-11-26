@@ -1190,6 +1190,75 @@ mod tests {
         }
     }
 
+    /// REQ-F13 / F-S19: a signed-out Ollama daemon refuses only its `:cloud` models, so a 401 on
+    /// one rotates and a local model of the chain answers.
+    #[tokio::test]
+    async fn an_unauthorized_cloud_model_rotates_to_the_next_model() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "clef:cloud", 401, "{}".to_string()).await;
+        mock_model(&mut server, "nimble", 200, OK_BODY.to_string()).await;
+        let d = decide(
+            settings(&server.url(), &["clef:cloud", "nimble"]),
+            &request(),
+        )
+        .await
+        .expect("nimble answers");
+        assert_eq!(d.model, "nimble");
+        assert_eq!(
+            outcomes(&d.trace),
+            vec!["clef:cloud:unauthorized", "nimble:answered"]
+        );
+    }
+
+    /// REQ-F13: a cloud model alone (explicit), or a chain of cloud models all refused, ends as
+    /// `Unauthorized`, not as an exhausted chain.
+    #[tokio::test]
+    async fn a_chain_that_ends_on_an_unauthorized_cloud_model_is_unauthorized() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "x:cloud", 401, "{}".to_string()).await;
+        mock_model(&mut server, "y:cloud", 403, "{}".to_string()).await;
+        let r = decide(
+            settings(&server.url(), &["nimble"]),
+            &request().with_model("x:cloud"),
+        )
+        .await;
+        match r {
+            Err(DecisionError::Unauthorized { status, trace }) => {
+                assert_eq!(status, 401);
+                assert_eq!(outcomes(&trace), vec!["x:cloud:unauthorized"]);
+            }
+            other => panic!("explicit cloud model: {other:?}"),
+        }
+        let r = decide(settings(&server.url(), &["x:cloud", "y:cloud"]), &request()).await;
+        match r {
+            Err(DecisionError::Unauthorized { status, trace }) => {
+                assert_eq!(status, 403, "the status of the last attempt");
+                assert_eq!(
+                    outcomes(&trace),
+                    vec!["x:cloud:unauthorized", "y:cloud:unauthorized"]
+                );
+            }
+            other => panic!("chain of cloud models: {other:?}"),
+        }
+    }
+
+    /// REQ-F13: after a refused cloud model, a local model that fails for another cause leaves
+    /// the chain exhausted, as the last attempt decides.
+    #[tokio::test]
+    async fn a_refused_cloud_model_then_a_failing_local_one_exhausts_the_chain() {
+        let mut server = mockito::Server::new_async().await;
+        mock_model(&mut server, "x:cloud", 401, "{}".to_string()).await;
+        mock_model(&mut server, "nimble", 500, String::new()).await;
+        let r = decide(settings(&server.url(), &["x:cloud", "nimble"]), &request()).await;
+        match r {
+            Err(DecisionError::ChainExhausted { trace }) => assert_eq!(
+                outcomes(&trace),
+                vec!["x:cloud:unauthorized", "nimble:http_5xx"]
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn a_bad_request_rotates_to_the_next_model() {
         let mut server = mockito::Server::new_async().await;
