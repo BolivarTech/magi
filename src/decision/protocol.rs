@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::decision::config::KeepAlive;
 use crate::decision::error::{DecisionError, Usage};
-use crate::review::secrets::{find_secret, holds_key_block, mask_secrets};
+use crate::review::secrets::{any_string, find_secret, holds_key_block, masked_strings};
 
 /// Questions of a request, keyed by name; the map order is the wire order.
 pub type Questions = BTreeMap<String, Question>;
@@ -164,38 +164,6 @@ fn parse_questions(value: Value) -> Result<Questions, DecisionError> {
         .collect()
 }
 
-/// Masks every secret-shaped token in the string values of `state`, in place (REQ-F12).
-///
-/// Walks objects and arrays recursively and replaces each string value with
-/// [`mask_secrets`] of it. Object keys are left alone: masking two keys to the same mask
-/// would collapse their entries. Numbers, booleans and null are untouched.
-///
-/// Complexity: O(n) over the state's values, plus the linear cost of [`mask_secrets`] per
-/// string.
-///
-/// # Arguments
-/// * `state` - the state of a request; modified in place.
-fn mask_state_strings(state: &mut Value) {
-    match state {
-        Value::String(text) => *text = mask_secrets(text),
-        Value::Array(items) => items.iter_mut().for_each(mask_state_strings),
-        Value::Object(fields) => fields.values_mut().for_each(mask_state_strings),
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
-/// Whether `holds` is true of any string of `state`, object keys included.
-fn state_holds(state: &Value, holds: &dyn Fn(&str) -> bool) -> bool {
-    match state {
-        Value::String(text) => holds(text),
-        Value::Array(items) => items.iter().any(|item| state_holds(item, holds)),
-        Value::Object(fields) => fields
-            .iter()
-            .any(|(key, item)| holds(key) || state_holds(item, holds)),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
 /// A validated request: state, questions and per-invocation overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRequest {
@@ -211,7 +179,7 @@ impl DecisionRequest {
     ///
     /// Every path that sends a decision (the CLI and TUI `decide`, the `decide` tool and the
     /// internal adapters) builds its request here, so no state leaves the process with a
-    /// secret-shaped token in a string value; see `mask_state_strings`. It fails closed like the
+    /// secret-shaped token in a string value; see [`masked_strings`]. It fails closed like the
     /// review gate: a state any string (value or key) of which holds a private-key block is
     /// refused before masking, since a key body matches no pattern, and a state that still holds
     /// a secret after masking (keys are never masked) is refused too. A size limit applied to
@@ -229,13 +197,13 @@ impl DecisionRequest {
     /// # Errors
     /// [`DecisionError::InvalidInput`] naming the problem; for a refused state, a fixed reason
     /// that quotes nothing of it.
-    pub fn new(mut state: Value, questions: Questions) -> Result<Self, DecisionError> {
+    pub fn new(state: Value, questions: Questions) -> Result<Self, DecisionError> {
         validate(&state, &questions)?;
-        if state_holds(&state, &holds_key_block) {
+        if any_string(&state, &holds_key_block) {
             return Err(invalid(KEY_BLOCK_REFUSED));
         }
-        mask_state_strings(&mut state);
-        if state_holds(&state, &|text| find_secret(text).is_some()) {
+        let state = masked_strings(state);
+        if any_string(&state, &|text| find_secret(text).is_some()) {
             return Err(invalid(RESIDUAL_SECRET_REFUSED));
         }
         Ok(Self {

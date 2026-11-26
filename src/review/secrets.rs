@@ -1105,6 +1105,84 @@ pub fn mask_secrets(text: &str) -> String {
 /// byte of the text, and a mask that says so, rather than an empty string. Fail closed.
 const MASK_FAILED: &str = "<redacted: masking failed>";
 
+/// Whether `holds` is true of any string of a JSON `value`, an object's keys included.
+///
+/// Shared by every check of a state that leaves for a decision model (the review gate and
+/// `decide`): a key is read like a value, so a check after [`masked_strings`] (which masks values
+/// only) still sees a key that holds a secret. Complexity: O(bytes of `value`) times the cost of
+/// `holds`.
+///
+/// # Arguments
+/// * `value` - The JSON value to scan.
+/// * `holds` - The predicate asked of each string and each key.
+///
+/// # Returns
+/// `true` as soon as one string or key satisfies `holds`.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::any_string;
+/// use serde_json::json;
+///
+/// assert!(any_string(&json!({"k": ["a", "needle"]}), &|t| t == "needle"));
+/// assert!(any_string(&json!({"needle": 1}), &|t| t == "needle"));
+/// assert!(!any_string(&json!([1, true, null]), &|_| true));
+/// ```
+// MAGI FIX (MS3 §6 loop3): the keys were not read, so the residual check after masking (which
+// masks values only) could not see a key holding a secret.
+pub fn any_string(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => holds(text),
+        Value::Array(items) => items.iter().any(|item| any_string(item, holds)),
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, item)| holds(key) || any_string(item, holds)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+/// A JSON `value` with every string value passed through [`mask_secrets`].
+///
+/// Keys are not masked (masking two keys to the same mask would collapse their entries), but a
+/// caller scans them afterwards with [`any_string`] and refuses a value whose key still holds a
+/// secret, so a key built from foreign text makes the value refused, never masked. Numbers,
+/// booleans and null are kept. Complexity: O(bytes of `value`) plus the cost of [`mask_secrets`]
+/// per string.
+///
+/// # Arguments
+/// * `value` - The JSON value to mask; consumed.
+///
+/// # Returns
+/// The value with each string value masked.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::masked_strings;
+/// use serde_json::json;
+///
+/// let token = concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+/// let masked = masked_strings(json!({"note": token, "n": 3}));
+/// assert!(!masked.to_string().contains(token));
+/// assert_eq!(masked["n"], 3);
+/// ```
+pub fn masked_strings(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(text) => Value::String(mask_secrets(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(masked_strings).collect()),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k, masked_strings(v)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 /// The name of the first pattern (in text order) whose mask, `<redacted: <name>>`, appears in
 /// `text`: what [`mask_secrets`] masked in a text it produced. O(n · p).
 ///

@@ -28,7 +28,7 @@ use crate::decision::{
 
 use super::config::DEFAULT_CALL_TIMEOUT_SECS;
 use super::consolidate::ConsolidatedFinding;
-use super::secrets::{find_secret, holds_key_block, mask_secrets, REDACTED_OPEN};
+use super::secrets::{any_string, find_secret, holds_key_block, masked_strings, REDACTED_OPEN};
 
 /// Name of the gate's only question.
 pub const GATE_QUESTION_NAME: &str = "gate";
@@ -467,40 +467,6 @@ fn holds_line(code: &str, line: u32) -> bool {
         .ok()
         .and_then(|l| l.checked_sub(1))
         .is_some_and(|i| code.lines().nth(i).is_some())
-}
-
-/// Whether `holds` is true of any string of `value`, an object's keys included. O(bytes) times
-/// the cost of `holds`.
-// MAGI FIX (MS3 §6 loop3): the keys were not read, so the residual check after masking (which
-// masks values only) could not see a key holding a secret.
-fn any_string(value: &Value, holds: &dyn Fn(&str) -> bool) -> bool {
-    match value {
-        Value::String(text) => holds(text),
-        Value::Array(items) => items.iter().any(|item| any_string(item, holds)),
-        Value::Object(fields) => fields
-            .iter()
-            .any(|(key, item)| holds(key) || any_string(item, holds)),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
-/// `value` with every string value passed through [`mask_secrets`]. Keys are not masked, but
-/// they are scanned: a state's keys are the gate's own field names today, and the residual
-/// check ([`any_string`], which reads every key) withholds a state whose key holds a secret.
-/// So a key built from foreign text would make the state withheld, never masked: build keys
-/// from the gate's own literals only. O(bytes).
-fn masked_strings(value: Value) -> Value {
-    match value {
-        Value::String(text) => Value::String(mask_secrets(&text)),
-        Value::Array(items) => Value::Array(items.into_iter().map(masked_strings).collect()),
-        Value::Object(fields) => Value::Object(
-            fields
-                .into_iter()
-                .map(|(k, v)| (k, masked_strings(v)))
-                .collect(),
-        ),
-        other => other,
-    }
 }
 
 /// The gate's single answer in `decision`, when it is one of the two options.
@@ -996,7 +962,7 @@ impl<'a> Gate<'a> {
     /// `window_overlaps_key_block`), so here a string holding one is the finding's own text
     /// (`a_state_whose_own_text_quotes_a_key_block_is_never_sent`). Such a string
     /// withholds it (`secret`: RV22's exception, a key body has no pattern of its own); otherwise
-    /// every one-line secret of every string is masked ([`mask_secrets`]), and the masked state
+    /// every one-line secret of every string is masked ([`masked_strings`]), and the masked state
     /// is withheld when it is over `max_state_bytes` (`state too large`) or masking left a match
     /// (`secret`). O(bytes of the state).
     ///
@@ -1163,6 +1129,7 @@ mod tests {
     use super::*;
     use crate::decision::client::MockDecisionClient;
     use crate::decision::{Answer, Attempt, AttemptOutcome, Cause, Decision, DecisionError, Trace};
+    use crate::review::secrets::mask_secrets;
     use magi_core::schema::{AgentName, Category, Severity};
 
     fn finding(sev: Severity, line: Option<u32>) -> ConsolidatedFinding {
