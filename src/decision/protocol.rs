@@ -1107,6 +1107,18 @@ mod tests {
         assert!(reason.contains("secret"), "{reason}");
     }
 
+    /// Mutation-verified: a state nested past `MAX_JSON_DEPTH` (built in process, so no parser
+    /// limit applies) is refused, never walked to its end or sent.
+    #[test]
+    fn a_state_nested_past_the_depth_bound_is_refused() {
+        let mut state = json!("plain");
+        for _ in 0..200 {
+            state = serde_json::Value::Array(vec![state]);
+        }
+        let reason = new_reason(state);
+        assert!(reason.contains("never sent"), "{reason}");
+    }
+
     /// The reason of an `InvalidInput` from [`DecisionRequest::new`] for a plain state and the
     /// questions `questions`.
     fn questions_reason(questions: serde_json::Value) -> String {
