@@ -3,9 +3,12 @@
 # Date: 2026-11-25
 """The adoption scenario D14: registration, verbatim texts and judging helpers."""
 
+import json
 import pathlib
+import types
 import unittest
 
+from smoke.outcome import Outcome
 from smoke.registry import DEFAULT_REGISTRY
 
 _SCENARIOS = pathlib.Path(__file__).resolve().parents[1] / "scenarios"
@@ -71,6 +74,34 @@ class ScaffoldJudgingTests(unittest.TestCase):
     def test_a_file_without_a_decision_section_is_reported(self) -> None:
         from smoke.scenarios import decide
         self.assertNotEqual("", decide.scaffold_adoption_problem('provider = "ollama"\n'))
+
+
+def _attempt_with_first_hop(cause: str) -> types.SimpleNamespace:
+    """A capture of a decide run whose first hop failed with *cause*."""
+    envelope = {"chain": [{"cause": cause}]}
+    output = types.SimpleNamespace(stdout=json.dumps(envelope).encode("utf-8"), exit_code=1)
+    return types.SimpleNamespace(ok=True, output=output)
+
+
+class AccountStateJudgingTests(unittest.TestCase):
+    """A signed-out daemon or an exhausted quota is the account, not the product."""
+
+    def test_a_signed_out_daemon_is_cannot_test_naming_ollama_signin(self) -> None:
+        from smoke.scenarios import decide
+        finding = decide._adopted_answer_finding(_attempt_with_first_hop("unauthorized"))
+        self.assertEqual(Outcome.CANNOT_TEST, finding.outcome)
+        self.assertIn("ollama signin", finding.detail)
+
+    def test_an_exhausted_cloud_quota_is_cannot_test_naming_the_quota(self) -> None:
+        from smoke.scenarios import decide
+        finding = decide._adopted_answer_finding(_attempt_with_first_hop("rate_limited"))
+        self.assertEqual(Outcome.CANNOT_TEST, finding.outcome)
+        self.assertIn("quota", finding.detail)
+
+    def test_an_unrelated_first_hop_failure_still_fails(self) -> None:
+        from smoke.scenarios import decide
+        finding = decide._adopted_answer_finding(_attempt_with_first_hop("rejected"))
+        self.assertEqual(Outcome.FAIL, finding.outcome)
 
 
 if __name__ == "__main__":
