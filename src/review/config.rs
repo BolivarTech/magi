@@ -185,3 +185,49 @@ impl CodeReviewSection {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A token with the shape of a GitHub personal access token; never a real one.
+    const TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+
+    fn section(model: &str, fallback: &str) -> CodeReviewSection {
+        CodeReviewSection {
+            base_url: None,
+            model: model.into(),
+            timeout_secs: None,
+            max_state_bytes: None,
+            auto_approve: None,
+            min_confidence: Some(0.4),
+            fallback: vec![CodeReviewFallback {
+                model: fallback.into(),
+                min_confidence: Some(0.3),
+            }],
+        }
+    }
+
+    /// Mutation-verified: a gate model name shaped like a secret is a load error whose message
+    /// quotes nothing of it, checked before the rules whose messages name a model. Without it the
+    /// wire screen of the decision client refuses that model on every finding, silently.
+    #[test]
+    fn a_secret_shaped_gate_model_name_is_a_load_error_that_quotes_nothing() {
+        let split = format!("ghp_\u{200B}{}", &TOKEN[4..]);
+        let cases = [
+            section(TOKEN, "nimble"),
+            section("clef:cloud", &split),
+            section(TOKEN, TOKEN),
+        ];
+        for s in cases {
+            let err = s.validate().expect_err("refused");
+            let msg = err.to_string();
+            assert_eq!(
+                msg,
+                "a [code_review] model name matches a secret pattern; rename it"
+            );
+            assert!(!msg.contains("ghp_"), "{msg}");
+        }
+        assert!(section("clef:cloud", "nimble").validate().is_ok());
+    }
+}
