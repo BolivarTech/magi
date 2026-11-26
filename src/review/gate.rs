@@ -1138,6 +1138,15 @@ impl<'a> Gate<'a> {
                     );
                 }
                 Err(DecisionError::Unauthorized { .. }) => {
+                    // A stopped gate asks no model again, so this entry is written once.
+                    if is_ollama_cloud_model(&spec.model) {
+                        tracing::event!(
+                            target: GATE_LOG_TARGET,
+                            tracing::Level::WARN,
+                            model = spec.model.as_str(),
+                            "a cloud gate model refused the credentials; no later model can judge"
+                        );
+                    }
                     return self.stop(CAUSE_UNAUTHORIZED);
                 }
                 Err(error) => {
