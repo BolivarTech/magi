@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.23.0
-// Date: 2026-10-11
+// Version: 0.25.1
+// Date: 2026-11-25
 
 //! Typed decisions served by System One models (REQ-D00..D24).
 //!
