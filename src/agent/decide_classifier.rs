@@ -41,9 +41,9 @@ const STATE_REQUEST_FIELD: &str = "request";
 /// Mode classifier that asks `decide` first and falls back to the principal LLM in the same
 /// inference (REQ-D12).
 ///
-/// Content whose serialized state exceeds the configured `[decision].max_state_bytes` goes
-/// straight to the fallback: a decision over truncated text looks as sure as one over the whole
-/// text (D-PM-1).
+/// Content whose serialized state, once masked (REQ-F12), exceeds the configured
+/// `[decision].max_state_bytes` goes straight to the fallback: a decision over truncated text
+/// looks as sure as one over the whole text (D-PM-1).
 /// Every fallback leaves one run-log entry and nothing on any screen.
 pub struct DecideModeClassifier {
     /// Decision client, or `None` when it could not be built.
@@ -167,10 +167,6 @@ impl ModeClassifier for DecideModeClassifier {
                 .await;
         };
         let state = json!({ STATE_REQUEST_FIELD: content });
-        let state_bytes = serde_json::to_vec(&state).map_or(usize::MAX, |v| v.len());
-        if state_bytes > self.max_state_bytes {
-            return self.fall_back(content, FallbackCause::TooLarge, None).await;
-        }
         let request = match DecisionRequest::new(state, mode_questions()) {
             Ok(request) => request,
             Err(e) => {
@@ -179,6 +175,11 @@ impl ModeClassifier for DecideModeClassifier {
                     .await;
             }
         };
+        // The limit bounds what is sent: the state `new` already masked (REQ-F12).
+        let state_bytes = serde_json::to_vec(request.state()).map_or(usize::MAX, |v| v.len());
+        if state_bytes > self.max_state_bytes {
+            return self.fall_back(content, FallbackCause::TooLarge, None).await;
+        }
         match client.decide(&request).await {
             Ok(decision) => match chosen_mode(decision.answers.values()) {
                 Some(mode) => Some(mode),

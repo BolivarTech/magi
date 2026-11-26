@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::decision::config::KeepAlive;
 use crate::decision::error::{DecisionError, Usage};
+use crate::review::secrets::mask_secrets;
 
 /// Questions of a request, keyed by name; the map order is the wire order.
 pub type Questions = BTreeMap<String, Question>;
@@ -158,6 +159,26 @@ fn parse_questions(value: Value) -> Result<Questions, DecisionError> {
         .collect()
 }
 
+/// Masks every secret-shaped token in the string values of `state`, in place (REQ-F12).
+///
+/// Walks objects and arrays recursively and replaces each string value with
+/// [`mask_secrets`] of it. Object keys are left alone: masking two keys to the same mask
+/// would collapse their entries. Numbers, booleans and null are untouched.
+///
+/// Complexity: O(n) over the state's values, plus the linear cost of [`mask_secrets`] per
+/// string.
+///
+/// # Arguments
+/// * `state` - the state of a request; modified in place.
+fn mask_state_strings(state: &mut Value) {
+    match state {
+        Value::String(text) => *text = mask_secrets(text),
+        Value::Array(items) => items.iter_mut().for_each(mask_state_strings),
+        Value::Object(fields) => fields.values_mut().for_each(mask_state_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 /// A validated request: state, questions and per-invocation overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionRequest {
@@ -168,12 +189,18 @@ pub struct DecisionRequest {
 }
 
 impl DecisionRequest {
-    /// Validates the state shape and the questions (REQ-D07, REQ-D23).
+    /// Validates the state shape and the questions (REQ-D07, REQ-D23), then masks the secrets of
+    /// the state (REQ-F12).
     ///
-    /// Complexity: O(questions).
+    /// Every path that sends a decision (the CLI and TUI `decide`, the `decide` tool and the
+    /// internal adapters) builds its request here, so no state leaves the process with a
+    /// secret-shaped token in a string value; see `mask_state_strings`. A size limit applied to
+    /// the state must measure [`DecisionRequest::state`], the masked state that is sent.
+    ///
+    /// Complexity: O(questions) plus O(size of the state) for the masking.
     ///
     /// # Arguments
-    /// * `state` - a string, object or array, forwarded verbatim.
+    /// * `state` - a string, object or array; its string values are masked, the rest is kept.
     /// * `questions` - at least one question, each with its required criteria.
     ///
     /// # Returns
@@ -181,8 +208,9 @@ impl DecisionRequest {
     ///
     /// # Errors
     /// [`DecisionError::InvalidInput`] naming the problem.
-    pub fn new(state: Value, questions: Questions) -> Result<Self, DecisionError> {
+    pub fn new(mut state: Value, questions: Questions) -> Result<Self, DecisionError> {
         validate(&state, &questions)?;
+        mask_state_strings(&mut state);
         Ok(Self {
             state,
             questions,
@@ -219,10 +247,10 @@ impl DecisionRequest {
         self
     }
 
-    /// The state, as given.
+    /// The state, with its secrets masked.
     ///
     /// # Returns
-    /// A borrow of the state, forwarded to the provider verbatim.
+    /// A borrow of the masked state, the one forwarded to the provider.
     pub fn state(&self) -> &Value {
         &self.state
     }
