@@ -220,6 +220,33 @@ mod tests {
         toml::from_str(toml_text)
     }
 
+    /// Mutation-verified: a configured model name, primary or fallback, that the egress
+    /// predicate flags is refused at load with a fixed message that quotes none of it, even when
+    /// another rule (a repeated model, a threshold out of range) would have echoed the name.
+    #[test]
+    fn a_model_name_that_matches_a_secret_pattern_is_refused_without_quoting_it() {
+        let tail = "A".repeat(36);
+        let token = format!("ghp_{tail}"); // allow-secret-scan
+        let split = format!("ghp_AAAA\u{200b}{}", "A".repeat(40)); // allow-secret-scan
+        let cases = [
+            format!("model = \"{token}\""),
+            format!("model = \"nimble\"\n[[fallback]]\nmodel = \"{split}\""),
+            format!("model = \"{token}\"\nmin_confidence = 2.0"),
+            format!("model = \"{token}\"\n[[fallback]]\nmodel = \"{token}\""),
+        ];
+        for text in cases {
+            let err = section(&text)
+                .expect("parses")
+                .validate()
+                .expect_err("a secret-shaped model name is refused");
+            let shown = err.to_string();
+            assert_eq!(
+                shown, "a [decision] model name matches a secret pattern; rename it",
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn the_chain_names_models_without_surrounding_whitespace() {
         let s = section(
