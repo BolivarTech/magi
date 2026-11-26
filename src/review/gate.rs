@@ -1163,6 +1163,93 @@ mod tests {
             },
         ]
     }
+    /// The default chain without its `:cloud` head: a 401 on its first model stops the gate.
+    fn local_chain() -> Vec<ModelSpec> {
+        chain().into_iter().skip(1).collect()
+    }
+
+    /// A client whose `:cloud` models answer 401 and whose local models answer `real_defect`
+    /// at 0.9, counting the calls each model received.
+    fn signed_out_daemon(
+        calls: Arc<std::sync::Mutex<BTreeMap<String, usize>>>,
+    ) -> MockDecisionClient {
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().returning(move |r| {
+            let model = r.model().unwrap_or("").to_string();
+            *calls
+                .lock()
+                .expect("calls")
+                .entry(model.clone())
+                .or_default() += 1;
+            if model.ends_with(":cloud") {
+                Err(DecisionError::Unauthorized {
+                    status: 401,
+                    trace: Trace::default(),
+                })
+            } else {
+                answer(&model, "real_defect", 0.9)
+            }
+        });
+        c
+    }
+
+    #[tokio::test]
+    async fn a_refused_cloud_head_rotates_and_is_not_asked_again() {
+        let calls = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let c = signed_out_daemon(Arc::clone(&calls));
+        let mut g = Gate::new(&c, chain(), 61_000);
+        for _ in 0..2 {
+            let v = g
+                .judge(
+                    &finding(Severity::Warning, Some(1)),
+                    Some(
+                        "x
+x
+x
+",
+                    ),
+                    None,
+                )
+                .await;
+            assert_eq!(v.state, GateState::Kept, "a local model judged it");
+            assert_eq!(v.model.as_deref(), Some("clef-flash"));
+        }
+        assert_eq!(
+            g.stopped(),
+            None,
+            "a refused cloud model does not stop the gate"
+        );
+        let calls = calls.lock().expect("calls");
+        assert_eq!(
+            calls.get("clef:cloud"),
+            Some(&1),
+            "the refused model is asked once"
+        );
+        assert_eq!(calls.get("clef-flash"), Some(&2));
+    }
+
+    #[tokio::test]
+    async fn a_refused_cloud_model_at_the_end_of_the_chain_still_stops_the_gate() {
+        let calls = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+        let c = signed_out_daemon(Arc::clone(&calls));
+        let only_cloud: Vec<ModelSpec> = chain().into_iter().take(1).collect();
+        let mut g = Gate::new(&c, only_cloud, 61_000);
+        let v = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some(
+                    "x
+x
+x
+",
+                ),
+                None,
+            )
+            .await;
+        assert_eq!(v.cause, Some("unauthorized"));
+        assert_eq!(g.stopped(), Some("unauthorized"));
+    }
+
     fn answer(model: &str, choice: &str, confidence: f64) -> Result<Decision, DecisionError> {
         let other = if choice == "real_defect" {
             "false_positive"
@@ -2097,7 +2184,7 @@ mod tests {
                 trace: Trace::default(),
             })
         });
-        let mut g = Gate::new(&c, chain(), 61_000);
+        let mut g = Gate::new(&c, local_chain(), 61_000);
         g.judge(&finding(Severity::Warning, Some(1)), Some("x\nx\n"), None)
             .await;
         let begin = concat!("-----", "BEGIN ", "PRIVATE KEY-----");
@@ -2545,7 +2632,7 @@ mod tests {
                 trace: Trace::default(),
             })
         });
-        let mut g = Gate::new(&c, chain(), 61_000);
+        let mut g = Gate::new(&c, local_chain(), 61_000);
         g.judge(
             &finding(Severity::Warning, Some(1)),
             Some("x\nx\nx\n"),
@@ -2621,7 +2708,7 @@ mod tests {
                 trace: Trace::default(),
             })
         });
-        let mut g = Gate::new(&c, chain(), 61_000);
+        let mut g = Gate::new(&c, local_chain(), 61_000);
         g.judge(
             &finding(Severity::Warning, Some(1)),
             Some("x\nx\nx\n"),
@@ -2698,7 +2785,7 @@ mod tests {
                 trace: Trace::default(),
             })
         });
-        let mut g = Gate::new(&c, chain(), 61_000);
+        let mut g = Gate::new(&c, local_chain(), 61_000);
         for _ in 0..3 {
             assert_eq!(
                 g.judge(
