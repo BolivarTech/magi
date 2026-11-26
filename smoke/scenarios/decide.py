@@ -108,6 +108,7 @@ CAUSE_TRANSPORT = "transport"
 CAUSE_TIMEOUT = "timeout"
 CAUSE_UNAUTHORIZED = "unauthorized"
 CAUSE_RATE_LIMITED = "rate_limited"
+CAUSE_HTTP_5XX = "http_5xx"
 OUTCOME_ANSWERED = "answered"
 OUTCOME_FAILED = "failed"
 OUTCOME_LOW_CONFIDENCE = "low_confidence"
@@ -1275,10 +1276,11 @@ ADOPTED_MODEL = "clef:cloud"
 ADOPTED_FALLBACK = "nimble"
 ADOPTED_MIN_CONFIDENCE = 0.85
 
-#: Causes of a first hop that mean the backend or the model is missing, which
-#: is the environment's refusal and not the product's.
+#: Causes of a first hop that mean the backend or the model is missing, or that
+#: the cloud backend failed on its side (a 5xx, often transient), which is the
+#: environment's refusal and not the product's.
 BACKEND_MISSING_CAUSES = (CAUSE_MODEL_NOT_FOUND, CAUSE_NOT_FOUND,
-                          CAUSE_TRANSPORT, CAUSE_TIMEOUT)
+                          CAUSE_TRANSPORT, CAUSE_TIMEOUT, CAUSE_HTTP_5XX)
 
 #: Causes of a first hop that are the state of the account, not the product's:
 #: a daemon that never ran ``ollama signin`` answers 401, and a spent cloud

@@ -268,13 +268,13 @@ promised 43 scenarios and 127 assertions; it now declares 58 and 174 (`smoke/reg
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| D14 | in a workspace scaffolded by `magi init`, the parsed `[decision]` section has `model = "clef:cloud"`, an active `min_confidence = 0.85` and `nimble` as first fallback with the same active threshold; and `magi decide` run there with the example request exits 0 with `clef:cloud` as the answering model | `CANNOT_TEST` with no reachable local Ollama (the runner's backend rule), and for the second assertion when the first hop fails because the model is missing, unreachable or timed out, because the daemon is signed out (`unauthorized`, fix: `ollama signin`) or because the cloud quota is spent (`rate_limited`); never `FAIL` for those |
+| D14 | in a workspace scaffolded by `magi init`, the parsed `[decision]` section has `model = "clef:cloud"`, an active `min_confidence = 0.85` and `nimble` as first fallback with the same active threshold; and `magi decide` run there with the example request exits 0 with `clef:cloud` as the answering model | `CANNOT_TEST` with no reachable local Ollama (the runner's backend rule), and for the second assertion when the first hop fails because the model is missing, unreachable, timed out or answered with a server error (`http_5xx`), because the daemon is signed out (`unauthorized`, fix: `ollama signin`) or because the cloud quota is spent (`rate_limited`); never `FAIL` for those |
 
 D14 certifies the default decision path only on a daemon that is signed in (`ollama signin`)
 and has cloud quota left. Signed out, or with the quota spent, its second assertion reports
 `CANNOT_TEST`, never `PASS`, and a run with any `CANNOT_TEST` emits no certificate, so the
 default path is never certified by a run that could not reach it. The cause strings come from
-the product: a 401 or 403 is `unauthorized`, and a 429 is `rate_limited` (`src/decision/error.rs`).
+the product: a 401 or 403 is `unauthorized`, a 429 is `rate_limited`, and a 5xx is `http_5xx` (`src/decision/error.rs`).
 A first hop that ends `rejected` (an HTTP 400) stays `FAIL` in the harness, even though the product
 itself moves on to the next model: the certifying environment runs Ollama 0.40.5 or later, which
 serves `clef:cloud`, so a rejected cloud head there means the shipped default does not work. On an
