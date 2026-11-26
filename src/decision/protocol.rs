@@ -1092,6 +1092,34 @@ mod tests {
         }
     }
 
+    /// REQ-F12b: a question that fails parsing (an unknown `type`) and whose name holds a secret
+    /// is refused before the parse error, which quotes the name, is built.
+    #[test]
+    fn an_unparsable_question_with_a_secret_name_is_refused_before_the_parse_error() {
+        let input = json!({"state": {"ticket": "plain"},
+            "questions": {SECRET_TOKEN: {"type": "nonsense", "instructions": "Which?"}}});
+        let err = parse_decide_input(input.to_string().as_bytes(), None).expect_err("refused");
+        assert!(!err.to_string().contains(SECRET_TOKEN), "{err}");
+        assert!(
+            matches!(&err, DecisionError::InvalidInput { reason } if reason == QUESTIONS_SECRET_REFUSED),
+            "{err:?}"
+        );
+    }
+
+    /// REQ-F12b: an unknown top-level field whose name holds a secret is refused without the
+    /// `unknown field` message, which quotes the name.
+    #[test]
+    fn an_unknown_input_field_with_a_secret_name_is_refused_without_quoting_it() {
+        let input = json!({"state": {"ticket": "plain"}, SECRET_TOKEN: 1,
+            "questions": {"q": {"type": "noul", "instructions": "Is it?"}}});
+        let err = parse_decide_input(input.to_string().as_bytes(), None).expect_err("refused");
+        assert!(!err.to_string().contains(SECRET_TOKEN), "{err}");
+        assert!(
+            matches!(&err, DecisionError::InvalidInput { reason } if reason == "an input field name holds a secret and is never sent"),
+            "{err:?}"
+        );
+    }
+
     /// REQ-F12: a private-key block in a criteria value refuses the request too.
     #[test]
     fn questions_with_a_private_key_block_in_a_criteria_value_are_refused() {
