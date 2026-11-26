@@ -132,6 +132,33 @@ pub(crate) fn is_ollama_cloud_model(model: &str) -> bool {
     model.ends_with(OLLAMA_CLOUD_SUFFIX)
 }
 
+/// Hint the [`DecisionError::Unauthorized`] message appends after an Ollama cloud model.
+const CLOUD_SIGNIN_HINT: &str = "; for an Ollama `:cloud` model, run `ollama signin` instead";
+
+/// The message of [`DecisionError::Unauthorized`] (REQ-F14).
+///
+/// It always names `DECISION_API_KEY`; it names `ollama signin` only when the last attempt of
+/// `trace` was an Ollama cloud model, the one case where a signed-out daemon explains the
+/// refusal. Complexity: O(1).
+///
+/// # Arguments
+/// * `status` - the HTTP status of the refusal.
+/// * `trace` - the attempts of the call.
+///
+/// # Returns
+/// The message, with the `ollama signin` hint or without it.
+fn unauthorized_message(status: u16, trace: &Trace) -> String {
+    let cloud = trace
+        .attempts
+        .last()
+        .is_some_and(|attempt| is_ollama_cloud_model(&attempt.model));
+    format!(
+        "the decision endpoint refused the request credentials (HTTP {status}); set DECISION_API_KEY \
+         in the environment or with `magi-rs vault set DECISION_API_KEY`{}",
+        if cloud { CLOUD_SIGNIN_HINT } else { "" }
+    )
+}
+
 /// Token consumption of one attempt or of a whole chain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
 pub struct Usage {
@@ -257,13 +284,9 @@ pub enum DecisionError {
         /// Attempts so far.
         trace: Trace,
     },
-    /// The endpoint refused the credentials; the message also points a signed-out Ollama
-    /// daemon (cloud models) at `ollama signin`.
-    #[error(
-        "the decision endpoint refused the request credentials (HTTP {status}); set DECISION_API_KEY \
-         in the environment or with `magi-rs vault set DECISION_API_KEY`; \
-         for an Ollama `:cloud` model, run `ollama signin` instead"
-    )]
+    /// The endpoint refused the credentials; when the last attempt was an Ollama `:cloud`
+    /// model, the message also points a signed-out daemon at `ollama signin` (REQ-F14).
+    #[error("{}", unauthorized_message(*status, trace))]
     Unauthorized {
         /// HTTP status.
         status: u16,
