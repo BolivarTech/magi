@@ -5652,6 +5652,91 @@ mod tests {
         assert_eq!(batches[0].companion_tokens, charged);
     }
 
+    /// One file whose function `f` the last commit changes in two hunks (lines 2 and 13, ten
+    /// unchanged lines apart), planned into one batch with the production companion: the
+    /// fixture of the two REQ-F07 premise tests below.
+    async fn two_hunks_in_one_unit_planned() -> (
+        RagFixture,
+        TwoSides,
+        Vec<magi_rs::review::batching::ReviewBatch>,
+    ) {
+        let f = RagFixture::new(&[("a.rs", "fn worktree() {}\n")]).await;
+        // Lines 3 to 12 are the same on both sides.
+        let two = TwoSides {
+            new: vec![(
+                "a.rs",
+                concat!(
+                    "fn f() {\n    aa();\n",
+                    "    x3();\n    x4();\n    x5();\n    x6();\n    x7();\n",
+                    "    x8();\n    x9();\n    x10();\n    x11();\n    x12();\n",
+                    "    bb();\n}\n"
+                ),
+            )],
+            old: vec![(
+                "a.rs",
+                concat!(
+                    "fn f() {\n    a();\n",
+                    "    x3();\n    x4();\n    x5();\n    x6();\n    x7();\n",
+                    "    x8();\n    x9();\n    x10();\n    x11();\n    x12();\n",
+                    "    b();\n}\n"
+                ),
+            )],
+        };
+        let diff = "diff --git a/a.rs b/a.rs\nindex 1111111..2222222 100644\n--- a/a.rs\n+++ b/a.rs\n\
+                    @@ -1,5 +1,5 @@\n fn f() {\n-    a();\n+    aa();\n     x3();\n     x4();\n     x5();\n\
+                    @@ -10,5 +10,5 @@ fn f() {\n     x10();\n     x11();\n     x12();\n-    b();\n+    bb();\n }\n";
+        let files = vec![magi_rs::review::input::ReviewFile {
+            path: "a.rs".into(),
+            diff: Some(diff.into()),
+        }];
+        let batches = {
+            let mut rag = f.rag(false);
+            rag.sources = &two;
+            magi_rs::review::batching::plan_batches_with(&files, &two, &f.registry, 100_000, &|i| {
+                rag.companion(i)
+            })
+            .expect("plans")
+        };
+        (f, two, batches)
+    }
+
+    /// REQ-F07 premise (a): every containing unit `units_for` promises carries its `lines`, the
+    /// key the pipeline's precheck deduplicates on. Mutation-verified: dropping `lines` in
+    /// `unit_item` turns this red.
+    #[tokio::test]
+    async fn every_unit_promised_by_units_for_carries_its_lines() {
+        let (f, two, batches) = two_hunks_in_one_unit_planned().await;
+        let mut rag = f.rag(false);
+        rag.sources = &two;
+        assert_eq!(batches.len(), 1, "fixture: one batch");
+        assert_eq!(batches[0].items.len(), 2, "fixture: two hunks");
+        let units = rag.units_for(&batches[0]).expect("units");
+        assert_eq!(units.len(), 2, "fixture: the unit once per hunk");
+        for unit in &units {
+            assert!(unit.lines.is_some(), "{} has no lines", unit.label);
+        }
+    }
+
+    /// REQ-F07 premise (b): the planner charges a batch's companions at exactly the `item_cost`
+    /// of its distinct units, each once. Mutation-verified: making the companion cost differ
+    /// from `item_cost` turns this red.
+    #[tokio::test]
+    async fn the_planned_companion_tokens_are_the_item_cost_of_the_distinct_units() {
+        let (f, two, batches) = two_hunks_in_one_unit_planned().await;
+        let mut rag = f.rag(false);
+        rag.sources = &two;
+        let units = rag.units_for(&batches[0]).expect("units");
+        let mut seen = std::collections::HashSet::new();
+        let distinct: usize = units
+            .iter()
+            .filter(|u| seen.insert((u.file.clone(), u.lines, u.old_side)))
+            .map(item_cost)
+            .sum();
+        assert_eq!(seen.len(), 1, "fixture: both hunks sit in one unit");
+        assert!(distinct > 0, "fixture: the unit is charged");
+        assert_eq!(batches[0].companion_tokens, distinct);
+    }
+
     #[tokio::test]
     async fn a_batch_packed_to_the_planners_limit_still_assembles_and_one_token_less_does_not() {
         // [MAGI S6 MS3 loop17, R2 Balthasar] Who owns the context heading across the planning /
