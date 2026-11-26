@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
 # Version: 0.25.1
-# Date: 2026-11-25
+# Date: 2026-11-26
 """D1-D14 -- ``magi decide`` against real backends, its refusals and its agent use.
 
 ``decide`` asks a System One model for a typed decision. What the unit suite

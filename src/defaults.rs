@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.1
-// Date: 2026-11-25
+// Date: 2026-11-26
 
 //! Built-in default backend profile (Ollama-first). MANUAL MAINTENANCE: these
 //! `:cloud` tags reflect the Ollama catalog at release time and rot as it changes

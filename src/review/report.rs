@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
 // Version: 0.25.1
-// Date: 2026-11-25
+// Date: 2026-11-26
 
 //! What a review reports (REQ-RV13): the summary of every stage, its JSON form and its text form.
 //!
