@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.25.0
-// Date: 2026-11-18
+// Version: 0.25.1
+// Date: 2026-11-25
 
 //! Built-in default backend profile (Ollama-first). MANUAL MAINTENANCE: these
 //! `:cloud` tags reflect the Ollama catalog at release time and rot as it changes
@@ -56,18 +56,20 @@ pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 ///
 /// Kept apart from [`SCAFFOLD_DECISION_MODEL`] on purpose: the built-in chain runs with no
 /// threshold, the scaffold's with a calibrated one, so the two are adopted on separate evidence
-/// and may differ (in 0.24.0 both name `clef-flash`; the no-threshold measurement backed it too).
-pub const DEFAULT_DECISION_MODEL: &str = "clef-flash";
+/// and may differ (in 0.25.1 both name `clef:cloud`; before that both named `clef-flash`, which
+/// no longer loads on machines with a small GPU under Ollama 0.40.18, while `clef:cloud` is the
+/// same model family served by Ollama's cloud).
+pub const DEFAULT_DECISION_MODEL: &str = "clef:cloud";
 /// Ordered fallbacks of the default decision chain, on the same endpoint as the primary.
 pub const DEFAULT_DECISION_FALLBACK_MODELS: [&str; 1] = ["nimble"];
 /// Primary decision model the scaffold writes, with its calibrated threshold
 /// ([`SCAFFOLD_DECISION_MIN_CONFIDENCE`]). See [`DEFAULT_DECISION_MODEL`] for why it is separate.
-pub const SCAFFOLD_DECISION_MODEL: &str = "clef-flash";
+pub const SCAFFOLD_DECISION_MODEL: &str = "clef:cloud";
 /// Ordered fallbacks the scaffold writes, on the same endpoint as the primary.
 pub const SCAFFOLD_DECISION_FALLBACK_MODELS: [&str; 1] = ["nimble"];
 /// Confidence threshold the scaffold writes, active, on every chain entry (REQ-D24). It comes from
-/// the maintainer's calibration of `clef-flash` followed by `nimble`; the built-in defaults of
-/// [`default_decision_section`] carry none.
+/// the maintainer's calibration of `clef-flash` followed by `nimble`, kept for `clef:cloud`; the
+/// built-in defaults of [`default_decision_section`] carry none.
 pub const SCAFFOLD_DECISION_MIN_CONFIDENCE: f64 = 0.75;
 /// Per-attempt timeout in seconds; sized to cover a local cold model load (REQ-D21).
 pub const DEFAULT_DECISION_TIMEOUT_SECS: u64 = 120;
@@ -79,10 +81,11 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// it. Ollama rejects any request body over 64 KiB before loading the model, so with Ollama a
 /// larger state just falls back to the main model at no cost.
 pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 128_000;
-/// State limit the scaffold writes, active: a 61 455-byte state was accepted by the local
+/// State limit the scaffold writes, active: a 61 455-byte state was accepted with the local
 /// `clef-flash` model in the calibration, which saw no rejection by window, only the request-body
-/// cap of Ollama. `nimble`, the fallback, rejects by window from about 19 KB; that falls through to
-/// the main model.
+/// cap of Ollama (64 KiB), which the local daemon also applies when it relays to `clef:cloud`.
+/// `nimble`, the fallback, rejects by window from about 19 KB; that falls through to the main
+/// model.
 pub const SCAFFOLD_DECISION_MAX_STATE_BYTES: usize = 61_000;
 
 /// The decision section applied when `magi.toml` is absent, and the chain the scaffold writes
@@ -903,6 +906,10 @@ pub fn render_default_magi_toml() -> String {
     ));
     writeln!(out, "# Primary decision model. Required in this section.").unwrap();
     writeln!(out, "model        = \"{}\"", SCAFFOLD_DECISION_MODEL).unwrap();
+    out.push_str(
+        "# model      = \"clef-flash\"  # local alternative, needs ollama pull clef-flash
+",
+    );
     writeln!(
         out,
         "# Per-attempt timeout in seconds (covers a local cold load). Optional, default {}.",
@@ -910,11 +917,11 @@ pub fn render_default_magi_toml() -> String {
     )
     .unwrap();
     out.push_str(concat!(
-        "# `clef-flash` loaded in 16.5 s on an idle machine and 49.4 s on a busy one (RTX 5060 Ti, 16 GB),
+        "# `clef:cloud` runs in Ollama's cloud: it needs Ollama 0.40.5 or later and `ollama signin`,
 ",
-        "# so it needs at least 66 s here. Inside one consult the chain can take about 135 s: this timeout
+        "# spends the Ollama account's quota, and sends each decision state to ollama.com. The fallback
 ",
-        "# for `clef-flash` plus the 14.3 s cold load of `nimble`. Numbers from other hardware will differ.
+        "# `nimble` runs locally; its cold load took 14.3 s (RTX 5060 Ti, 16 GB). Other hardware will differ.
 ",
     ));
     writeln!(out, "timeout_secs = {}", DEFAULT_DECISION_TIMEOUT_SECS).unwrap();
@@ -938,7 +945,7 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(
         out,
-        "# to the main model. {} fits the request-size cap measured with the local `clef-flash` model. With a hosted decision",
+        "# to the main model. {} fits Ollama's request-body cap (measured with the local `clef-flash`). With a hosted decision",
         SCAFFOLD_DECISION_MAX_STATE_BYTES
     )
     .unwrap();
