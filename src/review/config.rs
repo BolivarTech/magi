@@ -11,6 +11,7 @@
 //! were calibrated with the gate's question.
 
 use crate::decision::ModelSpec;
+use crate::review::secrets::leaks_secret;
 
 /// HTTP timeout of each gate call, in seconds, when `[code_review].timeout_secs` is absent:
 /// sized like `[decision]` to cover a local cold model load. The single literal: the bin's
@@ -77,6 +78,10 @@ pub enum CodeReviewConfigError {
         /// Where the blank model is.
         position: String,
     },
+    /// A model name, primary or fallback, matches a secret pattern ([`leaks_secret`]). The
+    /// message quotes no part of it: the name would reach the gate's endpoint and the run log.
+    #[error("a [code_review] model name matches a secret pattern; rename it")]
+    SecretModel,
     /// A model appears twice in the chain.
     #[error("model '{model}' appears more than once in [code_review] and its fallbacks")]
     DuplicateModel {
@@ -117,7 +122,8 @@ impl CodeReviewSection {
     /// `Ok(())` when every rule holds.
     ///
     /// # Errors
-    /// The first violated rule as a [`CodeReviewConfigError`].
+    /// The first violated rule as a [`CodeReviewConfigError`]; a model name the egress predicate
+    /// flags is checked before any rule whose message quotes a name.
     pub fn validate(&self) -> Result<(), CodeReviewConfigError> {
         const PRIMARY_POSITION: &str = "[code_review].model";
         const FALLBACK_POSITION_PREFIX: &str = "[[code_review.fallback]] #";
@@ -134,6 +140,12 @@ impl CodeReviewSection {
                     position: format!("{FALLBACK_POSITION_PREFIX}{}", idx + 1),
                 });
             }
+        }
+        // Before every rule whose message quotes a model name.
+        let mut models =
+            std::iter::once(&self.model).chain(self.fallback.iter().map(|fb| &fb.model));
+        if models.any(|model| leaks_secret(model)) {
+            return Err(CodeReviewConfigError::SecretModel);
         }
         if self.timeout_secs == Some(0) {
             return Err(CodeReviewConfigError::TimeoutBelowOne);
