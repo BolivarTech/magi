@@ -2366,7 +2366,7 @@ mod tests {
     #[test]
     fn the_default_decision_section_is_the_scaffold_chain() {
         let d = default_decision_section();
-        assert_eq!(d.model, "clef-flash");
+        assert_eq!(d.model, "clef:cloud");
         assert_eq!(
             d.fallback
                 .iter()
@@ -2395,7 +2395,7 @@ mod tests {
         let d = scaffold_decision();
         assert_eq!(
             d.get("model").and_then(toml::Value::as_str),
-            Some("clef-flash")
+            Some("clef:cloud")
         );
         assert_eq!(
             d.get("timeout_secs").and_then(toml::Value::as_integer),
@@ -2428,11 +2428,11 @@ mod tests {
     }
 
     #[test]
-    fn the_scaffold_names_clef_flash_with_nimble_as_its_fallback() {
+    fn the_scaffold_names_clef_cloud_with_nimble_as_its_fallback() {
         let d = scaffold_decision();
         assert_eq!(
             d.get("model").and_then(toml::Value::as_str),
-            Some("clef-flash")
+            Some("clef:cloud")
         );
         let fallbacks: Vec<&str> = d
             .get("fallback")
@@ -2463,12 +2463,12 @@ mod tests {
     fn the_scaffold_comment_states_the_measured_cold_load_budget() {
         let text = render_default_magi_toml();
         assert!(
-            text.contains("135 s"),
-            "the worst case of the chain is written next to timeout_secs"
+            text.contains("each decision state to ollama.com"),
+            "the cloud requirements are written next to timeout_secs"
         );
         assert!(
-            text.contains("66 s"),
-            "the minimum timeout for the primary is written next to timeout_secs"
+            text.contains("14.3 s"),
+            "the measured cold load of the fallback is written next to timeout_secs"
         );
     }
 
@@ -2514,7 +2514,7 @@ mod tests {
             .iter()
             .filter_map(|f| f.get("model").and_then(toml::Value::as_str))
             .collect();
-        assert_eq!(models, vec!["nimble"], "the chain is clef-flash -> nimble");
+        assert_eq!(models, vec!["nimble"], "the chain is clef:cloud -> nimble");
         assert!(
             render_default_magi_toml().contains("commenting it out disables"),
             "the file says how to switch the threshold off"
@@ -2532,7 +2532,7 @@ mod tests {
         assert_eq!(
             d.get("max_state_bytes").and_then(toml::Value::as_integer),
             Some(61_000),
-            "the scaffold limit is active and fits the local clef-flash body cap"
+            "the scaffold limit is active and fits the local Ollama request-body cap"
         );
         let text = render_default_magi_toml();
         let comment_names_the_hosted_default = text
