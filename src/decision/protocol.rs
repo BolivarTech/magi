@@ -1177,6 +1177,20 @@ mod tests {
         assert!(reason.contains("never sent"), "{reason}");
     }
 
+    /// Mutation-verified: a state nested past the depth bound is refused with its own fixed
+    /// reason, not a secret-pattern one: nothing in it was found to be a secret.
+    #[test]
+    fn a_state_nested_past_the_depth_bound_is_refused_with_its_own_reason() {
+        let mut state = json!("plain");
+        for _ in 0..200 {
+            state = serde_json::Value::Array(vec![state]);
+        }
+        assert_eq!(
+            new_reason(state),
+            "the state is nested deeper than 128 levels and is never sent"
+        );
+    }
+
     /// The reason of an `InvalidInput` from [`DecisionRequest::new`] for a plain state and the
     /// questions `questions`.
     fn questions_reason(questions: serde_json::Value) -> String {
