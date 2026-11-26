@@ -2168,6 +2168,21 @@ mod tests {
         assert_eq!(g.sendable(state), Err(CAUSE_SECRET));
     }
 
+    #[test]
+    fn a_state_whose_text_hides_a_token_behind_a_hidden_character_is_never_sent() {
+        // REQ-F12 parity with `decide`: the residual check is the one egress predicate
+        // (`leaks_secret`), so a token a zero-width space splits, which masking leaves as it is,
+        // withholds the state. Every text of the shared corpus does.
+        let c = MockDecisionClient::new();
+        let g = Gate::new(&c, chain(), 1_000_000);
+        for text in crate::review::secrets::withheld_corpus() {
+            let mut f = finding(Severity::Warning, Some(1));
+            f.details = vec![text.clone()];
+            let state = gate_state_of(&f, 0, "fn a() {}\n");
+            assert_eq!(g.sendable(state), Err(CAUSE_SECRET), "{text:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_merged_claim_carrying_a_one_line_secret_is_asked_masked_with_the_others() {
         // [MAGI S6 loop 10, C1-c2] one reworded claim with a secret pattern made the whole merged
