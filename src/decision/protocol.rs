@@ -85,6 +85,9 @@ const RESIDUAL_SECRET_REFUSED: &str =
 /// Problem reported for questions holding a secret or a private-key block; quotes nothing of
 /// them. Questions are never masked: a masked name or option would break the answer mapping.
 const QUESTIONS_SECRET_REFUSED: &str = "the questions hold a secret and are never sent";
+/// The fixed reason for an input whose top-level field name holds a secret: the `unknown field`
+/// message would quote it (REQ-F12b).
+const INPUT_FIELD_SECRET_REFUSED: &str = "an input field name holds a secret and is never sent";
 /// Problem reported when the questions cannot be serialized.
 const QUESTIONS_UNSERIALIZABLE: &str = "the questions could not be serialized";
 
@@ -362,6 +365,10 @@ pub fn parse_decide_input(
     else {
         return Err(invalid("the input must be a JSON object"));
     };
+    // REQ-F12b: the egress scan runs before any message that quotes the input is built.
+    if fields.keys().any(|k| leaks_secret(k)) {
+        return Err(invalid(INPUT_FIELD_SECRET_REFUSED));
+    }
     if let Some(unknown) = fields.keys().find(|k| !INPUT_FIELDS.contains(&k.as_str())) {
         return Err(invalid(format!("unknown field `{unknown}`")));
     }
@@ -384,6 +391,10 @@ pub fn parse_decide_input(
             .map_err(|_| invalid("the questions file is not valid JSON"))?,
         (None, None) => return Err(invalid("missing field `questions`")),
     };
+    // A parse error quotes the question name and serde's text; scan the raw value first.
+    if any_string(&questions, &leaks_secret) {
+        return Err(invalid(QUESTIONS_SECRET_REFUSED));
+    }
     let mut request = DecisionRequest::new(state, parse_questions(questions)?)?;
     request.model = model;
     Ok(request)
@@ -1115,7 +1126,7 @@ mod tests {
         let err = parse_decide_input(input.to_string().as_bytes(), None).expect_err("refused");
         assert!(!err.to_string().contains(SECRET_TOKEN), "{err}");
         assert!(
-            matches!(&err, DecisionError::InvalidInput { reason } if reason == "an input field name holds a secret and is never sent"),
+            matches!(&err, DecisionError::InvalidInput { reason } if reason == INPUT_FIELD_SECRET_REFUSED),
             "{err:?}"
         );
     }
