@@ -517,6 +517,25 @@ mod tests {
         assert!(!lines[0].contains("PRIVATE KEY"), "{lines:?}");
     }
 
+    /// REQ-F12b (pin, mutation-verified): a refused pair is no transport failure, so it never
+    /// trips the pass cut; the next pair of the same pass still reaches decide.
+    #[tokio::test]
+    async fn a_refused_pair_does_not_cut_decide_for_the_rest_of_the_pass() {
+        let d = "-----";
+        let older = format!("{d}BEGIN RSA PRIVATE KEY{d}\nMIIEowIBAAKCAQEAbodyline\n");
+        let client = Scripted::new(vec![noul(0.9, vec![])]);
+        let llm = LlmJudge::new(false);
+        let j = judge(Some(Arc::clone(&client)), Arc::clone(&llm));
+        assert!(!j.contradicts(&older, "new").await.expect("ok"));
+        assert!(j.contradicts("a2", "b2").await.expect("ok"));
+        assert_eq!(
+            client.calls.load(Ordering::SeqCst),
+            1,
+            "the second pair reaches decide"
+        );
+        assert_eq!(llm.contradicts_calls.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn without_a_client_the_entry_names_the_endpoint_and_the_reason() {
         let llm = LlmJudge::new(true);
