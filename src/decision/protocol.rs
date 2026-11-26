@@ -313,9 +313,7 @@ impl DecisionRequest {
         body.insert(STATE_FIELD.into(), self.state.clone());
         body.insert(
             QUESTIONS_FIELD.into(),
-            serde_json::to_value(&self.questions).map_err(|_| DecisionError::InvalidInput {
-                reason: "the questions could not be serialized".into(),
-            })?,
+            serde_json::to_value(&self.questions).map_err(|_| invalid(QUESTIONS_UNSERIALIZABLE))?,
         );
         if let Some(keep_alive) = keep_alive {
             body.insert(
