@@ -21,8 +21,8 @@ _D14 = (
 
 _SCAFFOLD_DECISION = (
     '[decision]\nbase_url = "http://localhost:11434"\nmodel = "clef:cloud"\n'
-    "min_confidence = 0.75\n\n"
-    '[[decision.fallback]]\nmodel = "nimble"\nmin_confidence = 0.75\n'
+    "min_confidence = 0.85\n\n"
+    '[[decision.fallback]]\nmodel = "nimble"\nmin_confidence = 0.85\n'
 )
 
 
@@ -59,7 +59,7 @@ class ScaffoldJudgingTests(unittest.TestCase):
 
     def test_a_commented_threshold_is_not_active(self) -> None:
         from smoke.scenarios import decide
-        text = _SCAFFOLD_DECISION.replace("min_confidence = 0.75\n\n", "# min_confidence = 0.75\n\n", 1)
+        text = _SCAFFOLD_DECISION.replace("min_confidence = 0.85\n\n", "# min_confidence = 0.85\n\n", 1)
         self.assertIn("min_confidence", decide.scaffold_adoption_problem(text))
 
     def test_a_different_fallback_is_reported(self) -> None:

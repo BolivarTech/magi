@@ -2502,7 +2502,7 @@ mod tests {
         let d = scaffold_decision();
         assert_eq!(
             d.get("min_confidence").and_then(toml::Value::as_float),
-            Some(0.75),
+            Some(0.85),
             "the primary carries an active threshold"
         );
         let fallbacks = d
@@ -2513,7 +2513,7 @@ mod tests {
         for entry in fallbacks {
             assert_eq!(
                 entry.get("min_confidence").and_then(toml::Value::as_float),
-                Some(0.75),
+                Some(0.85),
                 "every fallback carries the same active threshold"
             );
         }
@@ -2525,6 +2525,10 @@ mod tests {
         assert!(
             render_default_magi_toml().contains("commenting it out disables"),
             "the file says how to switch the threshold off"
+        );
+        assert!(
+            !render_default_magi_toml().contains("request-body cap"),
+            "the state limit is no longer presented as the daemon's body cap"
         );
     }
 
