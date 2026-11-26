@@ -241,6 +241,11 @@ impl DecisionRequest {
 
     /// Replaces the titular model for this request only.
     ///
+    /// The name is sent to the decision endpoint as it is, and this method does not screen it
+    /// for secrets: a caller passes a model name from configuration, or one already screened.
+    /// [`parse_decide_input`] screens the explicit `model` of a user's input with
+    /// [`leaks_secret`] before it gets here.
+    ///
     /// # Arguments
     /// * `model` - model name; surrounding whitespace is trimmed and a blank
     ///   name leaves the request without an explicit model.

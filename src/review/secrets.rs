@@ -16,10 +16,10 @@
 //! word character is not a token, because base64 runs and kebab-case names hold them by chance; the distinctive
 //! `sk-ant-` and `github_pat_` match wherever they occur. A token prefix and its exclusion match
 //! in any ASCII case, so `SK-ANT-…` is a key, and so is an upper-case name that opens like one
-//! (`GITHUB_PAT_…`) with a long enough tail: the safe direction. A PEM or OpenPGP header must be in
-//! upper case as every standard tool writes it: `-----BEGIN`, each type word and `PRIVATE KEY-----`
-//! alike, so a hand-made `-----begin private key-----` or `-----BEGIN rsa PRIVATE KEY-----` is
-//! not detected. A password in a URL (`scheme://user:password@host`) is a secret unless it is a
+//! (`GITHUB_PAT_…`) with a long enough tail: the safe direction. The key-block patterns match a PEM
+//! or OpenPGP header as every standard tool writes it, in upper case, but [`holds_key_block`]
+//! also reads an upper-cased copy of the text, so a hand-made `-----begin private key-----` or
+//! `-----BEGIN rsa PRIVATE KEY-----` still opens a block and [`leaks_secret`] flags it. A password in a URL (`scheme://user:password@host`) is a secret unless it is a
 //! placeholder (`{password}`, `$PASSWORD`, `<password>`, `***`); a URL with a user and no
 //! password is not.
 //!
