@@ -469,32 +469,66 @@ mod tests {
         }
     }
 
-    /// REQ-F12: the limit bounds the state that is sent, which is the masked one. Content whose
-    /// raw state is over the limit only because of secrets reaches `decide` once masked, and the
-    /// request it receives carries no secret.
+    /// REQ-F12: the limit bounds the state that is sent, which is the masked one. A mask can be
+    /// longer than the secret it replaces, so content whose raw state fits can be over the limit
+    /// once masked; it goes to the LLM with a `too_large` entry and `decide` is never called.
+    /// Content that fits once masked reaches `decide`, and the request it receives carries no
+    /// secret.
     #[test]
     fn the_limit_is_judged_on_the_masked_state() {
         const TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
-        let content = format!("{TOKEN} ").repeat(30);
+        const URL: &str = "postgres://u:p@db/app"; // allow-secret-scan
+        let grows = format!("{URL} ").repeat(40);
+        assert!(serialized_state_len(&grows) <= LIMIT, "fixture: raw fits");
         assert!(
-            serialized_state_len(&content) > LIMIT,
-            "fixture: raw is over"
+            serialized_state_len(&magi_rs::review::secrets::mask_secrets(&grows)) > LIMIT,
+            "fixture: masked is over"
         );
+        let fits = format!("{TOKEN} ").repeat(5);
         let client = Scripted::new(chose("design"));
         let c = classifier(
             Some(Arc::clone(&client)),
             Fallback::new(Some(Mode::Analysis)),
         )
         .with_max_state_bytes(LIMIT);
-        let verdict = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("rt")
-            .block_on(c.classify(&content));
-        assert_eq!(verdict, Some(Mode::Design), "the masked state fits");
+        let mut verdicts = (None, None);
+        let lines = fallback_lines(async {
+            verdicts = (c.classify(&grows).await, c.classify(&fits).await);
+        });
+        assert_eq!(verdicts, (Some(Mode::Analysis), Some(Mode::Design)));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("too_large"), "{lines:?}");
         let seen = client.seen.lock().expect("seen");
+        assert_eq!(seen.len(), 1, "decide only for the content that fits");
         let sent = seen.first().expect("one request").state().to_string();
         assert!(!sent.contains(TOKEN), "{sent}");
+    }
+
+    /// A raw state over the limit is never masked nor sent: it goes to the LLM with a
+    /// `too_large` entry, even when masking would have shrunk it under the limit (the declared
+    /// cost of bounding the masking work).
+    #[test]
+    fn a_raw_state_over_the_limit_skips_decide_without_masking() {
+        const TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let content = format!("{TOKEN} ").repeat(30);
+        assert!(
+            serialized_state_len(&content) > LIMIT,
+            "fixture: raw is over"
+        );
+        assert!(
+            serialized_state_len(&magi_rs::review::secrets::mask_secrets(&content)) <= LIMIT,
+            "fixture: masked would fit"
+        );
+        let client = Scripted::new(chose("design"));
+        let fb = Fallback::new(Some(Mode::Analysis));
+        let c = classifier(Some(Arc::clone(&client)), Arc::clone(&fb)).with_max_state_bytes(LIMIT);
+        let lines = fallback_lines(async move {
+            assert_eq!(c.classify(&content).await, Some(Mode::Analysis));
+        });
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0, "never sent");
+        assert_eq!(fb.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("too_large"), "{lines:?}");
     }
 
     /// REQ-F12: content holding a private-key block is never sent; the inference falls back to
