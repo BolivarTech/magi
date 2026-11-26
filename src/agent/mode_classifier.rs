@@ -752,6 +752,10 @@ mod tests {
         let token = format!("ghp_{}", "A".repeat(36)); // allow-secret-scan
         let prompt = prompt_sent_for(&format!("review this\nlet t = \"{token}\";")).await;
         assert!(!prompt.contains(&token), "{prompt:?}");
+        assert!(
+            !magi_rs::review::secrets::leaks_secret(&prompt),
+            "{prompt:?}"
+        );
         assert!(prompt.contains("<redacted:"), "{prompt:?}");
         assert!(prompt.contains(CONTENT_OPEN) && prompt.contains(CONTENT_CLOSE));
         assert!(prompt.contains("review this\nlet t = "), "{prompt:?}");

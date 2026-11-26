@@ -1179,7 +1179,7 @@ mod tests {
     use super::*;
     use crate::decision::client::MockDecisionClient;
     use crate::decision::{Answer, Attempt, AttemptOutcome, Cause, Decision, DecisionError, Trace};
-    use crate::review::secrets::{find_secret, mask_secrets};
+    use crate::review::secrets::mask_secrets;
     use magi_core::schema::{AgentName, Category, Severity};
 
     fn finding(sev: Severity, line: Option<u32>) -> ConsolidatedFinding {
@@ -2098,7 +2098,7 @@ mod tests {
         c.expect_decide().times(2).returning(|r| {
             let sent = r.state().to_string();
             assert!(
-                !sent.contains("sk-ant-") && !sent.contains("ghp_"),
+                !sent.contains("sk-ant-") && !sent.contains("ghp_") && !leaks_secret(&sent),
                 "{sent}"
             );
             assert!(sent.contains("<redacted: "), "{sent}");
@@ -2534,7 +2534,7 @@ mod tests {
             seen, clean,
             "the keys never depend on the finding or the code"
         );
-        assert!(seen.iter().all(|k| find_secret(k).is_none()), "{seen:?}");
+        assert!(seen.iter().all(|k| !leaks_secret(k)), "{seen:?}");
         let c = MockDecisionClient::new();
         let g = Gate::new(&c, chain(), 1_000_000);
         assert_eq!(

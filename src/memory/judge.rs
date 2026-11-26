@@ -419,6 +419,10 @@ mod tests {
         judge.contradicts(&a, &b).await.unwrap();
         let prompt = recorder.only_prompt();
         assert!(!prompt.contains(&token()), "{prompt:?}");
+        assert!(
+            !magi_rs::review::secrets::leaks_secret(&prompt),
+            "{prompt:?}"
+        );
         assert!(prompt.contains("<redacted:"), "{prompt:?}");
         assert!(prompt.contains("\nA: my key is "), "{prompt:?}");
         assert!(prompt.contains("\nB: the token "), "{prompt:?}");
@@ -541,6 +545,10 @@ mod tests {
         judge.summarize_preferences(&episodic).await.unwrap();
         let prompt = recorder.only_prompt();
         assert!(!prompt.contains(&token()), "{prompt:?}");
+        assert!(
+            !magi_rs::review::secrets::leaks_secret(&prompt),
+            "{prompt:?}"
+        );
         assert!(!prompt.contains(body), "{prompt:?}");
         assert!(prompt.contains("<redacted:"), "{prompt:?}");
     }
