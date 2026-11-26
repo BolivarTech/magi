@@ -366,6 +366,14 @@ mod tests {
             })
         }
 
+        /// How many prompts it received.
+        fn calls(&self) -> usize {
+            self.prompts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+        }
+
         /// The one prompt it received.
         fn only_prompt(&self) -> String {
             let prompts = self
@@ -429,51 +437,43 @@ mod tests {
         assert!(prompt.contains("\nB: the token "), "{prompt:?}");
     }
 
-    /// A memory holding a private-key block is withheld whole from the contradiction prompt,
-    /// and so is the other memory of the pair, which may hold part of that block.
+    /// A memory holding a private-key block is withheld whole, and so is the other memory of
+    /// the pair, which may hold part of that block: nothing is left to judge, so no prompt is
+    /// sent and the pair is kept (no contradiction).
     #[tokio::test]
     async fn a_private_key_block_in_a_memory_pair_never_reaches_the_contradiction_prompt() {
-        let recorder = PromptRecorder::answering("no");
+        let recorder = PromptRecorder::answering("yes");
         let judge = LlmDistillJudge::new(recorder.clone());
         let body = "MIIEowIBAAKCAQEAbodyline";
-        judge
+        let contradicts = judge
             .contradicts("plain statement", &format!("old\n{}", key_block(body)))
             .await
             .unwrap();
-        let prompt = recorder.only_prompt();
-        assert!(!prompt.contains(body), "{prompt:?}");
-        assert!(
-            prompt.contains(magi_rs::review::secrets::KEY_BLOCK_WITHHELD),
-            "{prompt:?}"
-        );
-        assert!(!prompt.contains("plain statement"), "{prompt:?}");
+        assert!(!contradicts, "a withheld pair is kept");
+        assert_eq!(recorder.calls(), 0, "no contradiction prompt is sent");
     }
 
     /// A key block whose header ends memory A and whose body opens memory B: the header
-    /// withholds A, and B, which may carry the body, is withheld with it.
-    /// Mutation-verified: masking each memory on its own turns this red.
+    /// withholds A, and B, which may carry the body, is withheld with it, so no prompt is sent.
     #[tokio::test]
     async fn a_key_block_split_across_the_memory_pair_never_reaches_the_contradiction_prompt() {
-        let recorder = PromptRecorder::answering("no");
+        let recorder = PromptRecorder::answering("yes");
         let judge = LlmDistillJudge::new(recorder.clone());
         let d = "-----";
         let body = "MIIEowIBAAKCAQEAbodyline";
-        judge
+        let contradicts = judge
             .contradicts(
                 &format!("old\n{d}BEGIN RSA PRIVATE KEY{d}"),
                 &format!("{body}\n{d}END RSA PRIVATE KEY{d}"),
             )
             .await
             .unwrap();
-        let prompt = recorder.only_prompt();
-        assert!(!prompt.contains(body), "{prompt:?}");
-        let withheld = magi_rs::review::secrets::KEY_BLOCK_WITHHELD;
-        assert!(prompt.contains(&format!("\nB: {withheld}")), "{prompt:?}");
+        assert!(!contradicts, "a withheld pair is kept");
+        assert_eq!(recorder.calls(), 0, "no contradiction prompt is sent");
     }
 
-    /// The same split across two episodic memories never reaches the preference prompt, and
-    /// every memory of that prompt is withheld with it.
-    /// Mutation-verified: masking each memory on its own turns this red.
+    /// The same split across two episodic memories withholds every memory of the preference
+    /// prompt, so no prompt is sent and no preference is distilled.
     #[tokio::test]
     async fn a_key_block_split_across_episodic_memories_never_reaches_the_preference_prompt() {
         let recorder = PromptRecorder::answering("- none");
@@ -485,36 +485,32 @@ mod tests {
             make_episodic(&format!("{d}BEGIN RSA PRIVATE KEY{d}")),
             make_episodic(body),
         ];
-        judge.summarize_preferences(&episodic).await.unwrap();
-        let prompt = recorder.only_prompt();
-        assert!(!prompt.contains(body), "{prompt:?}");
-        assert!(!prompt.contains("I like tabs"), "{prompt:?}");
+        let prefs = judge.summarize_preferences(&episodic).await.unwrap();
+        assert!(prefs.is_empty(), "{prefs:?}");
+        assert_eq!(recorder.calls(), 0, "no preference prompt is sent");
     }
 
     /// A key body in memory A whose header and footer sit in memory B: the pair holds a block,
-    /// so both are withheld and no body line reaches the contradiction prompt.
-    /// Mutation-verified: dropping the check over the joined texts turns this red.
+    /// so both are withheld and no contradiction prompt is sent.
     #[tokio::test]
     async fn a_key_body_before_its_header_never_reaches_the_contradiction_prompt() {
-        let recorder = PromptRecorder::answering("no");
+        let recorder = PromptRecorder::answering("yes");
         let judge = LlmDistillJudge::new(recorder.clone());
         let d = "-----";
         let body = "MIIEowIBAAKCAQEAbodyline";
-        judge
+        let contradicts = judge
             .contradicts(
                 body,
                 &format!("{d}BEGIN RSA PRIVATE KEY{d}\n{d}END RSA PRIVATE KEY{d}"),
             )
             .await
             .unwrap();
-        let prompt = recorder.only_prompt();
-        assert!(!prompt.contains(body), "{prompt:?}");
-        let withheld = magi_rs::review::secrets::KEY_BLOCK_WITHHELD;
-        assert!(prompt.contains(&format!("\nA: {withheld}")), "{prompt:?}");
+        assert!(!contradicts, "a withheld pair is kept");
+        assert_eq!(recorder.calls(), 0, "no contradiction prompt is sent");
     }
 
-    /// The same order across two episodic memories never reaches the preference prompt.
-    /// Mutation-verified: dropping the check over the joined texts turns this red.
+    /// The same order across two episodic memories withholds both, so no preference prompt
+    /// is sent.
     #[tokio::test]
     async fn a_key_body_before_its_header_never_reaches_the_preference_prompt() {
         let recorder = PromptRecorder::answering("- none");
@@ -527,21 +523,21 @@ mod tests {
                 "{d}BEGIN RSA PRIVATE KEY{d}\n{d}END RSA PRIVATE KEY{d}"
             )),
         ];
-        judge.summarize_preferences(&episodic).await.unwrap();
-        let prompt = recorder.only_prompt();
-        assert!(!prompt.contains(body), "{prompt:?}");
+        let prefs = judge.summarize_preferences(&episodic).await.unwrap();
+        assert!(prefs.is_empty(), "{prefs:?}");
+        assert_eq!(recorder.calls(), 0, "no preference prompt is sent");
     }
 
     /// The preference prompt carries episodic memory texts to the main model too: a token is
-    /// masked and a key block withheld there as well.
+    /// masked there as well (a key block withholds every memory, so no prompt is sent; see
+    /// the key-block tests above).
     #[tokio::test]
     async fn secrets_in_episodic_memories_never_reach_the_preference_prompt() {
         let recorder = PromptRecorder::answering("- none");
         let judge = LlmDistillJudge::new(recorder.clone());
-        let body = "MIIEowIBAAKCAQEAbodyline";
         let episodic = vec![
             make_episodic(&format!("I use {} daily", token())),
-            make_episodic(&key_block(body)),
+            make_episodic("I like tabs"),
         ];
         judge.summarize_preferences(&episodic).await.unwrap();
         let prompt = recorder.only_prompt();
@@ -550,7 +546,66 @@ mod tests {
             !magi_rs::review::secrets::leaks_secret(&prompt),
             "{prompt:?}"
         );
-        assert!(!prompt.contains(body), "{prompt:?}");
         assert!(prompt.contains("<redacted:"), "{prompt:?}");
+        assert!(prompt.contains("I like tabs"), "{prompt:?}");
+    }
+
+    /// The run-log lines of `target` emitted while `f` runs.
+    fn judge_log_lines<F: std::future::Future<Output = ()>>(f: F) -> Vec<String> {
+        crate::agent::decide_classifier::target_lines("magi_rs::memory::judge", f)
+    }
+
+    /// Mutation-verified: a pair one of whose texts is withheld whole (here a token split by a
+    /// hidden character, which masking leaves and the egress check flags) is not judged on a
+    /// placeholder: no call, the pair is kept, and one run-log entry says so without content.
+    #[test]
+    fn a_pair_with_one_text_withheld_whole_is_kept_without_a_call_and_logged() {
+        let recorder = PromptRecorder::answering("yes");
+        let split = format!("see ghp_AAAA\u{200b}{} here", "A".repeat(40)); // allow-secret-scan
+        let lines = judge_log_lines({
+            let recorder = recorder.clone();
+            let split = split.clone();
+            async move {
+                let judge = LlmDistillJudge::new(recorder);
+                let contradicts = judge.contradicts("plain statement", &split).await.unwrap();
+                assert!(!contradicts, "a withheld pair is kept");
+            }
+        });
+        assert_eq!(recorder.calls(), 0, "no contradiction prompt is sent");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = lines.first().map(String::as_str).unwrap_or_default();
+        assert!(line.contains("contradiction check skipped"), "{line}");
+        assert!(
+            !line.contains("AAAA") && !line.contains("plain statement"),
+            "{line}"
+        );
+    }
+
+    /// Mutation-verified: when every episodic text is withheld whole, no preference prompt is
+    /// sent, the result is the empty one, and one run-log entry says so without content.
+    #[test]
+    fn episodic_memories_all_withheld_skip_the_preference_call_and_log_it() {
+        let recorder = PromptRecorder::answering("- leaked preference");
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        let lines = judge_log_lines({
+            let recorder = recorder.clone();
+            async move {
+                let judge = LlmDistillJudge::new(recorder);
+                let episodic = vec![
+                    make_episodic("I like tabs"),
+                    make_episodic(&key_block(body)),
+                ];
+                let prefs = judge.summarize_preferences(&episodic).await.unwrap();
+                assert!(prefs.is_empty(), "{prefs:?}");
+            }
+        });
+        assert_eq!(recorder.calls(), 0, "no preference prompt is sent");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = lines.first().map(String::as_str).unwrap_or_default();
+        assert!(line.contains("preference distillation skipped"), "{line}");
+        assert!(
+            !line.contains(body) && !line.contains("I like tabs"),
+            "{line}"
+        );
     }
 }
