@@ -3420,4 +3420,25 @@ mod tests {
             BoundedMask::Clean
         );
     }
+
+    /// A JSON array nested `depth` levels deep around one string.
+    fn nested_array(depth: usize) -> String {
+        format!("{}\"x\"{}", "[".repeat(depth), "]".repeat(depth))
+    }
+
+    /// The depth bound `any_string` and `masked_strings` rely on: `serde_json` refuses input
+    /// nested past its default recursion limit (128), so a parsed value never recurses deeper.
+    #[test]
+    fn serde_json_refuses_a_value_nested_past_its_recursion_limit() {
+        let err = serde_json::from_str::<serde_json::Value>(&nested_array(200))
+            .expect_err("200 levels exceed the limit");
+        assert!(
+            err.to_string().contains("recursion limit exceeded"),
+            "{err}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&nested_array(100)).expect("100 levels parse");
+        assert!(any_string(&parsed, &|t| t == "x"));
+        assert!(any_string(&masked_strings(parsed), &|t| t == "x"));
+    }
 }
