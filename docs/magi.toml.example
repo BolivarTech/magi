@@ -75,8 +75,9 @@ timeout_secs = 120
 # Approval of the agent's `decide` tool. Optional, default true.
 auto_approve = true
 # Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight
-# to the main model. The line below sets 61000: it bounds the consults the threshold was
-# calibrated on and what leaves for ollama.com, so keep it with the default clef:cloud.
+# to the main model. The line below sets 61000. The 0.85 threshold was calibrated on consults
+# of up to 54742 bytes; 61000 keeps the earlier limit and bounds what leaves for ollama.com,
+# so keep it with the default clef:cloud.
 # Without the line the built-in default, 128000, applies instead. With another hosted provider
 # (for example typesafe/jev-1.13 on OpenRouter), you may raise the value or delete the line.
 max_state_bytes = 61000

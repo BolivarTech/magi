@@ -86,10 +86,11 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// rejection (measured 2026-11-26).
 pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 128_000;
 /// State limit the scaffold writes, active. It is not a limit of the daemon: a size probe of
-/// `clef:cloud` on 2026-11-26 accepted states up to 131 087 bytes without a rejection. 61 000 is
-/// kept because it bounds the states the threshold was calibrated on, and it bounds what leaves
-/// the machine for ollama.com. `nimble`, the fallback, rejects by window from about 19 KB; that
-/// falls through to the main model.
+/// `clef:cloud` on 2026-11-26 accepted states up to 131 087 bytes without a rejection. The
+/// scaffold's 0.85 threshold was calibrated on consults of up to 54 742 bytes (the calibration
+/// skipped states over 60 000); 61 000 keeps the earlier limit and bounds what leaves the machine
+/// for ollama.com. `nimble`, the fallback, rejects by window from about 19 KB; that falls through
+/// to the main model.
 pub const SCAFFOLD_DECISION_MAX_STATE_BYTES: usize = 61_000;
 
 /// The decision section applied when `magi.toml` is absent, and the chain the scaffold writes
@@ -963,13 +964,19 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(
         out,
-        "# to the main model. The line below sets {}: it bounds the consults the threshold was",
+        "# to the main model. The line below sets {}. The {} threshold was calibrated on consults",
+        SCAFFOLD_DECISION_MAX_STATE_BYTES, SCAFFOLD_DECISION_MIN_CONFIDENCE
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# of up to 54742 bytes; {} keeps the earlier limit and bounds what leaves for ollama.com,",
         SCAFFOLD_DECISION_MAX_STATE_BYTES
     )
     .unwrap();
     writeln!(
         out,
-        "# calibrated on and what leaves for ollama.com, so keep it with the default {}.",
+        "# so keep it with the default {}.",
         SCAFFOLD_DECISION_MODEL
     )
     .unwrap();
