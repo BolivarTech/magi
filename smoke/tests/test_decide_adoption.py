@@ -111,6 +111,12 @@ class AccountStateJudgingTests(unittest.TestCase):
         self.assertEqual(Outcome.CANNOT_TEST, finding.outcome)
         self.assertIn("quota", finding.detail)
 
+    def test_a_server_error_on_the_cloud_head_is_cannot_test_naming_the_cause(self) -> None:
+        from smoke.scenarios import decide
+        finding = decide._adopted_answer_finding(_attempt_with_first_hop("http_5xx"))
+        self.assertEqual(Outcome.CANNOT_TEST, finding.outcome)
+        self.assertIn("http_5xx", finding.detail)
+
     def test_an_unrelated_first_hop_failure_still_fails(self) -> None:
         from smoke.scenarios import decide
         finding = decide._adopted_answer_finding(_attempt_with_first_hop("rejected"))
