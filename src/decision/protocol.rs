@@ -1143,6 +1143,21 @@ mod tests {
         );
     }
 
+    /// REQ-F12b: an explicit `model` that holds a secret is refused before it is sent or quoted
+    /// (`ModelUnavailable` names the model).
+    #[test]
+    fn an_explicit_model_holding_a_secret_is_refused_without_quoting_it() {
+        let input = json!({"state": {"ticket": "plain"}, "model": SECRET_TOKEN,
+            "questions": {"q": {"type": "noul", "instructions": "Is it?"}}});
+        let err = parse_decide_input(input.to_string().as_bytes(), None).expect_err("refused");
+        assert!(!err.to_string().contains(SECRET_TOKEN), "{err}");
+        assert!(
+            matches!(&err, DecisionError::InvalidInput { reason }
+                if reason.starts_with("the model name holds")),
+            "{err:?}"
+        );
+    }
+
     /// REQ-F12b: an unknown top-level field whose name holds a secret is refused without the
     /// `unknown field` message, which quotes the name.
     #[test]
