@@ -1303,7 +1303,8 @@ def scaffold_adoption_problem(text):
 
     Returns:
         str: Empty when ``[decision]`` names the adopted model with its
-        threshold active and the adopted fallback, otherwise the detail.
+        threshold active and the adopted fallback with that same threshold
+        active, otherwise the detail.
     """
     try:
         section = tomllib.loads(text).get("decision")
@@ -1312,14 +1313,19 @@ def scaffold_adoption_problem(text):
     if not isinstance(section, dict):
         return "magi.toml has no [decision] section"
     fallbacks = section.get("fallback")
-    fallback = (fallbacks[0].get("model") if isinstance(fallbacks, list)
-                and fallbacks and isinstance(fallbacks[0], dict) else None)
+    first = (fallbacks[0] if isinstance(fallbacks, list) and fallbacks
+             and isinstance(fallbacks[0], dict) else {})
+    fallback = first.get("model")
+    fallback_threshold = first.get("min_confidence")
     if (section.get("model") == ADOPTED_MODEL
             and section.get("min_confidence") == ADOPTED_MIN_CONFIDENCE
-            and fallback == ADOPTED_FALLBACK):
+            and fallback == ADOPTED_FALLBACK
+            and fallback_threshold == ADOPTED_MIN_CONFIDENCE):
         return ""
-    return "model %r, min_confidence %r, first fallback %r" % (
-        section.get("model"), section.get("min_confidence"), fallback)
+    return ("model %r, min_confidence %r, first fallback %r with "
+            "min_confidence %r" % (section.get("model"),
+                                   section.get("min_confidence"), fallback,
+                                   fallback_threshold))
 
 
 @scenario("D14", assertions=D14_ASSERTIONS, needs_backend=True)
