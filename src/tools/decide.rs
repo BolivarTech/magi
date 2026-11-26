@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.25.0
-// Date: 2026-11-18
+// Version: 0.25.1
+// Date: 2026-11-26
 
 //! The agent tool `decide` (REQ-D16, REQ-D19): a typed decision served by a System One model.
 //! The agent chooses it for closed choices, yes/no questions and rubric scores; the result is
