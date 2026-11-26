@@ -1029,13 +1029,15 @@ mod tests {
         assert!(reason.contains("private-key block"), "{reason}");
     }
 
-    /// REQ-F12: a key block in an object key is refused too; keys are never masked.
+    /// REQ-F12b (mutation-verified): a key block in an object key is refused by the key-block
+    /// check itself, before masking (keys are never masked), with its own fixed reason.
     #[test]
     fn a_state_with_a_private_key_block_in_a_key_is_refused() {
         let mut fields = serde_json::Map::new();
         fields.insert(key_block(), json!("plain"));
         let reason = new_reason(serde_json::Value::Object(fields));
         assert!(!reason.contains("bodyline"), "{reason}");
+        assert_eq!(reason, KEY_BLOCK_REFUSED);
     }
 
     /// REQ-F12 (fail closed, mutation-verified): a secret masking cannot remove, here one in an
