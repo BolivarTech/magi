@@ -1671,11 +1671,28 @@ pub fn outward_prompt_text(text: &str) -> String {
     masked
 }
 
-/// Whether `outward` is one of the two placeholders [`outward_prompt_text`] answers for a text
-/// it withholds whole.
+/// Whether `outward`, a text [`outward_prompt_text`] produced, is one of the two placeholders it
+/// answers for a text it withholds whole: [`KEY_BLOCK_WITHHELD`] (a private-key block) or
+/// `<redacted: masking failed>` (a secret masking could not remove). A caller that only wants
+/// the content, such as a classifier, skips the call on `true`: the placeholder says nothing
+/// of the text. O(1).
+///
+/// # Arguments
+/// * `outward` - The result of [`outward_prompt_text`].
+///
+/// # Returns
+/// `true` when nothing of the original text is left.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::{withheld_whole, KEY_BLOCK_WITHHELD};
+///
+/// assert!(withheld_whole(KEY_BLOCK_WITHHELD));
+/// assert!(!withheld_whole("line one"));
+/// ```
 pub fn withheld_whole(outward: &str) -> bool {
-    let _ = outward;
-    false
+    outward == KEY_BLOCK_WITHHELD || outward == MASK_FAILED
 }
 
 /// Each of `texts` as it may be embedded in one model prompt that carries them in this order

@@ -35,7 +35,7 @@ use async_trait::async_trait;
 use magi_core::schema::Mode;
 use magi_rs::magi::mode::{normalize_label, ModeClassifier};
 use magi_rs::magi::CLASSIFY_TIMEOUT_SECS;
-use magi_rs::review::secrets::outward_prompt_text;
+use magi_rs::review::secrets::{outward_prompt_text, withheld_whole};
 
 use crate::agent::messages::Message;
 use crate::agent::provider::Provider;
@@ -296,6 +296,14 @@ impl ProviderClassifier {
 #[async_trait]
 impl ModeClassifier for ProviderClassifier {
     async fn classify(&self, content: &str) -> Option<Mode> {
+        // The consult goes to the main model, a cloud one by default, and is also where a
+        // refused or skipped `decide` request lands: mask it as the code review masks. A consult
+        // withheld whole leaves only a placeholder, which is not worth a call: no inference, as
+        // on the timeout path.
+        let content = outward_prompt_text(content);
+        if withheld_whole(&content) {
+            return None;
+        }
         let (cost, cost_alarm) = self.auditor.audit(
             "notice: without `--mode` or `[magi].default_mode`, magi-rs adds a call to the \
              model to infer the lens. Declaring the mode avoids it.",
@@ -306,9 +314,6 @@ impl ModeClassifier for ProviderClassifier {
         self.notices.once(NOTICE_CLASSIFY_COST, &cost);
         self.raise(cost_alarm);
 
-        // The consult goes to the main model, a cloud one by default, and is also where a
-        // refused or skipped `decide` request lands: mask it as the code review masks.
-        let content = outward_prompt_text(content);
         let prompt = format!(
             "Classify the delimited content into exactly one of these labels: \
              code-review, design, analysis. Respond with ONLY the label.\n\
