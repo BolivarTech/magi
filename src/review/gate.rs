@@ -579,8 +579,9 @@ impl Outcome {
 /// The gate of one review.
 ///
 /// Build one per review: it remembers, for the rest of that review, the models that answered
-/// HTTP 400 and the cause that stopped it (`unauthorized`, or `timeout` when the review clock ran
-/// out). The thresholds are applied here, so the client must be built with no `min_confidence`
+/// HTTP 400, the `:cloud` models that refused the credentials (HTTP 401 or 403) while a later
+/// model was still eligible, and the cause that stopped it (`unauthorized`, or `timeout` when
+/// the review clock ran out). Neither kind of remembered model is asked again in that review. The thresholds are applied here, so the client must be built with no `min_confidence`
 /// in its chain; a model without one decides with any confidence, as in `[decision]`.
 ///
 /// That rule is not prose only: the one production client, `gate_client` in

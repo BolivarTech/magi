@@ -1704,7 +1704,7 @@ fn unit_identity<'a>(items: impl Iterator<Item = &'a ContextItem>) -> Vec<(Strin
 /// # Arguments
 ///
 /// * `units` - The units the source promised for one batch, possibly repeated.
-/// * `seen` - The keys already kept; empty on entry, filled on exit.
+/// * `seen` - Scratch set of the keys kept; cleared on entry, filled on exit.
 ///
 /// # Returns
 ///
@@ -1776,8 +1776,9 @@ fn bounded_label(label: &str) -> String {
 /// With no units the message is only `batch {n} with its containing units`. Each label is
 /// masked and bounded to [`MAX_UNIT_LABEL_CHARS`] characters by `bounded_label`, or replaced
 /// by [`REDACTED_UNIT_LABEL`] when it still leaks a secret (REQ-F15); the `Display` of
-/// `ReviewError` still sanitizes the whole `what`. Complexity O(u log u) for
-/// `u` units, from the ordering, plus O(bytes) of the named labels.
+/// `ReviewError` still sanitizes the whole `what`. Complexity O(b + u log u) for `u` units of
+/// `b` bytes in all: `item_cost` renders the text of every unit to price it, then the costs are
+/// ordered.
 ///
 /// # Arguments
 ///

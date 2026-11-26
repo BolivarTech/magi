@@ -1833,6 +1833,11 @@ pub(crate) fn hides_secret_behind_hidden_chars(masked: &str) -> bool {
 /// re-scans and every egress that cannot hold a side raw (documentation chunks before their
 /// embedding, history) ask it, and a test over a shared corpus pins that none answers weaker. O(n · p).
 ///
+/// Contract: it answers `true` for every private-key block form [`holds_key_block`] knows (PEM,
+/// OpenPGP, SSH2, a header spelled without its spaces). The `decide` refusals of questions,
+/// field names and an explicit model ask this predicate alone, so they rely on it;
+/// `leaks_secret_holds_every_private_key_block_form` pins it.
+///
 /// # Arguments
 /// * `text` - Any text about to leave the process, raw or already masked by [`mask_secrets`].
 ///
