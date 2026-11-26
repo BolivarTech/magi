@@ -140,8 +140,7 @@ pub const DEFAULT_CODE_REVIEW_FALLBACKS: [(&str, f64); 2] =
 pub const DEFAULT_CODE_REVIEW_TIMEOUT_SECS: u64 =
     magi_rs::review::config::DEFAULT_CALL_TIMEOUT_SECS;
 /// Largest serialized gate `state`, in bytes: the request-size cap measured with the local
-/// `clef-flash` model (as [`SCAFFOLD_DECISION_MAX_STATE_BYTES`]). A larger state is never
-/// truncated: the finding passes unjudged.
+/// `clef-flash` model. A larger state is never truncated: the finding passes unjudged.
 pub const DEFAULT_CODE_REVIEW_MAX_STATE_BYTES: usize = 61_000;
 /// Whether the agent's `code-review` tool runs without asking: a review costs one consult per
 /// batch, so it asks by default, like `consult`.

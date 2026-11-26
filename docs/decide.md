@@ -31,7 +31,7 @@ Models used by the scaffold that `magi init` writes:
 | `togethercomputer/tev1-4b-experimental` | OpenRouter | fallback in the example |
 | `upstage/solar-decide` | OpenRouter | fallback in the example |
 
-`clef:cloud` needs Ollama 0.40.5 or later and `ollama signin`. It spends the Ollama account's quota, and every decision state goes to ollama.com, including the internal decisions (the mode of a consult and the memory contradiction check). Without `ollama signin` the daemon answers HTTP 401: the chain stops there (an auth failure is not retried on `nimble`) and the error names `ollama signin`. The local models have to be pulled once:
+`clef:cloud` needs Ollama 0.40.5 or later and `ollama signin`. It spends the Ollama account's quota, and every decision state goes to ollama.com, including the internal decisions (the mode of a consult and the memory contradiction check). Without `ollama signin` the daemon refuses `clef:cloud` with HTTP 401 and the chain moves on to `nimble`, which the daemon serves locally. A 401 on a model that is not a `:cloud` one still stops the chain. When the last model tried is refused, the call fails with `missing_key`, and the message names `ollama signin` only if that model is a `:cloud` one. Before any request is sent, every string value in the state goes through the same secret detector as a code review, so an API key, a token or a password in a URL leaves as `<redacted: ...>`; object keys are not changed. The local models have to be pulled once:
 
 ```bash
 ollama pull nimble
@@ -140,7 +140,7 @@ With a threshold set, a model whose answer falls below it is skipped and the nex
 
 Some models return slightly different numbers when the same request is repeated. A threshold set very close to a model's usual value can therefore accept in one call and rotate in the next, so leave a margin.
 
-`magi init` writes `min_confidence = 0.75` on `clef:cloud` and on `nimble`, active. The 0.75 comes from the maintainer's calibration of `clef-flash` and `nimble` on the maintainer's own prompts and was not measured again for `clef:cloud`, which may not look like yours; measure on your data before relying on it. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
+`magi init` writes `min_confidence = 0.85` on `clef:cloud` and on `nimble`, active. The 0.85 comes from the maintainer's calibration of `clef:cloud` with `nimble` as its fallback, on the maintainer's own prompts, which may not look like yours; measure on your data before relying on it. With `clef-flash` as the primary model, the same calibration chose 0.75. To disable the threshold, comment the lines out. The built-in defaults used when there is no `magi.toml` set no threshold.
 
 `tev1:0.8b` is not in the default chain: in the calibration it answered "yes" to almost every contradiction check, including pairs that did not contradict, and a wrong "yes" retires a memory that is still true.
 

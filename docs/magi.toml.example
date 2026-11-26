@@ -72,7 +72,7 @@ timeout_secs = 120
 # Approval of the agent's `decide` tool. Optional, default true.
 auto_approve = true
 # Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight
-# to the main model. 61000 fits Ollama's request-body cap (measured with the local `clef-flash`). With a hosted decision
+# to the main model. 61000 bounds the consults the threshold was calibrated on and what leaves for ollama.com. With a hosted decision
 # model such as typesafe/jev-1.13, raise it or delete the line (built-in default 128000).
 max_state_bytes = 61000
 # Below this confidence the answer is discarded and the next model in the chain is tried. When the
@@ -80,12 +80,12 @@ max_state_bytes = 61000
 # Optional, per model; commenting it out disables the threshold (the top option is always taken).
 # The value below comes from the maintainer's own calibration and may not fit your data or use
 # case: measure on yours before relying on it.
-min_confidence = 0.75
+min_confidence = 0.85
 
 # Ordered fallbacks on the SAME endpoint, tried after the primary fails.
 [[decision.fallback]]
 model = "nimble"
-min_confidence = 0.75
+min_confidence = 0.85
 
 # --- Example: OpenRouter (hosted). Needs DECISION_API_KEY in the environment or
 # --- `magi-rs vault set DECISION_API_KEY`. The key never goes in this file.
