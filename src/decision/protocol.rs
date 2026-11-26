@@ -88,6 +88,9 @@ const QUESTIONS_SECRET_REFUSED: &str = "the questions hold a secret and are neve
 /// The fixed reason for an input whose top-level field name holds a secret: the `unknown field`
 /// message would quote it (REQ-F12b).
 const INPUT_FIELD_SECRET_REFUSED: &str = "an input field name holds a secret and is never sent";
+/// The fixed reason for an explicit `model` that holds a secret: it would be sent, and
+/// `ModelUnavailable` quotes it (REQ-F12b).
+const MODEL_SECRET_REFUSED: &str = "the model name holds a secret and is never sent";
 /// Problem reported when the questions cannot be serialized.
 const QUESTIONS_UNSERIALIZABLE: &str = "the questions could not be serialized";
 
@@ -403,6 +406,7 @@ pub fn parse_decide_input(
     }
     let model = match fields.remove(MODEL_FIELD) {
         None => None,
+        Some(Value::String(m)) if leaks_secret(&m) => return Err(invalid(MODEL_SECRET_REFUSED)),
         Some(Value::String(m)) if !m.trim().is_empty() => Some(m.trim().to_owned()),
         Some(_) => return Err(invalid("`model` must be a non-blank string")),
     };
