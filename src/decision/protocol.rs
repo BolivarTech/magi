@@ -179,8 +179,9 @@ pub struct DecisionRequest {
 }
 
 impl DecisionRequest {
-    /// Validates the state shape and the questions (REQ-D07, REQ-D23), then masks the secrets of
-    /// the state (REQ-F12).
+    /// Scans the questions and the state for what never leaves the process, validates the state
+    /// shape and the questions (REQ-D07, REQ-D23), then masks the secrets of the state (REQ-F12).
+    /// The scans run before validation because a validation reason quotes a question name.
     ///
     /// Every path that sends a decision (the CLI and TUI `decide`, the `decide` tool and the
     /// internal adapters) builds its request here, so no state leaves the process with a
@@ -206,7 +207,8 @@ impl DecisionRequest {
     /// [`DecisionError::InvalidInput`] naming the problem; for refused state or questions, a fixed
     /// reason that quotes nothing of them.
     pub fn new(state: Value, questions: Questions) -> Result<Self, DecisionError> {
-        validate(&state, &questions)?;
+        // The egress scans come first: a validation reason quotes a question name, and no
+        // reason may be built from a string the scans would flag.
         let wire_questions =
             serde_json::to_value(&questions).map_err(|_| invalid(QUESTIONS_UNSERIALIZABLE))?;
         if any_string(&wire_questions, &leaks_secret) {
@@ -215,6 +217,7 @@ impl DecisionRequest {
         if any_string(&state, &holds_key_block) {
             return Err(invalid(KEY_BLOCK_REFUSED));
         }
+        validate(&state, &questions)?;
         let state = masked_strings(state);
         if any_string(&state, &leaks_secret) {
             return Err(invalid(RESIDUAL_SECRET_REFUSED));
