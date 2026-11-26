@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.25.1
+// Version: 0.26.0
 // Date: 2026-11-26
 
 //! System One protocol types and input validation (REQ-D07, REQ-D22, REQ-D23).

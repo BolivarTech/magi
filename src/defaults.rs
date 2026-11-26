@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.25.1
+// Version: 0.26.0
 // Date: 2026-11-26
 
 //! Built-in default backend profile (Ollama-first). MANUAL MAINTENANCE: these
@@ -56,7 +56,7 @@ pub const DEFAULT_MAGI_CASPAR_LINEAGE: &str = "deepseek";
 ///
 /// Kept apart from [`SCAFFOLD_DECISION_MODEL`] on purpose: the built-in chain runs with no
 /// threshold, the scaffold's with a calibrated one, so the two are adopted on separate evidence
-/// and may differ (in 0.25.1 both name `clef:cloud`; before that both named `clef-flash`, which
+/// and may differ (in 0.26.0 both name `clef:cloud`; before that both named `clef-flash`, which
 /// no longer loads on machines with a small GPU under Ollama 0.40.18, while `clef:cloud` is the
 /// same model family served by Ollama's cloud).
 pub const DEFAULT_DECISION_MODEL: &str = "clef:cloud";

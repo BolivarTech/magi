@@ -1,5 +1,5 @@
 # Author: Julian Bolivar
-# Version: 0.25.1
+# Version: 0.26.0
 # Date: 2026-11-26
 """D1-D14 -- ``magi decide`` against real backends, its refusals and its agent use.
 

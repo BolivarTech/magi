@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.25.1
+// Version: 0.26.0
 // Date: 2026-11-26
 
 //! One System One attempt over HTTP and the client that walks the chain (REQ-D00, REQ-D03,

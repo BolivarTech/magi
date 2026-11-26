@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.25.1
+// Version: 0.26.0
 // Date: 2026-11-26
 
 //! The review pipeline (REQ-RV05, REQ-RV06, §5.0): one `consult code-review` per batch, in
@@ -1893,7 +1893,7 @@ async fn prepare_contexts(
     // `context_for` brings the same units (the `units_for` contract), not computed twice.
     // MAGI FIX (MS3 §6 loop12): each batch's promised units are kept with their identity (file,
     // label), and reused only when `context_for` brings the same ones, not merely as many.
-    // MAGI FIX (v0.25.1): a unit shared by several hunks was charged once per hunk.
+    // MAGI FIX (v0.26.0): a unit shared by several hunks was charged once per hunk.
     let mut pre_units: Vec<PromisedUnits> = Vec::with_capacity(batches.len());
     let mut seen: HashSet<DedupKey> = HashSet::new();
     for batch in batches {
@@ -1911,7 +1911,7 @@ async fn prepare_contexts(
             .tokens
             .saturating_add(estimate_tokens(CONTEXT_HEADING));
         if code.saturating_add(units) > limit {
-            // MAGI FIX (v0.25.1): the error named no unit and numbered batches from 0.
+            // MAGI FIX (v0.26.0): the error named no unit and numbered batches from 0.
             let sent: Vec<ContextItem> = egress
                 .into_iter()
                 .filter_map(|e| match e {
@@ -2005,7 +2005,7 @@ async fn prepare_contexts(
         // charge: a growth that still fits drops nothing optional.
         let over_fit = pay_for_growth(&mut kept, fit, summary);
         if over_fit > 0 {
-            // MAGI FIX (v0.25.1): the error named no unit and numbered batches from 0.
+            // MAGI FIX (v0.26.0): the error named no unit and numbered batches from 0.
             let sent: Vec<ContextItem> = kept
                 .into_iter()
                 .map(|(item, _)| item)

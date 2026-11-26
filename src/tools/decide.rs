@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.25.1
+// Version: 0.26.0
 // Date: 2026-11-26
 
 //! The agent tool `decide` (REQ-D16, REQ-D19): a typed decision served by a System One model.

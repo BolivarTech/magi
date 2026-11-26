@@ -1,5 +1,5 @@
 // Author: Julian Bolivar
-// Version: 0.25.1
+// Version: 0.26.0
 // Date: 2026-11-26
 
 //! Contradiction judge answered by `decide` first and by the LLM judge second (REQ-D13).
