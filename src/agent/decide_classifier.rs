@@ -497,6 +497,24 @@ mod tests {
         assert!(!sent.contains(TOKEN), "{sent}");
     }
 
+    /// REQ-F12: content holding a private-key block is never sent; the inference falls back to
+    /// the LLM and writes one run-log entry, like any other refused request.
+    #[test]
+    fn content_with_a_private_key_block_falls_back_without_calling_decide() {
+        let d = "-----";
+        let content = format!("{d}BEGIN RSA PRIVATE KEY{d}\nMIIEowIBAAKCAQEAbodyline\n");
+        let client = Scripted::new(chose("design"));
+        let fb = Fallback::new(Some(Mode::Analysis));
+        let c = classifier(Some(Arc::clone(&client)), Arc::clone(&fb));
+        let lines = fallback_lines(async move {
+            assert_eq!(c.classify(&content).await, Some(Mode::Analysis));
+        });
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0, "never sent");
+        assert_eq!(fb.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(!lines[0].contains("bodyline"), "{lines:?}");
+    }
+
     /// The configured limit, not a built-in one, decides: one byte over a small limit goes to the
     /// LLM with a `too_large` entry, and content exactly at it reaches `decide`.
     #[test]

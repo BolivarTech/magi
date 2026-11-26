@@ -988,13 +988,57 @@ mod tests {
     }
 
     /// REQ-F12: object keys are left alone (masking them could collapse two entries), and plain
-    /// strings, numbers, booleans and null travel as they are.
+    /// strings, numbers, booleans and null travel as they are. A key holding a secret is refused
+    /// instead (`a_state_with_a_secret_only_in_a_key_is_refused_without_quoting_it`).
     #[test]
     fn object_keys_and_values_without_secrets_are_left_unchanged() {
         let questions: Questions = serde_json::from_value(noul()).expect("map");
-        let state = json!({SECRET_TOKEN: "plain text", "n": 3, "b": true, "z": null});
+        let state = json!({"plain key": "plain text", "n": 3, "b": true, "z": null});
         let req = DecisionRequest::new(state.clone(), questions).expect("valid");
         assert_eq!(req.state(), &state);
+    }
+
+    /// A private-key block: its header, one body line and its footer.
+    fn key_block() -> String {
+        let d = "-----";
+        format!("{d}BEGIN RSA PRIVATE KEY{d}\nMIIEowIBAAKCAQEAbodyline\n{d}END RSA PRIVATE KEY{d}")
+    }
+
+    /// The reason of an `InvalidInput` from [`DecisionRequest::new`].
+    fn new_reason(state: serde_json::Value) -> String {
+        let questions: Questions = serde_json::from_value(noul()).expect("map");
+        match DecisionRequest::new(state, questions) {
+            Err(DecisionError::InvalidInput { reason }) => reason,
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// REQ-F12 (fail closed, mutation-verified): a key block nested in a value is refused, and
+    /// the reason quotes none of it; a key body matches no pattern, so masking cannot be trusted.
+    #[test]
+    fn a_state_with_a_private_key_block_in_a_value_is_refused_without_quoting_it() {
+        let reason = new_reason(json!({"items": [{"note": format!("see {}", key_block())}]}));
+        assert!(!reason.contains("BEGIN"), "{reason}");
+        assert!(!reason.contains("bodyline"), "{reason}");
+        assert!(reason.contains("private-key block"), "{reason}");
+    }
+
+    /// REQ-F12: a key block in an object key is refused too; keys are never masked.
+    #[test]
+    fn a_state_with_a_private_key_block_in_a_key_is_refused() {
+        let mut fields = serde_json::Map::new();
+        fields.insert(key_block(), json!("plain"));
+        let reason = new_reason(serde_json::Value::Object(fields));
+        assert!(!reason.contains("bodyline"), "{reason}");
+    }
+
+    /// REQ-F12 (fail closed, mutation-verified): a secret masking cannot remove, here one in an
+    /// object key, is refused and never echoed.
+    #[test]
+    fn a_state_with_a_secret_only_in_a_key_is_refused_without_quoting_it() {
+        let reason = new_reason(json!({SECRET_TOKEN: "plain text"}));
+        assert!(!reason.contains(SECRET_TOKEN), "{reason}");
+        assert!(reason.contains("secret"), "{reason}");
     }
 
     /// Review Focus 2.
