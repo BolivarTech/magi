@@ -555,19 +555,21 @@ mod tests {
         crate::agent::decide_classifier::target_lines("magi_rs::memory::judge", f)
     }
 
-    /// Mutation-verified: a pair one of whose texts is withheld whole (here a token split by a
-    /// hidden character, which masking leaves and the egress check flags) is not judged on a
-    /// placeholder: no call, the pair is kept, and one run-log entry says so without content.
+    /// Mutation-verified: a pair one of whose texts is withheld whole (here a private-key block
+    /// in B, which withholds A with it) is not judged on placeholders: no call, the pair is
+    /// kept, and one run-log entry says so without content.
     #[test]
     fn a_pair_with_one_text_withheld_whole_is_kept_without_a_call_and_logged() {
         let recorder = PromptRecorder::answering("yes");
-        let split = format!("see ghp_AAAA\u{200b}{} here", "A".repeat(40)); // allow-secret-scan
+        let body = "MIIEowIBAAKCAQEAbodyline";
         let lines = judge_log_lines({
             let recorder = recorder.clone();
-            let split = split.clone();
             async move {
                 let judge = LlmDistillJudge::new(recorder);
-                let contradicts = judge.contradicts("plain statement", &split).await.unwrap();
+                let contradicts = judge
+                    .contradicts("plain statement", &key_block(body))
+                    .await
+                    .unwrap();
                 assert!(!contradicts, "a withheld pair is kept");
             }
         });
@@ -576,7 +578,7 @@ mod tests {
         let line = lines.first().map(String::as_str).unwrap_or_default();
         assert!(line.contains("contradiction check skipped"), "{line}");
         assert!(
-            !line.contains("AAAA") && !line.contains("plain statement"),
+            !line.contains(body) && !line.contains("plain statement"),
             "{line}"
         );
     }
