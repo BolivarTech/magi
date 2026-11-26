@@ -110,6 +110,10 @@ pub enum DecisionConfigError {
     /// `keep_alive` is a blank string.
     #[error("[decision].keep_alive must not be blank")]
     BlankKeepAlive,
+    /// `keep_alive` is a text that matches a secret pattern ([`leaks_secret`]). The message
+    /// quotes no part of it: the value is sent verbatim to the decision endpoint.
+    #[error("[decision].keep_alive matches a secret pattern; replace it with a duration")]
+    SecretKeepAlive,
 }
 
 impl DecisionSection {
@@ -169,6 +173,9 @@ impl DecisionSection {
         if let Some(KeepAlive::Text(ref t)) = self.keep_alive {
             if t.trim().is_empty() {
                 return Err(DecisionConfigError::BlankKeepAlive);
+            }
+            if leaks_secret(t) {
+                return Err(DecisionConfigError::SecretKeepAlive);
             }
         }
 

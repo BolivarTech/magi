@@ -11,7 +11,8 @@ use crate::decision::error::{
     is_ollama_cloud_model, Attempt, AttemptOutcome, Cause, Decision, DecisionError, Trace, Usage,
 };
 use crate::decision::protocol::{
-    lowest_confidence, parse_response, salvage_usage, DecisionRequest, ParsedResponse,
+    lowest_confidence, parse_response, salvage_usage, screen_wire_parts, DecisionRequest,
+    ParsedResponse,
 };
 use crate::redact::{redact_foreign_error, redact_foreign_text, redact_url};
 use std::time::{Duration, Instant};
@@ -508,7 +509,14 @@ impl DecisionClient for SystemOneClient {
         // clears it for good.
         let mut last_bad_request: Option<String> = None;
         let mut only_bad_requests = true;
-        for spec in self.plan(request) {
+        let plan = self.plan(request);
+        // Before any attempt is sent or logged: a model or keep-alive text that holds a secret
+        // would leave verbatim in the body and the run log, whatever set it.
+        screen_wire_parts(
+            plan.iter().map(|spec| spec.model.as_str()),
+            self.settings.keep_alive.as_ref(),
+        )?;
+        for spec in plan {
             let attempt_started = Instant::now();
             // A serialization failure ends the call as an explicit error: no empty body is sent.
             let body = request.wire_body(&spec.model, self.settings.keep_alive.as_ref())?;

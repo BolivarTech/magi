@@ -98,6 +98,13 @@ const MODEL_SECRET_REFUSED: &str =
     "the model name matches a secret pattern and is never sent; rename or remove it";
 /// Problem reported when the questions cannot be serialized.
 const QUESTIONS_UNSERIALIZABLE: &str = "the questions could not be serialized";
+/// The fixed reason for a model of an attempt that holds a secret, whatever set it
+/// (configuration, `with_model`, an explicit input): it would be sent and logged.
+const WIRE_MODEL_SECRET_REFUSED: &str =
+    "a decision model name matches a secret pattern and is never sent";
+/// The fixed reason for a `keep_alive` text that holds a secret: it would be sent verbatim.
+const KEEP_ALIVE_SECRET_REFUSED: &str =
+    "the keep_alive value matches a secret pattern and is never sent";
 
 /// Builds the error every validation failure of this module returns.
 fn invalid(reason: impl Into<String>) -> DecisionError {
@@ -345,6 +352,36 @@ impl DecisionRequest {
         }
         Ok(Value::Object(body))
     }
+}
+
+/// Refuses the parts of a wire body that are not the request itself, before any attempt is
+/// sent or logged: each model of the attempts and a `keep_alive` text (REQ-F12b). Whatever set
+/// them (configuration, [`DecisionRequest::with_model`], an explicit input), a part that
+/// [`leaks_secret`] flags would leave verbatim in the body and in the run log. O(bytes of the
+/// names and the text).
+///
+/// # Arguments
+/// * `models` - The model of every attempt the call may make.
+/// * `keep_alive` - The keep-alive value sent with each attempt, if any.
+///
+/// # Returns
+/// `Ok(())` when nothing is flagged.
+///
+/// # Errors
+/// [`DecisionError::InvalidInput`] with a fixed reason that quotes nothing.
+pub(crate) fn screen_wire_parts<'a>(
+    mut models: impl Iterator<Item = &'a str>,
+    keep_alive: Option<&KeepAlive>,
+) -> Result<(), DecisionError> {
+    if let Some(KeepAlive::Text(text)) = keep_alive {
+        if leaks_secret(text) {
+            return Err(invalid(KEEP_ALIVE_SECRET_REFUSED));
+        }
+    }
+    if models.any(leaks_secret) {
+        return Err(invalid(WIRE_MODEL_SECRET_REFUSED));
+    }
+    Ok(())
 }
 
 /// Refuses an input object whose field names hold a secret, before any message that quotes a
