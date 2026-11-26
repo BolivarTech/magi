@@ -222,6 +222,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     /// A token with the shape of a GitHub personal access token; never a real one.
     const SECRET_TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
@@ -234,6 +235,9 @@ mod tests {
                 "questions": {"q": {"type": "noul", "instructions": "Is it?"}}}),
             json!({"state": {"t": "x"},
                 "questions": {SECRET_TOKEN: {"type": "nonsense", "instructions": "Which?"}}}),
+            // serde quotes an unknown variant, so here the leak assertion itself guards.
+            json!({"state": {"t": "x"},
+                "questions": {"q": {"type": SECRET_TOKEN, "instructions": "Which?"}}}),
         ];
         for args in cases {
             match request_from(args) {
@@ -245,7 +249,6 @@ mod tests {
             }
         }
     }
-    use tokio_util::sync::CancellationToken;
 
     struct Scripted {
         reply: Result<Decision, DecisionError>,
