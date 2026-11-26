@@ -68,9 +68,11 @@ pub const SCAFFOLD_DECISION_MODEL: &str = "clef:cloud";
 /// Ordered fallbacks the scaffold writes, on the same endpoint as the primary.
 pub const SCAFFOLD_DECISION_FALLBACK_MODELS: [&str; 1] = ["nimble"];
 /// Confidence threshold the scaffold writes, active, on every chain entry (REQ-D24). It comes from
-/// the maintainer's calibration of `clef-flash` followed by `nimble`, kept for `clef:cloud`; the
-/// built-in defaults of [`default_decision_section`] carry none.
-pub const SCAFFOLD_DECISION_MIN_CONFIDENCE: f64 = 0.75;
+/// the maintainer's calibration of the chain `clef:cloud` followed by `nimble` on 2026-11-26: at
+/// 0.75 the memory contradiction check fell short of its accuracy bar (61 of 99 against 63
+/// required), while 0.85 met every criterion (mode 440 of 500, contradiction 63 of 99, 17 false
+/// "yes" answers out of 61). The built-in defaults of [`default_decision_section`] carry none.
+pub const SCAFFOLD_DECISION_MIN_CONFIDENCE: f64 = 0.85;
 /// Per-attempt timeout in seconds; sized to cover a local cold model load (REQ-D21).
 pub const DEFAULT_DECISION_TIMEOUT_SECS: u64 = 120;
 /// Whether the agent's `decide` tool runs without asking (REQ-D16).
@@ -81,11 +83,11 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// it. Ollama rejects any request body over 64 KiB before loading the model, so with Ollama a
 /// larger state just falls back to the main model at no cost.
 pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 128_000;
-/// State limit the scaffold writes, active: a 61 455-byte state was accepted with the local
-/// `clef-flash` model in the calibration, which saw no rejection by window, only the request-body
-/// cap of Ollama (64 KiB), which the local daemon also applies when it relays to `clef:cloud`.
-/// `nimble`, the fallback, rejects by window from about 19 KB; that falls through to the main
-/// model.
+/// State limit the scaffold writes, active. It is not a limit of the daemon: a size probe of
+/// `clef:cloud` on 2026-11-26 accepted states up to 131 087 bytes without a rejection. 61 000 is
+/// kept because it bounds the states the threshold was calibrated on, and it bounds what leaves
+/// the machine for ollama.com. `nimble`, the fallback, rejects by window from about 19 KB; that
+/// falls through to the main model.
 pub const SCAFFOLD_DECISION_MAX_STATE_BYTES: usize = 61_000;
 
 /// The decision section applied when `magi.toml` is absent, and the chain the scaffold writes
@@ -945,7 +947,7 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(
         out,
-        "# to the main model. {} fits Ollama's request-body cap (measured with the local `clef-flash`). With a hosted decision",
+        "# to the main model. {} bounds the consults the threshold was calibrated on and what leaves for ollama.com. With a hosted decision",
         SCAFFOLD_DECISION_MAX_STATE_BYTES
     )
     .unwrap();

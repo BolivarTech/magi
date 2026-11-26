@@ -1273,7 +1273,7 @@ D14_ASSERTIONS = (
 #: The model, threshold and fallback ``magi init`` writes into ``[decision]``.
 ADOPTED_MODEL = "clef:cloud"
 ADOPTED_FALLBACK = "nimble"
-ADOPTED_MIN_CONFIDENCE = 0.75
+ADOPTED_MIN_CONFIDENCE = 0.85
 
 #: Causes of a first hop that mean the backend or the model is missing, which
 #: is the environment's refusal and not the product's.
