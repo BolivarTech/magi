@@ -1714,7 +1714,7 @@ pub fn withheld_whole(outward: &str) -> bool {
 ///
 /// let header = concat!("-----", "BEGIN RSA PRIVATE KEY-----");
 /// let out = outward_prompt_texts(&["plain", header, "MIIE"]);
-/// assert_eq!(out, ["plain", KEY_BLOCK_WITHHELD, KEY_BLOCK_WITHHELD]);
+/// assert_eq!(out, [KEY_BLOCK_WITHHELD, KEY_BLOCK_WITHHELD, KEY_BLOCK_WITHHELD]);
 /// ```
 pub fn outward_prompt_texts(texts: &[&str]) -> Vec<String> {
     let mut after_block = false;
@@ -3690,16 +3690,17 @@ mod tests {
         assert!(!withheld_whole("plain"));
     }
 
-    /// Mutation-verified: a text after one withheld for a key block is withheld too, since it
-    /// may hold that block's body; a text before it, and clean texts, keep their content.
+    /// Mutation-verified: once the texts of one prompt hold a key block, every text of it is
+    /// withheld, the ones before the block included, since any of them may hold its body;
+    /// clean texts keep their content.
     #[test]
-    fn a_prompt_text_after_a_key_block_header_is_withheld_with_it() {
+    fn every_prompt_text_is_withheld_when_the_prompt_holds_a_key_block() {
         let (header, body) = split_key_block();
         let texts = outward_prompt_texts(&["plain first", &header, body, "plain last"]);
         assert_eq!(
             texts,
             vec![
-                "plain first".to_string(),
+                KEY_BLOCK_WITHHELD.to_string(),
                 KEY_BLOCK_WITHHELD.to_string(),
                 KEY_BLOCK_WITHHELD.to_string(),
                 KEY_BLOCK_WITHHELD.to_string(),
@@ -3707,6 +3708,22 @@ mod tests {
         );
         assert_eq!(outward_prompt_texts(&["a", "b"]), vec!["a", "b"]);
         assert!(outward_prompt_texts(&[]).is_empty());
+    }
+
+    /// Mutation-verified: a key block whose body sits in an earlier text and whose header and
+    /// footer sit in a later one is withheld whole: the body line never leaves.
+    #[test]
+    fn a_key_body_before_its_header_in_a_later_text_is_withheld() {
+        let (header, body) = split_key_block();
+        let later = format!("{header}\n-----END RSA PRIVATE KEY-----");
+        let texts = outward_prompt_texts(&[body, &later]);
+        assert_eq!(
+            texts,
+            vec![
+                KEY_BLOCK_WITHHELD.to_string(),
+                KEY_BLOCK_WITHHELD.to_string()
+            ]
+        );
     }
 
     /// A JSON array nested `depth` levels deep around the string `leaf`, built in process

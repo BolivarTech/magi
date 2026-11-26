@@ -422,7 +422,8 @@ mod tests {
         assert!(prompt.contains("\nB: the token "), "{prompt:?}");
     }
 
-    /// A memory holding a private-key block is withheld whole from the contradiction prompt.
+    /// A memory holding a private-key block is withheld whole from the contradiction prompt,
+    /// and so is the other memory of the pair, which may hold part of that block.
     #[tokio::test]
     async fn a_private_key_block_in_a_memory_pair_never_reaches_the_contradiction_prompt() {
         let recorder = PromptRecorder::answering("no");
@@ -438,7 +439,7 @@ mod tests {
             prompt.contains(magi_rs::review::secrets::KEY_BLOCK_WITHHELD),
             "{prompt:?}"
         );
-        assert!(prompt.contains("A: plain statement"), "{prompt:?}");
+        assert!(!prompt.contains("plain statement"), "{prompt:?}");
     }
 
     /// A key block whose header ends memory A and whose body opens memory B: the header
@@ -463,7 +464,8 @@ mod tests {
         assert!(prompt.contains(&format!("\nB: {withheld}")), "{prompt:?}");
     }
 
-    /// The same split across two episodic memories never reaches the preference prompt.
+    /// The same split across two episodic memories never reaches the preference prompt, and
+    /// every memory of that prompt is withheld with it.
     /// Mutation-verified: masking each memory on its own turns this red.
     #[tokio::test]
     async fn a_key_block_split_across_episodic_memories_never_reaches_the_preference_prompt() {
@@ -479,7 +481,48 @@ mod tests {
         judge.summarize_preferences(&episodic).await.unwrap();
         let prompt = recorder.only_prompt();
         assert!(!prompt.contains(body), "{prompt:?}");
-        assert!(prompt.contains("I like tabs"), "{prompt:?}");
+        assert!(!prompt.contains("I like tabs"), "{prompt:?}");
+    }
+
+    /// A key body in memory A whose header and footer sit in memory B: the pair holds a block,
+    /// so both are withheld and no body line reaches the contradiction prompt.
+    /// Mutation-verified: dropping the check over the joined texts turns this red.
+    #[tokio::test]
+    async fn a_key_body_before_its_header_never_reaches_the_contradiction_prompt() {
+        let recorder = PromptRecorder::answering("no");
+        let judge = LlmDistillJudge::new(recorder.clone());
+        let d = "-----";
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        judge
+            .contradicts(
+                body,
+                &format!("{d}BEGIN RSA PRIVATE KEY{d}\n{d}END RSA PRIVATE KEY{d}"),
+            )
+            .await
+            .unwrap();
+        let prompt = recorder.only_prompt();
+        assert!(!prompt.contains(body), "{prompt:?}");
+        let withheld = magi_rs::review::secrets::KEY_BLOCK_WITHHELD;
+        assert!(prompt.contains(&format!("\nA: {withheld}")), "{prompt:?}");
+    }
+
+    /// The same order across two episodic memories never reaches the preference prompt.
+    /// Mutation-verified: dropping the check over the joined texts turns this red.
+    #[tokio::test]
+    async fn a_key_body_before_its_header_never_reaches_the_preference_prompt() {
+        let recorder = PromptRecorder::answering("- none");
+        let judge = LlmDistillJudge::new(recorder.clone());
+        let d = "-----";
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        let episodic = vec![
+            make_episodic(body),
+            make_episodic(&format!(
+                "{d}BEGIN RSA PRIVATE KEY{d}\n{d}END RSA PRIVATE KEY{d}"
+            )),
+        ];
+        judge.summarize_preferences(&episodic).await.unwrap();
+        let prompt = recorder.only_prompt();
+        assert!(!prompt.contains(body), "{prompt:?}");
     }
 
     /// The preference prompt carries episodic memory texts to the main model too: a token is
