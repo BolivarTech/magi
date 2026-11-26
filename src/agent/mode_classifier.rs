@@ -58,6 +58,9 @@ const NOTICE_CLASSIFY_TIMEOUT: &str = "classify.timeout";
 
 /// Target recorded on the notices this module emits.
 const NOTICE_TARGET: &str = "magi_rs::agent::mode_classifier";
+/// Target of this module's run-log entries (never shown on screen; see [`NOTICE_TARGET`] for
+/// what the user sees).
+const LOG_TARGET: &str = "magi_rs::agent::mode_classifier";
 /// Notices do not travel the appender's channel, so they reserve nothing.
 const NO_RESERVATION: usize = 0;
 
@@ -302,6 +305,12 @@ impl ModeClassifier for ProviderClassifier {
         // on the timeout path.
         let content = outward_prompt_text(content);
         if withheld_whole(&content) {
+            // One entry per occurrence, with no content: the reason is all the log may say.
+            tracing::event!(
+                target: LOG_TARGET,
+                tracing::Level::INFO,
+                "mode inference skipped: the consult was withheld for a secret"
+            );
             return None;
         }
         let (cost, cost_alarm) = self.auditor.audit(
