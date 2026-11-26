@@ -332,6 +332,38 @@ impl DecisionRequest {
     }
 }
 
+/// Refuses an input object whose field names hold a secret, before any message that quotes a
+/// field name (`unknown field`) is built (REQ-F12b). Every surface that parses a decision
+/// request from untrusted JSON calls it first. O(bytes of the names).
+///
+/// # Arguments
+/// * `fields` - The top-level fields of the input object.
+///
+/// # Errors
+/// [`DecisionError::InvalidInput`] with a fixed reason that quotes nothing.
+pub fn screen_field_names(fields: &serde_json::Map<String, Value>) -> Result<(), DecisionError> {
+    if fields.keys().any(|k| leaks_secret(k)) {
+        return Err(invalid(INPUT_FIELD_SECRET_REFUSED));
+    }
+    Ok(())
+}
+
+/// Refuses raw `questions` holding a secret in any string or key, before parsing: a parse error
+/// quotes the question name and serde's text, which can quote a value (REQ-F12b).
+/// O(bytes of the questions).
+///
+/// # Arguments
+/// * `questions` - The unparsed `questions` value.
+///
+/// # Errors
+/// [`DecisionError::InvalidInput`] with a fixed reason that quotes nothing.
+pub fn screen_raw_questions(questions: &Value) -> Result<(), DecisionError> {
+    if any_string(questions, &leaks_secret) {
+        return Err(invalid(QUESTIONS_SECRET_REFUSED));
+    }
+    Ok(())
+}
+
 /// Parses and validates the input of `magi decide` (REQ-D22, REQ-D23).
 ///
 /// Complexity: O(input size).
@@ -365,10 +397,7 @@ pub fn parse_decide_input(
     else {
         return Err(invalid("the input must be a JSON object"));
     };
-    // REQ-F12b: the egress scan runs before any message that quotes the input is built.
-    if fields.keys().any(|k| leaks_secret(k)) {
-        return Err(invalid(INPUT_FIELD_SECRET_REFUSED));
-    }
+    screen_field_names(&fields)?;
     if let Some(unknown) = fields.keys().find(|k| !INPUT_FIELDS.contains(&k.as_str())) {
         return Err(invalid(format!("unknown field `{unknown}`")));
     }
@@ -391,10 +420,7 @@ pub fn parse_decide_input(
             .map_err(|_| invalid("the questions file is not valid JSON"))?,
         (None, None) => return Err(invalid("missing field `questions`")),
     };
-    // A parse error quotes the question name and serde's text; scan the raw value first.
-    if any_string(&questions, &leaks_secret) {
-        return Err(invalid(QUESTIONS_SECRET_REFUSED));
-    }
+    screen_raw_questions(&questions)?;
     let mut request = DecisionRequest::new(state, parse_questions(questions)?)?;
     request.model = model;
     Ok(request)

@@ -9,6 +9,7 @@
 use crate::tools::{Tool, ToolError};
 use async_trait::async_trait;
 use magi_rs::decision::envelope::{render_envelope_masked, Audience};
+use magi_rs::decision::protocol::{screen_field_names, screen_raw_questions};
 use magi_rs::decision::{Decision, DecisionClient, DecisionError, DecisionRequest, Questions};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -117,6 +118,7 @@ fn request_from(args: Value) -> Result<DecisionRequest, ToolError> {
             "the arguments must be a JSON object".to_string(),
         ));
     };
+    screen_field_names(&fields).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
     if let Some(unknown) = fields
         .keys()
         .find(|k| k.as_str() != STATE_FIELD && k.as_str() != QUESTIONS_FIELD)
@@ -131,6 +133,7 @@ fn request_from(args: Value) -> Result<DecisionRequest, ToolError> {
     let questions = fields
         .remove(QUESTIONS_FIELD)
         .ok_or_else(|| ToolError::InvalidArguments("missing field `questions`".to_string()))?;
+    screen_raw_questions(&questions).map_err(|e| ToolError::InvalidArguments(e.to_string()))?;
     let questions: Questions = serde_json::from_value(questions)
         .map_err(|e| ToolError::InvalidArguments(format!("invalid `questions`: {e}")))?;
     DecisionRequest::new(state, questions).map_err(|e| ToolError::InvalidArguments(e.to_string()))
