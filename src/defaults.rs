@@ -917,6 +917,17 @@ pub fn render_default_magi_toml() -> String {
     );
     writeln!(
         out,
+        "# The {} thresholds below were calibrated for {}; the maintainer's calibration chose 0.75",
+        SCAFFOLD_DECISION_MIN_CONFIDENCE, SCAFFOLD_DECISION_MODEL
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# for clef-flash, so set min_confidence again, or re-measure it, after the swap."
+    )
+    .unwrap();
+    writeln!(
+        out,
         "# Per-attempt timeout in seconds (covers a local cold load). Optional, default {}.",
         DEFAULT_DECISION_TIMEOUT_SECS
     )
@@ -952,20 +963,25 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(
         out,
-        "# to the main model. {} bounds the consults the threshold was calibrated on and what leaves",
+        "# to the main model. The line below sets {}: it bounds the consults the threshold was",
         SCAFFOLD_DECISION_MAX_STATE_BYTES
     )
     .unwrap();
     writeln!(
         out,
-        "# for ollama.com; the default {} keeps it. With another hosted provider (for example",
+        "# calibrated on and what leaves for ollama.com, so keep it with the default {}.",
         SCAFFOLD_DECISION_MODEL
     )
     .unwrap();
     writeln!(
         out,
-        "# typesafe/jev-1.13 on OpenRouter), you may raise it or delete the line (built-in default {}).",
+        "# Without the line the built-in default, {}, applies instead. With another hosted provider",
         DEFAULT_DECISION_MAX_STATE_BYTES
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# (for example typesafe/jev-1.13 on OpenRouter), you may raise the value or delete the line."
     )
     .unwrap();
     writeln!(

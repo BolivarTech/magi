@@ -263,12 +263,12 @@ invocation), and the body OpenRouter returns for an unknown model, which belongs
 
 D14 adds two assertions: the scaffold names its decision model (`clef:cloud` since v0.25.1,
 `clef-flash` before) with its threshold active, and
-`magi decide` answers the three-type example request with it. The harness now promises 43
-scenarios and 127 assertions.
+`magi decide` answers the three-type example request with it. As of v0.24.0 the harness
+promised 43 scenarios and 127 assertions; it now declares 58 and 174 (`smoke/registry.py`).
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| D14 | in a workspace scaffolded by `magi init`, the parsed `[decision]` section has `model = "clef:cloud"`, an active `min_confidence = 0.85` and `nimble` as first fallback; and `magi decide` run there with the example request exits 0 with `clef:cloud` as the answering model | `CANNOT_TEST` with no reachable local Ollama (the runner's backend rule), and for the second assertion when the first hop fails because the model is missing, unreachable or timed out, because the daemon is signed out (`unauthorized`, fix: `ollama signin`) or because the cloud quota is spent (`rate_limited`); never `FAIL` for those |
+| D14 | in a workspace scaffolded by `magi init`, the parsed `[decision]` section has `model = "clef:cloud"`, an active `min_confidence = 0.85` and `nimble` as first fallback with the same active threshold; and `magi decide` run there with the example request exits 0 with `clef:cloud` as the answering model | `CANNOT_TEST` with no reachable local Ollama (the runner's backend rule), and for the second assertion when the first hop fails because the model is missing, unreachable or timed out, because the daemon is signed out (`unauthorized`, fix: `ollama signin`) or because the cloud quota is spent (`rate_limited`); never `FAIL` for those |
 
 The threshold is read from the parsed file, so a commented-out line does not count. D14 seeds
 its own scratch workspace and keeps the text `init` wrote, so it judges what a new user gets,
@@ -277,8 +277,9 @@ in `src/defaults.rs` changes.
 
 ### The per-section key scenarios (v0.24.0)
 
-K1 to K3 add seven assertions (2 + 3 + 2). The harness now promises 42 scenarios and 125
-assertions; the adoption scenario D14 raises that to 43 and 127.
+K1 to K3 add seven assertions (2 + 3 + 2). As of v0.24.0 the harness promised 42 scenarios and
+125 assertions, and the adoption scenario D14 raised that to 43 and 127. It now declares 58
+scenarios and 174 assertions (`smoke/registry.py`).
 
 | Id | Invariant | Without its environment |
 |---|---|---|
