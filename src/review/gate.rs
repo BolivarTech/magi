@@ -1118,7 +1118,8 @@ impl<'a> Gate<'a> {
                 Err(DecisionError::Unauthorized { .. })
                     if is_ollama_cloud_model(&spec.model)
                         && chain.iter().skip(index + 1).any(|later| {
-                            !self.rejected.contains(&later.model)
+                            later.model != spec.model
+                                && !self.rejected.contains(&later.model)
                                 && !self.refused.contains(&later.model)
                         }) =>
                 {
