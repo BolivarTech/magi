@@ -28,7 +28,7 @@ use crate::decision::{
 
 use super::config::DEFAULT_CALL_TIMEOUT_SECS;
 use super::consolidate::ConsolidatedFinding;
-use super::secrets::{any_string, find_secret, holds_key_block, masked_strings, REDACTED_OPEN};
+use super::secrets::{any_string, holds_key_block, leaks_secret, masked_strings, REDACTED_OPEN};
 
 /// Name of the gate's only question.
 pub const GATE_QUESTION_NAME: &str = "gate";
@@ -963,7 +963,8 @@ impl<'a> Gate<'a> {
     /// (`a_state_whose_own_text_quotes_a_key_block_is_never_sent`). Such a string
     /// withholds it (`secret`: RV22's exception, a key body has no pattern of its own); otherwise
     /// every one-line secret of every string is masked ([`masked_strings`]), and the masked state
-    /// is withheld when it is over `max_state_bytes` (`state too large`) or masking left a match
+    /// is withheld when it is over `max_state_bytes` (`state too large`) or masking left what the
+    /// one egress predicate ([`leaks_secret`]) withholds
     /// (`secret`). O(bytes of the state).
     ///
     /// Declared limit (RV22): the check is per string, so key-body lines quoted in a detail
@@ -979,7 +980,7 @@ impl<'a> Gate<'a> {
         let state = masked_strings(state);
         if state.to_string().len() > self.max_state_bytes {
             Err(CAUSE_STATE_TOO_LARGE)
-        } else if any_string(&state, &|text| find_secret(text).is_some()) {
+        } else if any_string(&state, &leaks_secret) {
             Err(CAUSE_SECRET)
         } else {
             Ok(state)
@@ -1129,7 +1130,7 @@ mod tests {
     use super::*;
     use crate::decision::client::MockDecisionClient;
     use crate::decision::{Answer, Attempt, AttemptOutcome, Cause, Decision, DecisionError, Trace};
-    use crate::review::secrets::mask_secrets;
+    use crate::review::secrets::{find_secret, mask_secrets};
     use magi_core::schema::{AgentName, Category, Severity};
 
     fn finding(sev: Severity, line: Option<u32>) -> ConsolidatedFinding {
