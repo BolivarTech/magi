@@ -4,6 +4,8 @@
 
 //! Configuration types of the `[decision]` section (REQ-D01, REQ-D21).
 
+use crate::review::secrets::leaks_secret;
+
 /// Value of `[decision].keep_alive`: an Ollama duration (`"10m"`) or a number of
 /// seconds (`-1` keeps the model loaded). Sent verbatim when declared (REQ-D01).
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -83,6 +85,10 @@ pub enum DecisionConfigError {
         /// Where the blank model is.
         position: String,
     },
+    /// A model name, primary or fallback, matches a secret pattern ([`leaks_secret`]). The
+    /// message quotes no part of it: the name would reach the decision endpoint and the run log.
+    #[error("a [decision] model name matches a secret pattern; rename it")]
+    SecretModel,
     /// A model appears twice in the chain.
     #[error("model '{model}' appears more than once in [decision] and its fallbacks")]
     DuplicateModel {
@@ -122,7 +128,8 @@ impl DecisionSection {
     ///
     /// # Errors
     ///
-    /// Returns the first violated rule as a [`DecisionConfigError`].
+    /// Returns the first violated rule as a [`DecisionConfigError`]; a model name the egress
+    /// predicate flags is checked before any rule whose message quotes a name.
     pub fn validate(&self) -> Result<(), DecisionConfigError> {
         const PRIMARY_POSITION: &str = "[decision].model";
         const FALLBACK_POSITION_PREFIX: &str = "[[decision.fallback]] #";
@@ -142,6 +149,13 @@ impl DecisionSection {
                     position: format!("{}{}", FALLBACK_POSITION_PREFIX, idx + 1),
                 });
             }
+        }
+
+        // Before every rule whose message quotes a model name.
+        let mut models =
+            std::iter::once(&self.model).chain(self.fallback.iter().map(|fb| &fb.model));
+        if models.any(|model| leaks_secret(model)) {
+            return Err(DecisionConfigError::SecretModel);
         }
 
         if self.timeout_secs == Some(0) {
