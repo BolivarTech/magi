@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.23.0
-// Date: 2026-10-11
+// Version: 0.26.0
+// Date: 2026-11-26
 
 //! Configuration types of the `[decision]` section (REQ-D01, REQ-D21).
 
