@@ -8136,6 +8136,45 @@ mod tests {
         assert!(what.ends_with(" and 1 more"));
     }
 
+    /// REQ-F15 / F-S21: a long label is cut on a character boundary after 80 characters and
+    /// marked with `...`.
+    #[test]
+    fn a_long_unit_label_is_cut_at_eighty_characters() {
+        let label: String = "ñ".repeat(100) + &"x".repeat(100);
+        let unit = sized("f.py", &label, false, 1_000);
+        let what = units_over_limit(0, std::slice::from_ref(&unit));
+        let kept: String = label.chars().take(80).collect();
+        let one_more: String = label.chars().take(81).collect();
+        assert!(what.contains(&format!(" {kept}... of f.py (")), "{what}");
+        assert!(!what.contains(&one_more), "{what}");
+    }
+
+    /// REQ-F15: the cut never splits a secret-shaped token into a prefix the masking no longer
+    /// recognizes; the token is masked before the label is bounded.
+    #[test]
+    fn the_label_cut_never_leaves_a_partial_secret() {
+        const TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let label = format!("{} {TOKEN}", "x".repeat(59));
+        let unit = sized("f.py", &label, false, 1_000);
+        let what = ReviewError::TooLargeForBatch {
+            what: units_over_limit(0, std::slice::from_ref(&unit)),
+            tokens: 2,
+            limit: 1,
+        }
+        .to_string();
+        assert!(!what.contains("ghp_AAAA"), "{what}");
+    }
+
+    /// REQ-F15: a label of exactly 80 characters is written whole, without `...`.
+    #[test]
+    fn a_unit_label_of_eighty_characters_is_kept_whole() {
+        let label = "ü".repeat(80);
+        let unit = sized("f.py", &label, false, 1_000);
+        let what = units_over_limit(0, std::slice::from_ref(&unit));
+        assert!(what.contains(&format!(" {label} of f.py (")), "{what}");
+        assert!(!what.contains("..."), "{what}");
+    }
+
     #[test]
     fn an_old_side_unit_is_marked() {
         // F-S13 / D3.
