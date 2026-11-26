@@ -242,10 +242,12 @@ pub enum DecisionError {
         /// Attempts so far.
         trace: Trace,
     },
-    /// The endpoint refused the credentials.
+    /// The endpoint refused the credentials; the message also points a signed-out Ollama
+    /// daemon (cloud models) at `ollama signin`.
     #[error(
         "the decision endpoint refused the request credentials (HTTP {status}); set DECISION_API_KEY \
-         in the environment or with `magi-rs vault set DECISION_API_KEY`"
+         in the environment or with `magi-rs vault set DECISION_API_KEY`; \
+         for an Ollama `:cloud` model, run `ollama signin` instead"
     )]
     Unauthorized {
         /// HTTP status.
