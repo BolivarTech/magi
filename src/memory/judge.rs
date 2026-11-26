@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use magi_rs::review::secrets::outward_prompt_texts;
+use magi_rs::review::secrets::{outward_prompt_texts, KEY_BLOCK_WITHHELD};
 
 use crate::agent::messages::Message;
 use crate::agent::provider::Provider;
@@ -92,12 +92,13 @@ impl DistillJudge for LlmDistillJudge {
 
     async fn contradicts(&self, a: &str, b: &str) -> Result<bool, MemoryError> {
         // One outward text per input text, in order; both are withheld when the pair holds a
-        // key block.
+        // key block. A missing element (never, by its contract) is withheld, not sent empty.
         let mut pair = outward_prompt_texts(&[a, b]).into_iter();
-        let (a, b) = (
-            pair.next().unwrap_or_default(),
-            pair.next().unwrap_or_default(),
-        );
+        let mut next = || {
+            pair.next()
+                .unwrap_or_else(|| KEY_BLOCK_WITHHELD.to_string())
+        };
+        let (a, b) = (next(), next());
         let prompt = format!(
             "Does statement B contradict or supersede statement A about the same subject? \
              Answer only yes or no.\nA: {a}\nB: {b}"
