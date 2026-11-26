@@ -31,7 +31,7 @@ Models used by the scaffold that `magi init` writes:
 | `togethercomputer/tev1-4b-experimental` | OpenRouter | fallback in the example |
 | `upstage/solar-decide` | OpenRouter | fallback in the example |
 
-`clef:cloud` needs Ollama 0.40.5 or later and `ollama signin`. It spends the Ollama account's quota, and every decision state goes to ollama.com, including the internal decisions (the mode of a consult and the memory contradiction check). The local models have to be pulled once:
+`clef:cloud` needs Ollama 0.40.5 or later and `ollama signin`. It spends the Ollama account's quota, and every decision state goes to ollama.com, including the internal decisions (the mode of a consult and the memory contradiction check). Without `ollama signin` the daemon answers HTTP 401: the chain stops there (an auth failure is not retried on `nimble`) and the error names `ollama signin`. The local models have to be pulled once:
 
 ```bash
 ollama pull nimble
