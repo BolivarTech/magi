@@ -61,7 +61,7 @@ model = "claude-sonnet-4-6"
 # port), and sends no key on any other origin.
 # Primary decision model. Required in this section.
 model        = "clef:cloud"
-# model      = "clef-flash"  # local alternative, needs ollama pull clef-flash
+# To keep decisions local, replace the model above with "clef-flash" (ollama pull clef-flash).
 # Per-attempt timeout in seconds (covers a local cold load). Optional, default 120.
 # `clef:cloud` runs in Ollama's cloud: it needs Ollama 0.40.5 or later and `ollama signin`,
 # spends the Ollama account's quota, and sends each decision state to ollama.com, its secrets
@@ -73,8 +73,9 @@ timeout_secs = 120
 # Approval of the agent's `decide` tool. Optional, default true.
 auto_approve = true
 # Largest consult, in bytes, whose mode is inferred with `decide`; larger consults go straight
-# to the main model. 61000 bounds the consults the threshold was calibrated on and what leaves for ollama.com. With a hosted decision
-# model such as typesafe/jev-1.13, raise it or delete the line (built-in default 128000).
+# to the main model. 61000 bounds the consults the threshold was calibrated on and what leaves
+# for ollama.com; the default clef:cloud keeps it. With another hosted provider (for example
+# typesafe/jev-1.13 on OpenRouter), you may raise it or delete the line (built-in default 128000).
 max_state_bytes = 61000
 # Below this confidence the answer is discarded and the next model in the chain is tried. When the
 # chain is exhausted, internal decisions fall back to the LLM and explicit calls return an error.

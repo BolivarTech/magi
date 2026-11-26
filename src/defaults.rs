@@ -912,7 +912,7 @@ pub fn render_default_magi_toml() -> String {
     writeln!(out, "# Primary decision model. Required in this section.").unwrap();
     writeln!(out, "model        = \"{}\"", SCAFFOLD_DECISION_MODEL).unwrap();
     out.push_str(
-        "# model      = \"clef-flash\"  # local alternative, needs ollama pull clef-flash
+        "# To keep decisions local, replace the model above with \"clef-flash\" (ollama pull clef-flash).
 ",
     );
     writeln!(
@@ -952,13 +952,19 @@ pub fn render_default_magi_toml() -> String {
     .unwrap();
     writeln!(
         out,
-        "# to the main model. {} bounds the consults the threshold was calibrated on and what leaves for ollama.com. With a hosted decision",
+        "# to the main model. {} bounds the consults the threshold was calibrated on and what leaves",
         SCAFFOLD_DECISION_MAX_STATE_BYTES
     )
     .unwrap();
     writeln!(
         out,
-        "# model such as typesafe/jev-1.13, raise it or delete the line (built-in default {}).",
+        "# for ollama.com; the default {} keeps it. With another hosted provider (for example",
+        SCAFFOLD_DECISION_MODEL
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "# typesafe/jev-1.13 on OpenRouter), you may raise it or delete the line (built-in default {}).",
         DEFAULT_DECISION_MAX_STATE_BYTES
     )
     .unwrap();

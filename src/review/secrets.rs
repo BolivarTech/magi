@@ -1112,6 +1112,11 @@ const MASK_FAILED: &str = "<redacted: masking failed>";
 /// only) still sees a key that holds a secret. Complexity: O(bytes of `value`) times the cost of
 /// `holds`.
 ///
+/// It recurses once per nesting level and has no depth guard of its own. A value parsed from
+/// text by `serde_json` (`magi decide` reads its input with `serde_json::from_slice`) is at most
+/// 128 levels deep, the crate's default recursion limit, which nothing in this crate disables;
+/// the states built in process are a few levels deep.
+///
 /// # Arguments
 /// * `value` - The JSON value to scan.
 /// * `holds` - The predicate asked of each string and each key.
@@ -1150,6 +1155,9 @@ pub fn any_string(value: &serde_json::Value, holds: &dyn Fn(&str) -> bool) -> bo
 /// secret, so a key built from foreign text makes the value refused, never masked. Numbers,
 /// booleans and null are kept. Complexity: O(bytes of `value`) plus the cost of [`mask_secrets`]
 /// per string.
+///
+/// Like [`any_string`], it recurses once per nesting level without a depth guard, bounded by the
+/// 128-level default recursion limit of `serde_json` for parsed input.
 ///
 /// # Arguments
 /// * `value` - The JSON value to mask; consumed.
