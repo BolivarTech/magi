@@ -219,6 +219,29 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    /// A token with the shape of a GitHub personal access token; never a real one.
+    const SECRET_TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+
+    /// REQ-F12b: the tool's own parse errors never quote a secret the model put in a field name.
+    #[test]
+    fn tool_parse_errors_never_quote_a_secret_name() {
+        let cases = [
+            json!({"state": {"t": "x"}, SECRET_TOKEN: 1,
+                "questions": {"q": {"type": "noul", "instructions": "Is it?"}}}),
+            json!({"state": {"t": "x"},
+                "questions": {SECRET_TOKEN: {"type": "nonsense", "instructions": "Which?"}}}),
+        ];
+        for args in cases {
+            match request_from(args) {
+                Err(ToolError::InvalidArguments(msg)) => {
+                    assert!(!msg.contains(SECRET_TOKEN), "{msg}");
+                    assert!(msg.contains("secret"), "{msg}");
+                }
+                other => panic!("expected InvalidArguments, got {other:?}"),
+            }
+        }
+    }
     use tokio_util::sync::CancellationToken;
 
     struct Scripted {
