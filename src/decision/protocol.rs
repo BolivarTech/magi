@@ -82,6 +82,11 @@ const KEY_BLOCK_REFUSED: &str = "the state holds a private-key block and is neve
 /// Problem reported for a state that still holds a secret after masking; quotes nothing of it.
 const RESIDUAL_SECRET_REFUSED: &str =
     "the state still holds a secret after masking and is never sent";
+/// Problem reported for questions holding a secret or a private-key block; quotes nothing of
+/// them. Questions are never masked: a masked name or option would break the answer mapping.
+const QUESTIONS_SECRET_REFUSED: &str = "the questions hold a secret and are never sent";
+/// Problem reported when the questions cannot be serialized.
+const QUESTIONS_UNSERIALIZABLE: &str = "the questions could not be serialized";
 
 /// Builds the error every validation failure of this module returns.
 fn invalid(reason: impl Into<String>) -> DecisionError {
@@ -182,7 +187,9 @@ impl DecisionRequest {
     /// secret-shaped token in a string value; see [`masked_strings`]. It fails closed like the
     /// review gate: a state any string (value or key) of which holds a private-key block is
     /// refused before masking, since a key body matches no pattern, and a state that still holds
-    /// a secret after masking (keys are never masked) is refused too. A size limit applied to
+    /// a secret after masking (keys are never masked) is refused too. The questions travel with
+    /// the state and are never masked, so any of their strings or keys that holds a secret or a
+    /// private-key block refuses the request. A size limit applied to
     /// the state must measure [`DecisionRequest::state`], the masked state that is sent.
     ///
     /// Complexity: O(questions) plus O(size of the state) for the checks and the masking.
@@ -195,10 +202,17 @@ impl DecisionRequest {
     /// The validated request, without model or timeout override.
     ///
     /// # Errors
-    /// [`DecisionError::InvalidInput`] naming the problem; for a refused state, a fixed reason
-    /// that quotes nothing of it.
+    /// [`DecisionError::InvalidInput`] naming the problem; for refused state or questions, a fixed
+    /// reason that quotes nothing of them.
     pub fn new(state: Value, questions: Questions) -> Result<Self, DecisionError> {
         validate(&state, &questions)?;
+        let wire_questions =
+            serde_json::to_value(&questions).map_err(|_| invalid(QUESTIONS_UNSERIALIZABLE))?;
+        if any_string(&wire_questions, &|text| {
+            holds_key_block(text) || find_secret(text).is_some()
+        }) {
+            return Err(invalid(QUESTIONS_SECRET_REFUSED));
+        }
         if any_string(&state, &holds_key_block) {
             return Err(invalid(KEY_BLOCK_REFUSED));
         }
