@@ -88,7 +88,8 @@ pub const DEFAULT_DECISION_AUTO_APPROVE: bool = true;
 /// No calibrated threshold applies at this size. Without a `magi.toml` the built-in chain has no
 /// `min_confidence`, so every answer is taken; the 0.85 threshold of the scaffold was calibrated
 /// on consults of up to 54 742 bytes, well under 128 000. The value also bounds what leaves for
-/// ollama.com with the default `clef:cloud`: a consult of up to 128 000 bytes, masked, is sent.
+/// ollama.com with the default `clef:cloud`: the raw consult is checked against it before
+/// masking and the masked state after, so at most 128 000 bytes, masked, are sent.
 pub const DEFAULT_DECISION_MAX_STATE_BYTES: usize = 128_000;
 /// State limit the scaffold writes, active. It is not a limit of the daemon: a size probe of
 /// `clef:cloud` on 2026-11-26 accepted states up to 131 087 bytes without a rejection. The
