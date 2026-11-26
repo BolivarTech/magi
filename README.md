@@ -663,7 +663,7 @@ The `code-review` tool takes the same input forms. Like `consult`, it asks for a
 
 #### Configuration and key
 
-The gate lives in the optional `[code_review]` section (`model`, `min_confidence`, `[[code_review.fallback]]`, `base_url`, `timeout_secs`, `max_state_bytes`, `auto_approve`); without it the default chain applies. Every model you declare, the primary and each fallback, needs its own `min_confidence` between 0 and 1: a section that leaves one out does not load. Its key is `CODE_REVIEW_API_KEY`, from the environment or `magi-rs vault set CODE_REVIEW_API_KEY`, and without it the main key is sent only to the root endpoint's origin. Credentials in its `base_url` use `[user]`/`[password]` placeholders stored as `CODE_REVIEW_BASE_URL_USER` and `CODE_REVIEW_BASE_URL_PASSWORD`.
+The gate lives in the optional `[code_review]` section (`model`, `min_confidence`, `[[code_review.fallback]]`, `base_url`, `timeout_secs`, `max_state_bytes`, `auto_approve`); without it the default chain applies. Every model you declare, the primary and each fallback, needs its own `min_confidence` between 0 and 1: a section that leaves one out does not load. Nor does one whose model name, primary or fallback, matches a secret pattern; the message, `a [code_review] model name matches a secret pattern; rename it`, quotes nothing of the name. Its key is `CODE_REVIEW_API_KEY`, from the environment or `magi-rs vault set CODE_REVIEW_API_KEY`, and without it the main key is sent only to the root endpoint's origin. Credentials in its `base_url` use `[user]`/`[password]` placeholders stored as `CODE_REVIEW_BASE_URL_USER` and `CODE_REVIEW_BASE_URL_PASSWORD`.
 
 #### Limits to know
 
