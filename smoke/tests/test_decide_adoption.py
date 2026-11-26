@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.24.0
-# Date: 2026-10-13
+# Version: 0.25.1
+# Date: 2026-11-25
 """The adoption scenario D14: registration, verbatim texts and judging helpers."""
 
 import pathlib
@@ -12,12 +12,12 @@ _SCENARIOS = pathlib.Path(__file__).resolve().parents[1] / "scenarios"
 
 #: The assertion texts are the contract (T19's table): they must appear verbatim.
 _D14 = (
-    "the scaffold names clef-flash with its threshold active",
-    "magi decide answers the example request with clef-flash",
+    "the scaffold names clef:cloud with its threshold active",
+    "magi decide answers the example request with clef:cloud",
 )
 
 _SCAFFOLD_DECISION = (
-    '[decision]\nbase_url = "http://localhost:11434"\nmodel = "clef-flash"\n'
+    '[decision]\nbase_url = "http://localhost:11434"\nmodel = "clef:cloud"\n'
     "min_confidence = 0.75\n\n"
     '[[decision.fallback]]\nmodel = "nimble"\nmin_confidence = 0.75\n'
 )
@@ -51,7 +51,7 @@ class ScaffoldJudgingTests(unittest.TestCase):
 
     def test_another_primary_model_is_reported(self) -> None:
         from smoke.scenarios import decide
-        text = _SCAFFOLD_DECISION.replace('model = "clef-flash"', 'model = "nimble"', 1)
+        text = _SCAFFOLD_DECISION.replace('model = "clef:cloud"', 'model = "nimble"', 1)
         self.assertIn("nimble", decide.scaffold_adoption_problem(text))
 
     def test_a_commented_threshold_is_not_active(self) -> None:

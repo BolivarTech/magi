@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.25.0
-# Date: 2026-11-18
+# Version: 0.25.1
+# Date: 2026-11-25
 """Scenario registration.
 
 Adding a scenario is a decorator and a function (REQ-S33). If adding one ever
@@ -55,7 +55,7 @@ DECLARED_SCENARIO_COUNT = 58
 #: 39 -> 42 with them.
 #:
 #: 127 on 2026-10-13: the adoption scenario D14 adds 2 assertions (the scaffold
-#: names clef-flash with its threshold active; decide answers the example request
+#: names its model with its threshold active; decide answers the example request
 #: with it), v0.24.0. The scenario count goes 42 -> 43 with it.
 #:
 #: 137 on 2026-10-22: the three envelope ``system`` scenarios S44-S46 add 10

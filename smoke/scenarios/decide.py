@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.25.0
-# Date: 2026-11-18
+# Version: 0.25.1
+# Date: 2026-11-25
 """D1-D14 -- ``magi decide`` against real backends, its refusals and its agent use.
 
 ``decide`` asks a System One model for a typed decision. What the unit suite
@@ -1260,16 +1260,16 @@ def _marker_absent_finding(records, marker):
 
 
 # ---------------------------------------------------------------------------
-# D14 -- the adopted default: clef-flash in the scaffold
+# D14 -- the adopted default: clef:cloud in the scaffold
 # ---------------------------------------------------------------------------
 
 D14_ASSERTIONS = (
-    "the scaffold names clef-flash with its threshold active",
-    "magi decide answers the example request with clef-flash",
+    "the scaffold names clef:cloud with its threshold active",
+    "magi decide answers the example request with clef:cloud",
 )
 
 #: The model, threshold and fallback ``magi init`` writes into ``[decision]``.
-ADOPTED_MODEL = "clef-flash"
+ADOPTED_MODEL = "clef:cloud"
 ADOPTED_FALLBACK = "nimble"
 ADOPTED_MIN_CONFIDENCE = 0.75
 
@@ -1311,7 +1311,7 @@ def scaffold_adoption_problem(text):
 
 
 @scenario("D14", assertions=D14_ASSERTIONS, needs_backend=True)
-def the_scaffold_adopts_clef_flash(run):
+def the_scaffold_adopts_clef_cloud(run):
     """Scaffold a workspace and ask its own ``[decision]`` chain a question.
 
     The workspace keeps the text ``magi init`` wrote, so the second assertion
