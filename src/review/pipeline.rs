@@ -36,7 +36,9 @@ use super::input::{
 use super::languages::LanguageRegistry;
 use super::rag::{dedup_key, item_cost, Assembled, ContextItem, ContextKind, DedupKey};
 use super::report::{name, shown, BatchMetrics, ReviewSummary, TrimmedItem};
-use super::secrets::{display_path, find_secret, holds_key_block, mask_secrets, masked_pattern};
+use super::secrets::{
+    display_path, find_secret, holds_key_block, leaks_secret, mask_secrets, masked_pattern,
+};
 use super::source::{CachedSource, ContentSource, GitCommand, RevisionSource, WorktreeSource};
 use super::validate::validate_batch;
 use super::window::estimate_tokens;
@@ -1730,8 +1732,14 @@ const MAX_UNIT_LABEL_CHARS: usize = 80;
 /// Written after a label cut to [`MAX_UNIT_LABEL_CHARS`].
 const LABEL_CUT_MARK: &str = "...";
 
+/// Written instead of a unit label that still leaks a secret after masking (REQ-F15). It
+/// quotes nothing of the label.
+const REDACTED_UNIT_LABEL: &str = "<redacted: unit label>";
+
 /// A unit label as that message writes it: its secrets masked, then at most
 /// [`MAX_UNIT_LABEL_CHARS`] characters followed by [`LABEL_CUT_MARK`] when it was longer.
+/// A label that still leaks a secret after masking ([`leaks_secret`], for example a token
+/// split by a hidden character) is replaced whole by [`REDACTED_UNIT_LABEL`], never cut.
 ///
 /// The masking comes first so the cut cannot split a secret-shaped token into a prefix the
 /// masking would no longer recognize. The cut counts characters, never bytes, so it always
@@ -1748,6 +1756,9 @@ const LABEL_CUT_MARK: &str = "...";
 /// The bounded label.
 fn bounded_label(label: &str) -> String {
     let masked = mask_secrets(label);
+    if leaks_secret(&masked) {
+        return REDACTED_UNIT_LABEL.to_owned();
+    }
     let mut chars = masked.chars();
     let mut bounded: String = chars.by_ref().take(MAX_UNIT_LABEL_CHARS).collect();
     if chars.next().is_some() {
@@ -1763,8 +1774,9 @@ fn bounded_label(label: &str) -> String {
 /// order of `units`. Each reads `{label} of {file}{side} ({tokens} tokens)`, the file written
 /// through `display_path`; the list ends with ` and {k} more` when `k` units were left out.
 /// With no units the message is only `batch {n} with its containing units`. Each label is
-/// masked and bounded to [`MAX_UNIT_LABEL_CHARS`] characters by `bounded_label` (REQ-F15);
-/// the `Display` of `ReviewError` still sanitizes the whole `what`. Complexity O(u log u) for
+/// masked and bounded to [`MAX_UNIT_LABEL_CHARS`] characters by `bounded_label`, or replaced
+/// by [`REDACTED_UNIT_LABEL`] when it still leaks a secret (REQ-F15); the `Display` of
+/// `ReviewError` still sanitizes the whole `what`. Complexity O(u log u) for
 /// `u` units, from the ordering, plus O(bytes) of the named labels.
 ///
 /// # Arguments
