@@ -683,6 +683,38 @@ mod tests {
         without.assert_async().await;
     }
 
+    /// REQ-F12 / F-S18: the body the endpoint receives carries the mask, never a secret-shaped
+    /// token of the state.
+    #[tokio::test]
+    async fn the_body_the_endpoint_receives_never_carries_a_secret_of_the_state() {
+        const TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("POST", "/v1/systemone")
+            .match_request(|r| {
+                r.utf8_lossy_body()
+                    .map(|b| !b.contains(TOKEN) && b.contains("<redacted:"))
+                    .unwrap_or(false)
+            })
+            .with_status(200)
+            .with_body(OK_BODY)
+            .create_async()
+            .await;
+        let questions: Questions = serde_json::from_value(
+            json!({"today": {"type": "noul", "instructions": "Is it today?"}}),
+        )
+        .expect("q");
+        let req = DecisionRequest::new(
+            json!({"log": [{"line": format!("key={TOKEN}")}]}),
+            questions,
+        )
+        .expect("valid");
+        decide(settings(&server.url(), &["nimble"]), &req)
+            .await
+            .expect("answered");
+        m.assert_async().await;
+    }
+
     #[tokio::test]
     async fn keep_alive_is_sent_only_when_declared() {
         let mut server = mockito::Server::new_async().await;

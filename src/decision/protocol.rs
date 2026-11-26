@@ -926,6 +926,49 @@ mod tests {
         assert_eq!(body["keep_alive"], -1);
     }
 
+    /// A GitHub-shaped token `mask_secrets` recognizes.
+    const SECRET_TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+
+    /// REQ-F12 / F-S18: a secret-shaped token inside a string of an object inside an array never
+    /// reaches the wire body; the mask does.
+    #[test]
+    fn a_secret_nested_in_the_state_is_masked_before_it_reaches_the_wire() {
+        let questions: Questions = serde_json::from_value(noul()).expect("map");
+        let state = json!({"items": [{"note": format!("token {SECRET_TOKEN} here")}, 7]});
+        let req = DecisionRequest::new(state, questions).expect("valid");
+        let wire = req.wire_body("nimble", None).expect("body").to_string();
+        assert!(!wire.contains(SECRET_TOKEN), "{wire}");
+        assert!(wire.contains("<redacted:"), "{wire}");
+        let note = req.state()["items"][0]["note"].as_str().expect("note");
+        assert!(
+            note.starts_with("token ") && note.ends_with(" here"),
+            "{note}"
+        );
+        assert_eq!(req.state()["items"][1], 7, "numbers are untouched");
+    }
+
+    /// REQ-F12: a string state and strings directly in an array are masked too.
+    #[test]
+    fn a_secret_in_a_string_state_or_an_array_of_strings_is_masked() {
+        for state in [json!(SECRET_TOKEN), json!(["ok", SECRET_TOKEN])] {
+            let questions: Questions = serde_json::from_value(noul()).expect("map");
+            let req = DecisionRequest::new(state, questions).expect("valid");
+            let wire = req.wire_body("nimble", None).expect("body").to_string();
+            assert!(!wire.contains(SECRET_TOKEN), "{wire}");
+            assert!(wire.contains("<redacted:"), "{wire}");
+        }
+    }
+
+    /// REQ-F12: object keys are left alone (masking them could collapse two entries), and plain
+    /// strings, numbers, booleans and null travel as they are.
+    #[test]
+    fn object_keys_and_values_without_secrets_are_left_unchanged() {
+        let questions: Questions = serde_json::from_value(noul()).expect("map");
+        let state = json!({SECRET_TOKEN: "plain text", "n": 3, "b": true, "z": null});
+        let req = DecisionRequest::new(state.clone(), questions).expect("valid");
+        assert_eq!(req.state(), &state);
+    }
+
     /// Review Focus 2.
     #[test]
     fn an_empty_question_name_is_invalid_input() {

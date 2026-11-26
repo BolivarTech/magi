@@ -468,6 +468,34 @@ mod tests {
         }
     }
 
+    /// REQ-F12: the limit bounds the state that is sent, which is the masked one. Content whose
+    /// raw state is over the limit only because of secrets reaches `decide` once masked, and the
+    /// request it receives carries no secret.
+    #[test]
+    fn the_limit_is_judged_on_the_masked_state() {
+        const TOKEN: &str = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // allow-secret-scan
+        let content = format!("{TOKEN} ").repeat(30);
+        assert!(
+            serialized_state_len(&content) > LIMIT,
+            "fixture: raw is over"
+        );
+        let client = Scripted::new(chose("design"));
+        let c = classifier(
+            Some(Arc::clone(&client)),
+            Fallback::new(Some(Mode::Analysis)),
+        )
+        .with_max_state_bytes(LIMIT);
+        let verdict = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt")
+            .block_on(c.classify(&content));
+        assert_eq!(verdict, Some(Mode::Design), "the masked state fits");
+        let seen = client.seen.lock().expect("seen");
+        let sent = seen.first().expect("one request").state().to_string();
+        assert!(!sent.contains(TOKEN), "{sent}");
+    }
+
     /// The configured limit, not a built-in one, decides: one byte over a small limit goes to the
     /// LLM with a `too_large` entry, and content exactly at it reaches `decide`.
     #[test]
