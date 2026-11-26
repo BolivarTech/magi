@@ -498,6 +498,25 @@ mod tests {
         assert_eq!(llm.contradicts_calls.load(Ordering::SeqCst), 1);
     }
 
+    /// REQ-F12b (mutation-verified): a memory pair holding a private-key block is never sent;
+    /// the LLM judge answers and one run-log entry is written, holding no key bytes.
+    #[test]
+    fn a_pair_with_a_private_key_block_falls_back_without_calling_decide() {
+        let d = "-----";
+        let older = format!("{d}BEGIN RSA PRIVATE KEY{d}\nMIIEowIBAAKCAQEAbodyline\n");
+        let client = Scripted::new(vec![noul(0.9, vec![])]);
+        let llm = LlmJudge::new(true);
+        let j = judge(Some(Arc::clone(&client)), Arc::clone(&llm));
+        let lines = crate::agent::decide_classifier::fallback_lines(async move {
+            assert!(j.contradicts(&older, "new").await.expect("ok"));
+        });
+        assert_eq!(client.calls.load(Ordering::SeqCst), 0, "never sent");
+        assert_eq!(llm.contradicts_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(!lines[0].contains("bodyline"), "{lines:?}");
+        assert!(!lines[0].contains("PRIVATE KEY"), "{lines:?}");
+    }
+
     #[test]
     fn without_a_client_the_entry_names_the_endpoint_and_the_reason() {
         let llm = LlmJudge::new(true);
