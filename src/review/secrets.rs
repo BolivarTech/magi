@@ -1565,6 +1565,36 @@ pub fn outward_text(text: &str) -> String {
     escape_controls(&masked)
 }
 
+/// `text` as it may be embedded in a model prompt: the multi-line counterpart of
+/// [`outward_text`], for the classification and judge prompts that carry a consult or two
+/// memory texts to the main model.
+///
+/// Every one-line secret of every strip view is masked in place and line breaks and tabs are
+/// kept, so the delimiters and the layout of the prompt the text is embedded in do not move
+/// ([`mask_secrets_in_views`]). A text one of whose views holds a private-key block is replaced
+/// whole by [`KEY_BLOCK_WITHHELD`], and a masked text the egress predicate ([`leaks_secret`])
+/// still flags by `<redacted: masking failed>`: fail closed, never a byte of the secret.
+/// Control characters are not escaped: the text is data inside a prompt, not a terminal line.
+/// O(n · s).
+///
+/// # Arguments
+/// * `text` - An untrusted text about to be embedded in a prompt for a model.
+///
+/// # Returns
+/// The masked text (`text` itself when it holds no secret), or one of the two fixed
+/// placeholders.
+///
+/// # Examples
+///
+/// ```
+/// use magi_rs::review::secrets::outward_prompt_text;
+///
+/// assert_eq!(outward_prompt_text("line one\nline two"), "line one\nline two");
+/// ```
+pub fn outward_prompt_text(text: &str) -> String {
+    text.to_string()
+}
+
 /// `text` with the one-line secrets of every strip view masked in place
 /// (`mask_through_views`, line breaks kept), for a scrubber that strips characters afterwards:
 /// stripping first glues a token across a hidden character to whatever stood before it. O(n · s).
@@ -3480,5 +3510,31 @@ mod tests {
             serde_json::from_str(&nested_array(100)).expect("100 levels parse");
         assert!(any_string(&parsed, &|t| t == "x"));
         assert!(any_string(&masked_strings(parsed), &|t| t == "x"));
+    }
+
+    #[test]
+    fn a_prompt_text_has_its_token_masked_and_its_line_breaks_kept() {
+        let token = format!("ghp_{}", "A".repeat(36)); // allow-secret-scan
+        let text = format!("first line\n\tuse {token} here\nlast line");
+        let out = outward_prompt_text(&text);
+        assert!(!out.contains(&token), "{out:?}");
+        assert!(out.contains("<redacted:"), "{out:?}");
+        assert!(out.starts_with("first line\n\tuse "), "{out:?}");
+        assert!(out.ends_with(" here\nlast line"), "{out:?}");
+    }
+
+    #[test]
+    fn a_prompt_text_holding_a_key_block_is_withheld_whole() {
+        let d = "-----";
+        let text = format!(
+            "before\n{d}BEGIN RSA PRIVATE KEY{d}\nMIIEowIBAAKCAQEAbodyline\n{d}END RSA PRIVATE KEY{d}\nafter"
+        );
+        assert_eq!(outward_prompt_text(&text), KEY_BLOCK_WITHHELD);
+    }
+
+    #[test]
+    fn a_prompt_text_without_secrets_is_left_byte_identical() {
+        let text = "<<<A>>>\nfn f() {}\n\tlet x = 1;\r\n<<<B>>>";
+        assert_eq!(outward_prompt_text(text), text);
     }
 }

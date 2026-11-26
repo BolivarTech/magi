@@ -691,4 +691,79 @@ mod tests {
              never deduplicate like once() does"
         );
     }
+
+    /// Double of [`Provider`] that records the text of every prompt it is sent and answers a
+    /// fixed label, so a test can read what would have reached the main model.
+    #[derive(Default)]
+    struct PromptRecorder {
+        /// The concatenated text of every message sent, in order.
+        prompts: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Provider for PromptRecorder {
+        async fn stream_messages(
+            &self,
+            messages: &[Message],
+            _tools: &[Box<dyn Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            self.prompts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend(messages.iter().map(Message::concat_text));
+            let msg = Message::assistant("analysis");
+            Ok(stream::iter(vec![Ok(ResponseChunk::MessageDone(msg))]).boxed())
+        }
+    }
+
+    /// Classifies `content` and returns the one prompt the main model received.
+    async fn prompt_sent_for(content: &str) -> String {
+        let recorder = Arc::new(PromptRecorder::default());
+        let classifier = ProviderClassifier::new(
+            recorder.clone(),
+            Arc::new(RecordingNoticeSink::default()),
+            test_auditor(),
+        );
+        let _ = classifier.classify(content).await;
+        let prompts = recorder
+            .prompts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        assert_eq!(prompts.len(), 1, "one classification call: {prompts:?}");
+        prompts.into_iter().next().unwrap_or_default()
+    }
+
+    /// The fallback classification prompt carries the consult content to the main model, a
+    /// cloud one by default: a secret token in the content is masked before it is embedded.
+    /// Mutation-verified: embedding `content` raw turns this red.
+    #[tokio::test]
+    async fn a_secret_token_in_the_consult_never_reaches_the_classification_prompt() {
+        let token = format!("ghp_{}", "A".repeat(36)); // allow-secret-scan
+        let prompt = prompt_sent_for(&format!("review this\nlet t = \"{token}\";")).await;
+        assert!(!prompt.contains(&token), "{prompt:?}");
+        assert!(prompt.contains("<redacted:"), "{prompt:?}");
+        assert!(prompt.contains(CONTENT_OPEN) && prompt.contains(CONTENT_CLOSE));
+        assert!(prompt.contains("review this\nlet t = "), "{prompt:?}");
+    }
+
+    /// A consult holding a private-key block is withheld whole from the classification prompt.
+    #[tokio::test]
+    async fn a_private_key_block_in_the_consult_never_reaches_the_classification_prompt() {
+        let d = "-----";
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        let content =
+            format!("intro\n{d}BEGIN RSA PRIVATE KEY{d}\n{body}\n{d}END RSA PRIVATE KEY{d}\noutro");
+        let prompt = prompt_sent_for(&content).await;
+        assert!(!prompt.contains(body), "{prompt:?}");
+        assert!(
+            !prompt.contains("intro"),
+            "the text is withheld whole: {prompt:?}"
+        );
+        assert!(
+            prompt.contains(magi_rs::review::secrets::KEY_BLOCK_WITHHELD),
+            "{prompt:?}"
+        );
+    }
 }

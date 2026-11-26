@@ -334,4 +334,118 @@ mod tests {
             "a provider/network failure in contradicts must map to MemoryError::Llm, not Storage"
         );
     }
+
+    /// Double of `Provider` that records the text of every prompt it is sent and answers
+    /// `reply`, so a test can read what would have reached the main model.
+    struct PromptRecorder {
+        /// What it answers.
+        reply: String,
+        /// The concatenated text of every message sent, in order.
+        prompts: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl PromptRecorder {
+        /// A recorder answering `reply`.
+        fn answering(reply: &str) -> Arc<Self> {
+            Arc::new(Self {
+                reply: reply.to_string(),
+                prompts: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        /// The one prompt it received.
+        fn only_prompt(&self) -> String {
+            let prompts = self
+                .prompts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert_eq!(prompts.len(), 1, "one judge call: {prompts:?}");
+            prompts.into_iter().next().unwrap_or_default()
+        }
+    }
+
+    #[async_trait]
+    impl crate::agent::provider::Provider for PromptRecorder {
+        async fn stream_messages(
+            &self,
+            messages: &[Message],
+            _tools: &[Box<dyn crate::tools::Tool>],
+            _system: Option<&str>,
+        ) -> Result<BoxStream<'static, Result<ResponseChunk>>> {
+            self.prompts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(messages.iter().map(Message::concat_text));
+            let msg = Message::assistant(&self.reply);
+            Ok(Box::pin(stream::iter(vec![Ok(
+                ResponseChunk::MessageDone(msg),
+            )])))
+        }
+    }
+
+    /// A secret-shaped token for the judge prompts.
+    fn token() -> String {
+        format!("ghp_{}", "A".repeat(36)) // allow-secret-scan
+    }
+
+    /// A private-key block: its header, one body line and its footer.
+    fn key_block(body: &str) -> String {
+        let d = "-----";
+        format!("{d}BEGIN RSA PRIVATE KEY{d}\n{body}\n{d}END RSA PRIVATE KEY{d}")
+    }
+
+    /// The contradiction prompt carries both memory texts to the main model, a cloud one by
+    /// default: a secret token in either is masked before it is embedded.
+    /// Mutation-verified: embedding `a` and `b` raw turns this red.
+    #[tokio::test]
+    async fn a_secret_token_in_a_memory_pair_never_reaches_the_contradiction_prompt() {
+        let recorder = PromptRecorder::answering("no");
+        let judge = LlmDistillJudge::new(recorder.clone());
+        let a = format!("my key is {}", token());
+        let b = format!("the token {} rotated", token());
+        judge.contradicts(&a, &b).await.unwrap();
+        let prompt = recorder.only_prompt();
+        assert!(!prompt.contains(&token()), "{prompt:?}");
+        assert!(prompt.contains("<redacted:"), "{prompt:?}");
+        assert!(prompt.contains("\nA: my key is "), "{prompt:?}");
+        assert!(prompt.contains("\nB: the token "), "{prompt:?}");
+    }
+
+    /// A memory holding a private-key block is withheld whole from the contradiction prompt.
+    #[tokio::test]
+    async fn a_private_key_block_in_a_memory_pair_never_reaches_the_contradiction_prompt() {
+        let recorder = PromptRecorder::answering("no");
+        let judge = LlmDistillJudge::new(recorder.clone());
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        judge
+            .contradicts("plain statement", &format!("old\n{}", key_block(body)))
+            .await
+            .unwrap();
+        let prompt = recorder.only_prompt();
+        assert!(!prompt.contains(body), "{prompt:?}");
+        assert!(
+            prompt.contains(magi_rs::review::secrets::KEY_BLOCK_WITHHELD),
+            "{prompt:?}"
+        );
+        assert!(prompt.contains("A: plain statement"), "{prompt:?}");
+    }
+
+    /// The preference prompt carries episodic memory texts to the main model too: a token is
+    /// masked and a key block withheld there as well.
+    #[tokio::test]
+    async fn secrets_in_episodic_memories_never_reach_the_preference_prompt() {
+        let recorder = PromptRecorder::answering("- none");
+        let judge = LlmDistillJudge::new(recorder.clone());
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        let episodic = vec![
+            make_episodic(&format!("I use {} daily", token())),
+            make_episodic(&key_block(body)),
+        ];
+        judge.summarize_preferences(&episodic).await.unwrap();
+        let prompt = recorder.only_prompt();
+        assert!(!prompt.contains(&token()), "{prompt:?}");
+        assert!(!prompt.contains(body), "{prompt:?}");
+        assert!(prompt.contains("<redacted:"), "{prompt:?}");
+    }
 }
