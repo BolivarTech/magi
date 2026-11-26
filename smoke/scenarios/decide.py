@@ -106,6 +106,8 @@ CAUSE_INVALID_RESPONSE = "invalid_response"
 PREFIX_HINT_NEEDLE = "API prefix"
 CAUSE_TRANSPORT = "transport"
 CAUSE_TIMEOUT = "timeout"
+CAUSE_UNAUTHORIZED = "unauthorized"
+CAUSE_RATE_LIMITED = "rate_limited"
 OUTCOME_ANSWERED = "answered"
 OUTCOME_FAILED = "failed"
 OUTCOME_LOW_CONFIDENCE = "low_confidence"
@@ -1278,6 +1280,16 @@ ADOPTED_MIN_CONFIDENCE = 0.75
 BACKEND_MISSING_CAUSES = (CAUSE_MODEL_NOT_FOUND, CAUSE_NOT_FOUND,
                           CAUSE_TRANSPORT, CAUSE_TIMEOUT)
 
+#: Causes of a first hop that are the state of the account, not the product's:
+#: a daemon that never ran ``ollama signin`` answers 401, and a spent cloud
+#: quota answers 429. Each maps to the detail that names the fix.
+ACCOUNT_STATE_DETAILS = {
+    CAUSE_UNAUTHORIZED: ("the daemon refused the cloud model; run "
+                         "`ollama signin` on the Ollama host"),
+    CAUSE_RATE_LIMITED: ("the Ollama account's cloud quota is spent; wait "
+                         "for it to reset"),
+}
+
 
 def scaffold_adoption_problem(text):
     """Judge whether a ``magi.toml`` carries the adopted decision chain.
@@ -1315,8 +1327,9 @@ def the_scaffold_adopts_clef_cloud(run):
     """Scaffold a workspace and ask its own ``[decision]`` chain a question.
 
     The workspace keeps the text ``magi init`` wrote, so the second assertion
-    runs the chain a new user gets. A missing local Ollama or a model that was
-    never pulled is ``CANNOT_TEST``: it is the environment, not the product.
+    runs the chain a new user gets. A missing local Ollama, a model that was
+    never pulled, a daemon without ``ollama signin`` or a spent cloud quota is
+    ``CANNOT_TEST``: it is the environment, not the product.
 
     Args:
         run: Always ``None``.
@@ -1350,7 +1363,8 @@ def _adopted_answer_finding(attempt):
 
     Returns:
         Finding: ``CANNOT_TEST`` without a capture or when the first hop shows
-        the backend or the model is missing; otherwise PASS or FAIL.
+        the backend or the model is missing or the account is signed out or
+        out of quota; otherwise PASS or FAIL.
     """
     envelope = _envelope_of(attempt)
     if envelope is None:
@@ -1360,6 +1374,10 @@ def _adopted_answer_finding(attempt):
         return _finding(D14_ASSERTIONS, 1, None,
                         "the first hop failed with %s, so %s could not "
                         "answer here" % (cause, ADOPTED_MODEL))
+    if cause in ACCOUNT_STATE_DETAILS:
+        return _finding(D14_ASSERTIONS, 1, None,
+                        "the first hop failed with %s: %s"
+                        % (cause, ACCOUNT_STATE_DETAILS[cause]))
     if (attempt.output.exit_code == EXIT_DECIDED
             and envelope.get("model") == ADOPTED_MODEL
             and isinstance(envelope.get("answers"), dict)):

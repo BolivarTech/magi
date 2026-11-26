@@ -268,7 +268,7 @@ scenarios and 127 assertions.
 
 | Id | Invariant | Without its environment |
 |---|---|---|
-| D14 | in a workspace scaffolded by `magi init`, the parsed `[decision]` section has `model = "clef:cloud"`, an active `min_confidence = 0.75` and `nimble` as first fallback; and `magi decide` run there with the example request exits 0 with `clef:cloud` as the answering model | `CANNOT_TEST` with no reachable local Ollama (the runner's backend rule), and for the second assertion when the first hop fails because the model is missing, unreachable or timed out; never `FAIL` for those |
+| D14 | in a workspace scaffolded by `magi init`, the parsed `[decision]` section has `model = "clef:cloud"`, an active `min_confidence = 0.75` and `nimble` as first fallback; and `magi decide` run there with the example request exits 0 with `clef:cloud` as the answering model | `CANNOT_TEST` with no reachable local Ollama (the runner's backend rule), and for the second assertion when the first hop fails because the model is missing, unreachable or timed out, because the daemon is signed out (`unauthorized`, fix: `ollama signin`) or because the cloud quota is spent (`rate_limited`); never `FAIL` for those |
 
 The threshold is read from the parsed file, so a commented-out line does not count. D14 seeds
 its own scratch workspace and keeps the text `init` wrote, so it judges what a new user gets,
