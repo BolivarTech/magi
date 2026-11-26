@@ -8232,6 +8232,26 @@ mod tests {
         assert!(what.contains(" <redacted: unit label> of f.py ("), "{what}");
     }
 
+    /// REQ-F05 (mutation-verified): the file of a named unit follows the label's rule. A path
+    /// holding a token split by a hidden character is redacted whole by `display_path`, which
+    /// asks `leaks_secret`, so no half of the token reaches the error text.
+    #[test]
+    fn a_unit_path_with_a_token_split_by_a_hidden_character_never_reaches_the_message() {
+        let tail = "A".repeat(40);
+        let path = format!("dir/ghp_AAAA\u{200b}{tail}.py"); // allow-secret-scan
+        let unit = sized(&path, "process", false, 1_000);
+        let what = units_over_limit(0, std::slice::from_ref(&unit));
+        let shown = ReviewError::TooLargeForBatch {
+            what: what.clone(),
+            tokens: 2,
+            limit: 1,
+        }
+        .to_string();
+        assert!(!what.contains(&tail), "{what}");
+        assert!(!shown.contains(&tail), "{shown}");
+        assert!(what.contains(" process of <path redacted: "), "{what}");
+    }
+
     /// REQ-F15: a label of exactly 80 characters is written whole, without `...`.
     #[test]
     fn a_unit_label_of_eighty_characters_is_kept_whole() {
