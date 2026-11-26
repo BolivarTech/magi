@@ -2554,6 +2554,22 @@ mod tests {
     }
 
     #[test]
+    fn a_state_with_a_key_block_split_across_two_of_its_strings_is_never_sent() {
+        // The header in the finding's title and the body in its detail: the state is withheld.
+        // Passes before the joined check by design (the header alone opens a block); it pins that
+        // the joined check keeps it. Mutation-verified: dropping the check turns this red.
+        let c = MockDecisionClient::new();
+        let g = Gate::new(&c, chain(), 1_000_000);
+        let state = serde_json::json!({ "finding": {
+            "title": concat!("-----", "BEGIN ", "RSA PRIVATE KEY-----"),
+            "detail": "MIIEowIBAAKCAQEAbodyline",
+        } });
+        assert_eq!(g.sendable(state), Err(CAUSE_SECRET));
+        let clean = serde_json::json!({ "finding": { "title": "plain", "detail": "plain" } });
+        assert!(g.sendable(clean).is_ok());
+    }
+
+    #[test]
     fn a_state_whose_text_hides_a_token_behind_a_hidden_character_is_never_sent() {
         // REQ-F12 parity with `decide`: the residual check is the one egress predicate
         // (`leaks_secret`), so a token a zero-width space splits, which masking leaves as it is,

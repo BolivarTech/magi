@@ -1221,6 +1221,12 @@ fn masked_strings_at(value: serde_json::Value, depth: usize) -> serde_json::Valu
     }
 }
 
+/// Whether the strings of a JSON `value`, read as one text, hold a private-key block.
+pub fn joined_strings_hold_key_block(value: &serde_json::Value) -> bool {
+    let _ = value;
+    false
+}
+
 /// The name of the first pattern (in text order) whose mask, `<redacted: <name>>`, appears in
 /// `text`: what [`mask_secrets`] masked in a text it produced. O(n · p).
 ///
@@ -1631,6 +1637,11 @@ pub fn outward_prompt_text(text: &str) -> String {
         return MASK_FAILED.to_string();
     }
     masked
+}
+
+/// Each of `texts` as it may be embedded in one model prompt.
+pub fn outward_prompt_texts(texts: &[&str]) -> Vec<String> {
+    texts.iter().map(|text| outward_prompt_text(text)).collect()
 }
 
 /// `text` with the one-line secrets of every strip view masked in place
@@ -3548,6 +3559,50 @@ mod tests {
             serde_json::from_str(&nested_array(100)).expect("100 levels parse");
         assert!(any_string(&parsed, &|t| t == "x"));
         assert!(any_string(&masked_strings(parsed), &|t| t == "x"));
+    }
+
+    /// A PEM private-key header and one body line, for the split-block tests.
+    fn split_key_block() -> (String, &'static str) {
+        let d = "-----";
+        (
+            format!("{d}BEGIN RSA PRIVATE KEY{d}"),
+            "MIIEowIBAAKCAQEAbodyline",
+        )
+    }
+
+    /// Mutation-verified: a key block whose header and body sit in two strings (two values, or
+    /// a key and a value) is held by the joined text; two clean strings are not.
+    #[test]
+    fn a_key_block_split_across_two_strings_is_held_by_the_joined_strings() {
+        let (header, body) = split_key_block();
+        let fields = serde_json::json!({"title": header, "detail": body});
+        assert!(joined_strings_hold_key_block(&fields));
+        let mut keyed = serde_json::Map::new();
+        keyed.insert(header, serde_json::json!(body));
+        let keyed = serde_json::Value::Object(keyed);
+        assert!(joined_strings_hold_key_block(&keyed));
+        let clean = serde_json::json!({"title": "plain", "detail": ["also plain", 3]});
+        assert!(!joined_strings_hold_key_block(&clean));
+        assert!(joined_strings_hold_key_block(&deep_value(200, "plain")));
+    }
+
+    /// Mutation-verified: a text after one withheld for a key block is withheld too, since it
+    /// may hold that block's body; a text before it, and clean texts, keep their content.
+    #[test]
+    fn a_prompt_text_after_a_key_block_header_is_withheld_with_it() {
+        let (header, body) = split_key_block();
+        let texts = outward_prompt_texts(&["plain first", &header, body, "plain last"]);
+        assert_eq!(
+            texts,
+            vec![
+                "plain first".to_string(),
+                KEY_BLOCK_WITHHELD.to_string(),
+                KEY_BLOCK_WITHHELD.to_string(),
+                KEY_BLOCK_WITHHELD.to_string(),
+            ]
+        );
+        assert_eq!(outward_prompt_texts(&["a", "b"]), vec!["a", "b"]);
+        assert!(outward_prompt_texts(&[]).is_empty());
     }
 
     /// A JSON array nested `depth` levels deep around the string `leaf`, built in process

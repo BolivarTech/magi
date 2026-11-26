@@ -1098,6 +1098,23 @@ mod tests {
         assert_eq!(reason, KEY_BLOCK_REFUSED);
     }
 
+    /// Mutation-verified: a key block whose header and body sit in two fields of the state is
+    /// refused (the header alone already opens a block); two clean fields are accepted as they
+    /// are. Passes before the joined check by design: it pins that the joined check keeps it.
+    #[test]
+    fn a_state_with_a_key_block_split_across_two_fields_is_refused() {
+        let d = "-----";
+        let reason = new_reason(json!({
+            "title": format!("{d}BEGIN RSA PRIVATE KEY{d}"),
+            "detail": "MIIEowIBAAKCAQEAbodyline",
+        }));
+        assert_eq!(reason, KEY_BLOCK_REFUSED);
+        let questions: Questions = serde_json::from_value(noul()).expect("map");
+        let clean = json!({"title": "plain", "detail": "also plain"});
+        let req = DecisionRequest::new(clean.clone(), questions).expect("valid");
+        assert_eq!(req.state(), &clean);
+    }
+
     /// REQ-F12 (fail closed, mutation-verified): a secret masking cannot remove, here one in an
     /// object key, is refused and never echoed.
     #[test]

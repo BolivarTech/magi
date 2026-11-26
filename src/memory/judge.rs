@@ -437,6 +437,47 @@ mod tests {
         assert!(prompt.contains("A: plain statement"), "{prompt:?}");
     }
 
+    /// A key block whose header ends memory A and whose body opens memory B: the header
+    /// withholds A, and B, which may carry the body, is withheld with it.
+    /// Mutation-verified: masking each memory on its own turns this red.
+    #[tokio::test]
+    async fn a_key_block_split_across_the_memory_pair_never_reaches_the_contradiction_prompt() {
+        let recorder = PromptRecorder::answering("no");
+        let judge = LlmDistillJudge::new(recorder.clone());
+        let d = "-----";
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        judge
+            .contradicts(
+                &format!("old\n{d}BEGIN RSA PRIVATE KEY{d}"),
+                &format!("{body}\n{d}END RSA PRIVATE KEY{d}"),
+            )
+            .await
+            .unwrap();
+        let prompt = recorder.only_prompt();
+        assert!(!prompt.contains(body), "{prompt:?}");
+        let withheld = magi_rs::review::secrets::KEY_BLOCK_WITHHELD;
+        assert!(prompt.contains(&format!("\nB: {withheld}")), "{prompt:?}");
+    }
+
+    /// The same split across two episodic memories never reaches the preference prompt.
+    /// Mutation-verified: masking each memory on its own turns this red.
+    #[tokio::test]
+    async fn a_key_block_split_across_episodic_memories_never_reaches_the_preference_prompt() {
+        let recorder = PromptRecorder::answering("- none");
+        let judge = LlmDistillJudge::new(recorder.clone());
+        let d = "-----";
+        let body = "MIIEowIBAAKCAQEAbodyline";
+        let episodic = vec![
+            make_episodic("I like tabs"),
+            make_episodic(&format!("{d}BEGIN RSA PRIVATE KEY{d}")),
+            make_episodic(body),
+        ];
+        judge.summarize_preferences(&episodic).await.unwrap();
+        let prompt = recorder.only_prompt();
+        assert!(!prompt.contains(body), "{prompt:?}");
+        assert!(prompt.contains("I like tabs"), "{prompt:?}");
+    }
+
     /// The preference prompt carries episodic memory texts to the main model too: a token is
     /// masked and a key block withheld there as well.
     #[tokio::test]
