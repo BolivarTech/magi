@@ -1094,6 +1094,49 @@ mod tests {
         }
     }
 
+    /// A GitHub-shaped token split by a zero-width space: no pattern matches it as it is, so
+    /// masking leaves it, and only the egress predicate (`leaks_secret`) sees it.
+    fn split_token() -> String {
+        format!("see ghp_AAAA\u{200b}{} here", "A".repeat(40)) // allow-secret-scan
+    }
+
+    /// REQ-F12 (mutation-verified): a token split by a hidden character survives masking, so the
+    /// state is refused by the residual check.
+    #[test]
+    fn a_state_with_a_token_split_by_a_hidden_character_is_refused() {
+        let reason = new_reason(json!({"note": split_token()}));
+        assert!(!reason.contains(&"A".repeat(40)), "{reason}");
+    }
+
+    /// REQ-F12 (mutation-verified): the same split token in an instruction refuses the questions.
+    #[test]
+    fn questions_with_a_token_split_by_a_hidden_character_are_refused() {
+        let reason = questions_reason(json!({"triage": {"type": "noul",
+            "instructions": split_token()}}));
+        assert!(reason.contains("questions"), "{reason}");
+    }
+
+    /// REQ-F12: no text the review's egress predicate withholds leaves through `decide`, in a
+    /// state value or in a question; the sibling of
+    /// `secrets::tests::no_egress_predicate_is_weaker_than_leaks_secret` for this egress.
+    #[test]
+    fn no_text_of_the_withheld_corpus_is_sent_by_decide() {
+        for text in crate::review::secrets::withheld_corpus() {
+            let questions: Questions = serde_json::from_value(noul()).expect("map");
+            assert!(
+                DecisionRequest::new(json!({"note": text}), questions).is_err(),
+                "state: {text:?}"
+            );
+            let questions: Questions = serde_json::from_value(json!({"triage": {
+                "type": "noul", "instructions": text}}))
+            .expect("map");
+            assert!(
+                DecisionRequest::new(json!("plain"), questions).is_err(),
+                "question: {text:?}"
+            );
+        }
+    }
+
     /// Review Focus 2.
     #[test]
     fn an_empty_question_name_is_invalid_input() {
