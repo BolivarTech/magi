@@ -84,13 +84,16 @@ const RESIDUAL_SECRET_REFUSED: &str =
     "the state still holds a secret after masking and is never sent";
 /// Problem reported for questions holding a secret or a private-key block; quotes nothing of
 /// them. Questions are never masked: a masked name or option would break the answer mapping.
-const QUESTIONS_SECRET_REFUSED: &str = "the questions hold a secret and are never sent";
+const QUESTIONS_SECRET_REFUSED: &str =
+    "the questions hold text that matches a secret pattern and are never sent; rename or remove it";
 /// The fixed reason for an input whose top-level field name holds a secret: the `unknown field`
 /// message would quote it (REQ-F12b).
-const INPUT_FIELD_SECRET_REFUSED: &str = "an input field name holds a secret and is never sent";
+const INPUT_FIELD_SECRET_REFUSED: &str =
+    "an input field name matches a secret pattern and is never sent; rename or remove it";
 /// The fixed reason for an explicit `model` that holds a secret: it would be sent, and
 /// `ModelUnavailable` quotes it (REQ-F12b).
-const MODEL_SECRET_REFUSED: &str = "the model name holds a secret and is never sent";
+const MODEL_SECRET_REFUSED: &str =
+    "the model name matches a secret pattern and is never sent; rename or remove it";
 /// Problem reported when the questions cannot be serialized.
 const QUESTIONS_UNSERIALIZABLE: &str = "the questions could not be serialized";
 
@@ -342,6 +345,9 @@ impl DecisionRequest {
 /// # Arguments
 /// * `fields` - The top-level fields of the input object.
 ///
+/// # Returns
+/// `Ok(())` when nothing is flagged.
+///
 /// # Errors
 /// [`DecisionError::InvalidInput`] with a fixed reason that quotes nothing.
 pub fn screen_field_names(fields: &serde_json::Map<String, Value>) -> Result<(), DecisionError> {
@@ -357,6 +363,9 @@ pub fn screen_field_names(fields: &serde_json::Map<String, Value>) -> Result<(),
 ///
 /// # Arguments
 /// * `questions` - The unparsed `questions` value.
+///
+/// # Returns
+/// `Ok(())` when nothing is flagged.
 ///
 /// # Errors
 /// [`DecisionError::InvalidInput`] with a fixed reason that quotes nothing.
@@ -1157,7 +1166,7 @@ mod tests {
         assert!(!err.to_string().contains(SECRET_TOKEN), "{err}");
         assert!(
             matches!(&err, DecisionError::InvalidInput { reason }
-                if reason.starts_with("the model name holds")),
+                if reason == MODEL_SECRET_REFUSED),
             "{err:?}"
         );
     }
