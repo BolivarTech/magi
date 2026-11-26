@@ -1036,6 +1036,52 @@ mod tests {
         assert!(reason.contains("secret"), "{reason}");
     }
 
+    /// The reason of an `InvalidInput` from [`DecisionRequest::new`] for a plain state and the
+    /// questions `questions`.
+    fn questions_reason(questions: serde_json::Value) -> String {
+        let questions: Questions = serde_json::from_value(questions).expect("map");
+        match DecisionRequest::new(json!({"ticket": "plain"}), questions) {
+            Err(DecisionError::InvalidInput { reason }) => reason,
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// REQ-F12 (fail closed, mutation-verified): the questions travel with the state but are
+    /// never masked (a masked name would break the answer mapping), so a secret in an
+    /// instruction refuses the request and is never echoed.
+    #[test]
+    fn questions_with_a_secret_in_an_instruction_are_refused_without_quoting_it() {
+        let reason = questions_reason(json!({"triage": {"type": "noul",
+            "instructions": format!("Is {SECRET_TOKEN} urgent?")}}));
+        assert!(!reason.contains(SECRET_TOKEN), "{reason}");
+        assert!(reason.contains("questions"), "{reason}");
+    }
+
+    /// REQ-F12: a private-key block in a criteria value refuses the request too.
+    #[test]
+    fn questions_with_a_private_key_block_in_a_criteria_value_are_refused() {
+        let reason = questions_reason(json!({"kind": {"type": "choice",
+            "instructions": "Which kind?",
+            "criteria": {"bug": key_block(), "feature": "New"}}}));
+        assert!(!reason.contains("bodyline"), "{reason}");
+        assert!(reason.contains("questions"), "{reason}");
+    }
+
+    /// REQ-F12: the measured internal questions (the fixture the adapters ship) pass the check.
+    #[test]
+    fn the_internal_questions_of_the_fixture_are_accepted() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/decide/internal-questions.json"
+        ))
+        .expect("fixture");
+        for name in ["mode", "contradicts"] {
+            let questions: Questions =
+                serde_json::from_value(fixture[name]["questions"].clone()).expect("map");
+            let state = fixture[name]["state"].clone();
+            assert!(DecisionRequest::new(state, questions).is_ok(), "{name}");
+        }
+    }
+
     /// Review Focus 2.
     #[test]
     fn an_empty_question_name_is_invalid_input() {
