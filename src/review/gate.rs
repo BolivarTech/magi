@@ -1291,6 +1291,25 @@ mod tests {
         })
     }
 
+    /// REQ-F13b: a later entry with the refused model's own name is not a later eligible model,
+    /// so a chain that repeats a `:cloud` model stops on its 401 instead of walking on. Config
+    /// validation already refuses duplicate models; this keeps the gate correct without it.
+    #[tokio::test]
+    async fn a_repeated_cloud_model_is_not_a_later_eligible_model() {
+        let mut c = MockDecisionClient::new();
+        c.expect_decide().times(1).returning(|_| unauthorized());
+        let mut g = Gate::new(&c, specs(&["x:cloud", "x:cloud"]), 61_000);
+        let v = g
+            .judge(
+                &finding(Severity::Warning, Some(1)),
+                Some("x\nx\nx\n"),
+                None,
+            )
+            .await;
+        assert_eq!(v.cause, Some("unauthorized"));
+        assert_eq!(g.stopped(), Some("unauthorized"));
+    }
+
     /// REQ-F13b (mutation-verified): the walk goes on past a refused `:cloud` model only when a
     /// later model is still eligible. Here the chain has a later entry, `y`, but a 400 earlier in
     /// the review took it out, so the 401 on `x:cloud` stops the gate.
