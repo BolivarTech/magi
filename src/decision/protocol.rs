@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::decision::config::KeepAlive;
 use crate::decision::error::{DecisionError, Usage};
 use crate::review::secrets::{
-    any_string, joined_strings_hold_key_block, leaks_secret, masked_strings,
+    any_string, joined_strings_hold_key_block, leaks_secret, masked_strings, MAX_SCAN_DEPTH,
 };
 
 /// Questions of a request, keyed by name; the map order is the wire order.
@@ -105,6 +105,19 @@ const WIRE_MODEL_SECRET_REFUSED: &str =
 /// The fixed reason for a `keep_alive` text that holds a secret: it would be sent verbatim.
 const KEEP_ALIVE_SECRET_REFUSED: &str =
     "the keep_alive value matches a secret pattern and is never sent";
+
+/// Whether `value` is nested deeper than [`MAX_SCAN_DEPTH`] containers: [`any_string`] answers
+/// `true` past that bound whatever its predicate says, so asking it a predicate that is never
+/// true answers exactly that. O(bytes of `value`), walking at most [`MAX_SCAN_DEPTH`] levels.
+fn nested_past_scan_depth(value: &Value) -> bool {
+    any_string(value, &|_| false)
+}
+
+/// The fixed reason for a state nested past [`MAX_SCAN_DEPTH`]: it was not read to its end, so
+/// nothing in it was found to be a secret, and no secret-pattern reason applies.
+fn state_too_deep_reason() -> String {
+    format!("the state is nested deeper than {MAX_SCAN_DEPTH} levels and is never sent")
+}
 
 /// Builds the error every validation failure of this module returns.
 fn invalid(reason: impl Into<String>) -> DecisionError {
@@ -207,7 +220,7 @@ impl DecisionRequest {
     /// review gate: a state whose strings (values and keys, read joined by
     /// [`joined_strings_hold_key_block`], so a header and its body in two fields count) hold a
     /// private-key block is refused before masking, since a key body matches no pattern, and a
-    /// state nested past the depth bound is refused the same way. A state that still holds
+    /// state nested past the depth bound is refused before that, with its own reason. A state that still holds
     /// a secret after masking (keys are never masked) is refused as well. The questions travel with
     /// the state and are never masked, so any of their strings or keys that holds a secret or a
     /// private-key block refuses the request. Both residual checks ask [`leaks_secret`], the
@@ -233,6 +246,9 @@ impl DecisionRequest {
             serde_json::to_value(&questions).map_err(|_| invalid(QUESTIONS_UNSERIALIZABLE))?;
         if any_string(&wire_questions, &leaks_secret) {
             return Err(invalid(QUESTIONS_SECRET_REFUSED));
+        }
+        if nested_past_scan_depth(&state) {
+            return Err(invalid(state_too_deep_reason()));
         }
         if joined_strings_hold_key_block(&state) {
             return Err(invalid(KEY_BLOCK_REFUSED));
