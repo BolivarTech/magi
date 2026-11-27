@@ -4,7 +4,7 @@
 [![CI](https://github.com/BolivarTech/magi/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/BolivarTech/magi/actions/workflows/ci.yml)
 [![Lints](https://img.shields.io/badge/lints-clippy%20clean-blue.svg)](https://github.com/rust-lang/rust-clippy)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![crates.io](https://img.shields.io/crates/v/magi-rs.svg?label=version)](https://crates.io/crates/magi-rs)
+[![crates.io](https://badgen.net/crates/v/magi-rs?label=version)](https://crates.io/crates/magi-rs)
 
 **Magi Agent** (`magi-rs`) is a terminal AI assistant in Rust, modeled on Claude Code. It drives an LLM provider through a multi-turn **tool loop** with sandboxed filesystem and shell access, and persists every conversation to a **locally-encrypted SQLite store**. Nothing leaves your machine except the model API calls you explicitly authorize.
 
