@@ -28,7 +28,6 @@ patch_graphify_hooks.py
 
 # Local development tooling (per-developer, never published)
 /scripts/
-/run-tests.py
 __pycache__/
 *.pyc
 

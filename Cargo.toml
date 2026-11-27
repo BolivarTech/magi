@@ -15,7 +15,7 @@ readme = "README.md"
 keywords = ["terminal", "ai", "assistant", "tui", "llm"]
 categories = ["command-line-utilities"]
 exclude = ["docs/AUDIT_*.md", "key.txt*", ".claude/", ".remember/", "target/",
-           "smoke/", "docs/test/", "scripts/", "run-tests.py"]
+           "smoke/", "docs/test/", "scripts/"]
 
 [dependencies]
 # Async runtime
