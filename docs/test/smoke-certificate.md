@@ -1,15 +1,15 @@
 # Smoke Certificate
 
-- version: 0.25.0
-- commit: 8ad1a8ec
-- date: 2026-11-18 (UTC)
+- version: 0.26.0
+- commit: 7e242143
+- date: 2026-11-27 (UTC)
 - profile: product defaults (no --profile)
-- binary: sha256 7096129e2b97395a361a69a56e0678d1adb1b4cc0a37bb1485b3428881ba14be (rebuilt from the commit above)
-- real cost: 22 backend run(s) in 2899s
-- rounds needed: 1
+- binary: sha256 3d8be0011ef5d8cbcb0a6b2a85ff79e12f16a2e0a2f37036caf0f65d7939282f (rebuilt from the commit above)
+- real cost: 22 backend run(s) in 2439s
+- rounds needed: 2
 - scope: 58 of 58 scenarios evaluated
 - contract coverage: StructuredVerdicts v0.14.3 (6/6 REQ-EA); Vault v0.9.0, Headless v0.10.0, MagiCore MS1-MS3, OperationBudget -- partial
-- environment: active memories not measured, 524 KB database, 539 KB archived
+- environment: active memories not measured, 2994 KB database, 1396 KB archived
 - result: 174 passed, 0 not passed, 174 total
 
 [PASS] D1 - decide answers one question of each type against local Ollama with exit 0
@@ -45,8 +45,8 @@
 [PASS] D13 - the decide call in tool_calls stores the state as <omitted>
 [PASS] D13 - the decide call in tool_calls keeps its questions and its result
 [PASS] D13 - the state marker reaches neither the decide record nor the decide log lines
-[PASS] D14 - the scaffold names clef-flash with its threshold active
-[PASS] D14 - magi decide answers the example request with clef-flash
+[PASS] D14 - the scaffold names clef:cloud with its threshold active
+[PASS] D14 - magi decide answers the example request with clef:cloud
 [PASS] K1 - the run log has exactly one entry naming MAGI_API_KEY and http://127.0.0.1:11434
 [PASS] K1 - the screen shows nothing about the retained key
 [PASS] K2 - a sk-ant- MAGI_API_KEY under openai-compat warns naming MAGI_API_KEY and [magi].kind, without the value
