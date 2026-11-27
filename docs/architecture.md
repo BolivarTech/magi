@@ -109,8 +109,21 @@ src/
     mod.rs             -- ratatui app (Normal / Selection / Visual)
 docs/
   OVERVIEW.md          -- what Magi is, magi-core foundation, multi-perspective philosophy
+  usage.md             -- the TUI: modes, tool approval, slash commands, tools, consult, mode routing
+  headless.md          -- init / query / consult: JSON output, authorization tiers, exit codes
+  decide.md            -- magi-rs decide in full: providers, limits, keys, thresholds, output
+  code-review.md       -- magi-rs code-review: inputs, batches, context, the gate, the report
+  configuration.md     -- key and model discovery, the vault and passphrase, magi.toml
+  keys.md              -- which API key each magi.toml section uses
+  logging.md           -- the daily log, what reaches the screen, finding one run
   TIERED-MEMORY.md     -- tiered agnostic memory: full technical reference
   E2E-TESTING.md       -- hands-on testing guide (running application)
+  REASONING-BUDGET.md  -- the trio's reasoning controls and output cap
+  OPENROUTER-BACKEND.md -- a verified OpenRouter configuration and its traps
+  architecture.md      -- this file: agent loop, security model, project structure
+  testing.md           -- running the tests and the smoke harness
   magi.toml.example    -- annotated reference config (committed; magi.toml itself is gitignored)
+  magi.toml.openrouter.example -- a ready-to-copy magi.toml for OpenRouter
+  test/smoke-certificate.md    -- the smoke certificate of the current release
 Cargo.toml             -- edition 2021, MIT OR Apache-2.0
 ```
