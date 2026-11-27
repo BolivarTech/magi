@@ -330,7 +330,7 @@ jobs:
           Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip"
           Write-Host "Packaged $stage.7z and $stage.zip"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-${{ matrix.name }}
           path: |
@@ -375,7 +375,7 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf "$STAGE.tar.gz" "$STAGE"
           7zz a -mx=9 "$STAGE.7z" "$STAGE"
           echo "Packaged $STAGE.tar.gz and $STAGE.7z"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: dist-macos-universal2
           path: |
@@ -421,7 +421,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Download all build artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           pattern: dist-*
           merge-multiple: true
@@ -466,7 +466,7 @@ jobs:
       # current SHA and cut the release in one step — so the tag comes into
       # existence only here, after everything above has succeeded.
       - name: Create tag and GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.gate.outputs.tag }}
           name: ${{ needs.gate.outputs.tag }}
