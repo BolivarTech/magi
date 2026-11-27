@@ -1,6 +1,6 @@
 // Author: Julian Bolivar
-// Version: 0.25.0
-// Date: 2026-11-18
+// Version: 0.26.0
+// Date: 2026-11-26
 
 //! This module provides a persistent memory system based on SQLite with encryption.
 
@@ -2721,10 +2721,10 @@ mod tests {
         // keeps the schema.
         // MAGI FIX (MS3 §6 loop12): one statement per line in the README (a copy-paste hazard on one).
         const PURGE: &str = "DELETE FROM code_review_docs;\nDELETE FROM code_review_doc_sources;\nDELETE FROM code_review_history;";
-        let readme = include_str!("../../README.md").replace('\r', "");
+        let readme = include_str!("../../docs/TIERED-MEMORY.md").replace('\r', "");
         assert!(
             readme.contains(PURGE),
-            "the README documents exactly the purge this test runs"
+            "docs/TIERED-MEMORY.md documents exactly the purge this test runs"
         );
         let (db, tmp) = fresh_db();
         {

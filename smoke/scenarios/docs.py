@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.23.0
-# Date: 2026-10-11
+# Version: 0.26.0
+# Date: 2026-11-26
 """S13 -- the documentation that ships is still true about the binary that ships.
 
 The documents in the published package are the ones a user reads before they
@@ -80,7 +80,8 @@ DECISION_TABLE = "decision"
 #: here, so what is checked is that the documents name every form and that the
 #: product's sources still define the command and the tool: "exists", never
 #: "behaves" (the D scenarios cover the behaviour).
-DECIDE_DOC_FILES = (pathlib.Path("README.md"), pathlib.Path("docs") / "decide.md")
+DECIDE_DOC_FILES = (pathlib.Path("README.md"), pathlib.Path("docs") / "usage.md",
+                     pathlib.Path("docs") / "decide.md")
 DECIDE_FORMS = (
     re.compile(r"/decide \{"),
     re.compile(r"/decide -i \S+"),

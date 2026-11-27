@@ -1,6 +1,6 @@
 # Author: Julian Bolivar
-# Version: 0.25.0
-# Date: 2026-11-18
+# Version: 0.26.0
+# Date: 2026-11-26
 """The code-review scenarios' copies of the product's numbers and wording.
 
 The harness reads no Rust at run time, so S47-S51 carry their own copies of
@@ -1729,7 +1729,7 @@ class SecretPrefixDocTests(unittest.TestCase):
     # MAGI FIX (S6 loop 5): the README's pattern list could drift past
     # src/review/secrets.rs and promise a protection that is not there (F2-b1).
     def test_every_prefix_the_readme_names_is_a_detector_prefix(self) -> None:
-        readme = _source("README.md")
+        readme = _source("docs/code-review.md")  # the code review guide moved out of the README
         sentence = re.search(r"The patterns are named prefixes and shapes[.:](.*?)Not covered, by design", readme, re.S)
         self.assertIsNotNone(sentence, "the README's secret pattern list was not found")
         # [MAGI §6 MS2 loop 28, F1b2a-melchior] the filter took only lowercase segments after a separator, so
@@ -2091,7 +2091,7 @@ class ReviewMaskingSyncTests(unittest.TestCase):
     def test_the_readme_context_and_history_numbers_are_the_products_constants(self) -> None:
         # MAGI FIX (MS3 §6 loop12, R7b Melchior): the Context and History paragraphs publish these
         # numbers; a constant that moved left the documentation wrong with every test green.
-        readme = _source("README.md")
+        readme = _source("docs/code-review.md")  # the code review guide moved out of the README
         # (constant, file, the number as the README writes it)
         pinned = (
             ("MAX_CALLERS_PER_NAME", "src/review/rag.rs", "at most 10 per name", 10),
@@ -2119,7 +2119,7 @@ class ReviewMaskingSyncTests(unittest.TestCase):
         # MAGI FIX (MS3 §6 loop14, R7b2): the published name list is the product's, verbatim.
         secrets_rs = without_comments(_source("src/review/secrets.rs"))
         product = set(re.findall(r'^\s+name: "([a-z0-9-]+)",', secrets_rs, re.MULTILINE))
-        readme = _source("README.md")
+        readme = _source("docs/code-review.md")  # the code review guide moved out of the README
         marker = "The pattern names that appear in `masked` and inside `<redacted: …>` are exactly these: "
         self.assertEqual(1, readme.count(marker))
         tail = readme.split(marker, 1)[1].split("; a mask that could not be built", 1)[0]
@@ -2158,7 +2158,7 @@ class ReviewMaskingSyncTests(unittest.TestCase):
     def test_the_readme_purge_tables_are_the_schemas_review_tables(self) -> None:
         schema = without_comments(_source("src/system/database.rs"))
         created = set(re.findall(r"CREATE TABLE IF NOT EXISTS (code_review_\w+)", schema))
-        readme = _source("README.md")
+        readme = _source("docs/TIERED-MEMORY.md")  # the purge moved out of the README
         purged = set(re.findall(r"DELETE FROM (code_review_\w+);", readme))
         self.assertEqual(3, len(created), created)
         self.assertEqual(created, purged)

@@ -259,3 +259,78 @@ The detector has limits. It looks for one-line secrets in each string on its own
 ## Costs
 
 Ollama is free. OpenRouter charges for input tokens only, at roughly 0.00000002 to 0.00000005 USD per token for the models listed above, and output is free; `usage.cost` in the output reports what it charged.
+
+## Command-line reference (from the README)
+
+With `clef:cloud`, 95 % of requests took about 1 second in the maintainer's calibration; with the local `clef-flash`, about 3 seconds once the model was loaded (measured on an RTX 5060 Ti with 16 GB; other hardware will differ). It does not use your main model and works without one.
+
+```bash
+cat request.json | magi-rs decide                              # request on stdin, result on stdout
+magi-rs decide -i request.json -o result.json                  # files instead
+magi-rs decide -i state.json -q questions.json                 # reuse one set of questions
+cat state.json | magi-rs decide --no-memory -q questions.json  # no vault, no passphrase
+```
+
+| Flag | Meaning |
+|---|---|
+| `-i`, `--input FILE` | Read the request from a file instead of standard input |
+| `-o`, `--output FILE` | Write the result to a file (atomically) instead of standard output |
+| `-q`, `--questions FILE` | A file holding only the question map; the input then carries only `state` and, optionally, `model` |
+| `-w`, `--workdir DIR` | Where to look for `.magi/`, as for the other subcommands |
+| `--no-memory` | Do not open the encrypted database; keys come from the environment only |
+| `--timeout SECONDS` | Wait this long for each model, instead of `[decision].timeout_secs` |
+
+The input is always JSON.
+
+The second names a model, so only that model is tried:
+
+```json
+{"model": "tev1",
+ "state": "Summarize why SQLite WAL mode improves concurrent reads.",
+ "questions": {"mode": {"type": "choice", "instructions": "Which review lens fits this request?",
+   "criteria": {"code-review": "Find defects in concrete source code or a diff",
+                "design": "Evaluate an architecture, API or design proposal",
+                "analysis": "A general question or analysis that is neither"}}}}
+```
+
+The third is a `-q` file: only the question map.
+
+```json
+{"next_action": {"type": "choice",
+   "instructions": "Which action should the robot take next to reach the goal safely?",
+   "criteria": {"forward": "Move forward", "turn_left": "Turn left in place",
+                "turn_right": "Turn right in place", "stop": "Stop and hold position",
+                "ask_operator": "Stop and request operator help"}},
+ "obstacle_ahead": {"type": "noul", "instructions": "Is there an obstacle within the robot's forward path?",
+   "criteria": {"true": "An object is closer than the safety distance", "false": "The path is clear"}}}
+```
+
+The fourth is the input that goes with it, and carries only the state:
+
+```json
+{"state": {"goal": {"x": 4.0, "y": 1.5}, "pose": {"x": 2.1, "y": 1.4, "heading_deg": 3},
+           "front_distance_m": 0.35, "safety_distance_m": 0.5, "battery_pct": 81}}
+```
+
+The result is one JSON object:
+
+```json
+{"schema_version": 1, "run_id": "18832-4f0a9c2e1b7d3a55", "model": "nimble",
+ "endpoint": "http://localhost:11434",
+ "answers": {
+   "team": {"type": "choice", "choice": "billing",
+            "probabilities": {"billing": 0.990, "technical": 0.001, "other": 0.009},
+            "confidence": 0.986, "provider_confidence": 0.948},
+   "refund": {"type": "noul", "noul": 0.824, "confidence": 0.648},
+   "urgency": {"type": "score", "score": 1.011,
+               "legend": {"0": "Routine", "1": "Soon", "2": "Urgent"},
+               "probabilities": {"0": 0.361, "1": 0.268, "2": 0.372},
+               "confidence": 0.058, "provider_confidence": 0.009}},
+ "chain": [{"model": "nimble", "outcome": "answered"}],
+ "usage": {"input_tokens": 526, "output_tokens": 3, "cost": null},
+ "timings": {"total_ms": 412}}
+```
+
+| Field | Meaning |
+|---|---|
+| `chain` | Each attempt in order: `outcome` is `answered`, `failed` (with `cause`, sometimes `detail`, and the numeric HTTP `status` when the provider answered with an error: it tells a 400 that moved the chain on from a 413 or 422 that ended it, both of which have the cause `rejected`; there is no `status` after a timeout, a transport failure or a response that did not validate) or `low_confidence` (with its `confidence`, the `min_confidence` it missed and the rejected `answers`) |

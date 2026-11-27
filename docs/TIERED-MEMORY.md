@@ -388,3 +388,42 @@ tables are unaffected: conversation history and project knowledge are preserved.
 See [`docs/E2E-TESTING.md`](E2E-TESTING.md) for a step-by-step walkthrough of
 cross-session recall, preference persistence, and rollback verification against a
 running Ollama backend.
+
+---
+
+## Code-review documentation index and finding history
+
+To purge what `code-review` keeps (the documentation index and the finding history), run
+this in the same database:
+
+```sql
+DELETE FROM code_review_docs;
+DELETE FROM code_review_doc_sources;
+DELETE FROM code_review_history;
+```
+
+Use `DELETE FROM`, never `DROP TABLE`, for these three: a database missing one of them is
+taken for one written by magi-rs 0.24.x or earlier and refuses to open. The documentation
+index is rebuilt on the next review. If you already dropped one, the next open names the
+missing table and does not touch the file; recover by restoring your backup of the database
+(a dropped table cannot be recreated in place without the same migration this version
+deliberately does not ship) or by deleting `.magi-rs-memory.db*` and loading your vault secrets
+again (`magi-rs vault set`).
+
+The documentation index stores no path, content key or chunk hash in the clear: each lookup
+key is an HMAC-SHA-256 tag under a subkey derived from the database's data key, and the path
+is kept encrypted next to the chunk. Only the embedding model and its dimension, and whether a
+source came from the working tree, are visible to someone who reads the file without the
+passphrase. A review refused for its `--timeout` is refused before the index is opened and
+before any embedder call.
+
+The finding history is never pruned on its own; this purge is the way to empty it. The
+documentation index is cleaned after each review (see "History" under the code review), except
+in a repository with more than 64 local branches and tags, where that clean-up is skipped and
+the index keeps every version it ever indexed until you purge it.
+
+Two more properties of the documentation index. Reviewing a revision that no branch or tag
+points at (an old commit, a detached head) embeds that revision's documentation once, and the
+clean-up drops it afterwards, so reviewing it again embeds it again: a cost in time, never in
+correctness. And a path shaped like a secret is left out of the index instead of being stored
+(the paths, hashes and chunk text of everything else are covered by the paragraph above).
